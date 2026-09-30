@@ -18,6 +18,9 @@ mkdir -p "$STAGE/sce_sys"
 cp "$EBOOT" "$STAGE/eboot.bin"
 cp "$HERE/../sce_sys/icon0.png" "$STAGE/sce_sys/"
 cp -r "$SRC/Data/Sys" "$STAGE/Sys"
+# PkgTool's pkg_build crashes ("Sequence contains no elements") on these two folders. Themes are
+# Qt GUI icons (unused here); Load holds optional graphics mods.
+rm -rf "$STAGE/Sys/Themes" "$STAGE/Sys/Load"
 PKG="$("$HERE/make-pkg.sh" "$STAGE" DLPH00010 "Dolphin" "$VERSION" DOLPHIN "$PS4_BUILD_ROOT/out" | tail -1)"
 ls -la "$PKG"
 if [ "${1:-}" = upload ]; then

@@ -356,6 +356,18 @@ static __inline void cpuid_count(unsigned int ax, unsigned int cx, unsigned int 
 #endif
 EOF
 
+# sys/ioctl.h: FreeBSD socket ioctls (OpenOrbis only has LINUX_FIONBIO).
+cat > "$OVERLAY/sys/ioctl.h" <<'EOF'
+/* DolphinPS4: FreeBSD additions on top of the OpenOrbis header. */
+#include_next <sys/ioctl.h>
+#ifndef FIONBIO
+#define FIONBIO 0x8004667e  /* _IOW('f', 126, int) */
+#endif
+#ifndef FIONREAD
+#define FIONREAD 0x4004667f /* _IOR('f', 127, int) */
+#endif
+EOF
+
 # sys/socket.h: OpenOrbis already uses FreeBSD socket values; add the missing FreeBSD option.
 cat > "$OVERLAY/sys/socket.h" <<'EOF'
 /* DolphinPS4: FreeBSD additions on top of the OpenOrbis header. */

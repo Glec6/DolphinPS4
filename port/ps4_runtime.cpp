@@ -9,6 +9,7 @@
 //   libc lacks (and create-fself refuses unresolved imports).
 
 #include <pthread.h>
+#include <stdarg.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -44,11 +45,13 @@ void* g_heap = nullptr;
 const char* g_heapPool = "none";
 size_t g_heapSize = 0;
 
-// sceKernelDebugOutText doesn't format its arguments; snprintf doesn't allocate.
-template <typename... Args>
-void heapLog(const char* fmt, Args... args) {
+// sceKernelDebugOutText doesn't format its arguments; vsnprintf doesn't allocate.
+__attribute__((format(printf, 1, 2))) void heapLog(const char* fmt, ...) {
     char line[256];
-    snprintf(line, sizeof(line), fmt, args...);
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(line, sizeof(line), fmt, args);
+    va_end(args);
     sceKernelDebugOutText(0, line);
 }
 

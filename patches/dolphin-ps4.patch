@@ -22,6 +22,19 @@ index 5ea7f8e..874f376 100644
    dolphin_find_optional_system_library(HIDAPI Externals/hidapi)
  endif()
  
+diff --git a/Externals/zstd/CMakeLists.txt b/Externals/zstd/CMakeLists.txt
+index d83ce4c..07b3a67 100644
+--- a/Externals/zstd/CMakeLists.txt
++++ b/Externals/zstd/CMakeLists.txt
+@@ -7,4 +7,8 @@ set(ZSTD_BUILD_SHARED OFF)
+ add_subdirectory(zstd EXCLUDE_FROM_ALL)
+ 
+ dolphin_disable_warnings(libzstd_static)
++if(PS4)
++  # zstd's tracing hooks are undefined weak symbols, which create-fself can't import.
++  target_compile_definitions(libzstd_static PRIVATE ZSTD_TRACE=0)
++endif()
+ add_library(zstd::zstd ALIAS libzstd_static)
 diff --git a/Source/Core/AudioCommon/AudioCommon.cpp b/Source/Core/AudioCommon/AudioCommon.cpp
 index 73e1094..347e13a 100644
 --- a/Source/Core/AudioCommon/AudioCommon.cpp
@@ -904,6 +917,19 @@ index 9d15477..ac60cc5 100644
  };
  
  struct WindowSystemInfo
+diff --git a/Source/Core/Core/CMakeLists.txt b/Source/Core/Core/CMakeLists.txt
+index 56c8dba..0ddb2f9 100644
+--- a/Source/Core/Core/CMakeLists.txt
++++ b/Source/Core/Core/CMakeLists.txt
+@@ -784,7 +784,7 @@ elseif(APPLE)
+     HW/EXI/BBA/TAP_Apple.cpp
+   )
+   target_link_libraries(core PUBLIC ${IOB_LIBRARY})
+-elseif(UNIX)
++elseif(UNIX OR PS4)  # PS4: PacBrew's toolchain uses CMAKE_SYSTEM_NAME Generic, so UNIX is false
+   target_sources(core PRIVATE
+     HW/EXI/BBA/TAP_Unix.cpp
+   )
 diff --git a/Source/Core/Core/Config/MainSettings.h b/Source/Core/Core/Config/MainSettings.h
 index 16cae73..0e59ae9 100644
 --- a/Source/Core/Core/Config/MainSettings.h
@@ -1000,7 +1026,7 @@ index a7919fb..add0b3a 100644
  #endif
  }
 diff --git a/Source/Core/DolphinNoGUI/CMakeLists.txt b/Source/Core/DolphinNoGUI/CMakeLists.txt
-index 51c3fff..57068d2 100644
+index 51c3fff..0b31728 100644
 --- a/Source/Core/DolphinNoGUI/CMakeLists.txt
 +++ b/Source/Core/DolphinNoGUI/CMakeLists.txt
 @@ -23,6 +23,14 @@ if(${CMAKE_SYSTEM_NAME} STREQUAL "Linux")
@@ -1012,7 +1038,7 @@ index 51c3fff..57068d2 100644
 +  # into the top-level project (CMAKE_PROJECT_dolphin-emu_INCLUDE).
 +  target_sources(dolphin-nogui PRIVATE PlatformPS4.cpp ${PS4_RUNTIME_SOURCES})
 +  target_link_libraries(dolphin-nogui PRIVATE
-+    SceSysmodule SceSystemService SceUserService SceVideoOut SceAudioOut ScePad)
++    SceSysmodule SceSystemService SceUserService SceVideoOut SceAudioOut ScePad SceNet)
 +endif()
 +
  if (WIN32)
@@ -1027,7 +1053,7 @@ index 51c3fff..57068d2 100644
 +  ps4_add_eboot(dolphin-nogui)
 +endif()
 diff --git a/Source/Core/DolphinNoGUI/MainNoGUI.cpp b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
-index 3bf40ea..7ed5db4 100644
+index 3bf40ea..1a69eac 100644
 --- a/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 +++ b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 @@ -15,6 +15,7 @@
@@ -1088,7 +1114,7 @@ index 3bf40ea..7ed5db4 100644
 +  {
 +    auto* log_manager = Common::Log::LogManager::GetInstance();
 +    log_manager->EnableListener(Common::Log::LogListener::CONSOLE_LISTENER, true);
-+    log_manager->SetLogLevel(Common::Log::LogLevel::LINFO);
++    log_manager->SetConfigLogLevel(Common::Log::LogLevel::LINFO);
 +    for (int i = 0; i < static_cast<int>(Common::Log::LogType::NUMBER_OF_LOGS); i++)
 +      log_manager->SetEnable(static_cast<Common::Log::LogType>(i), true);
 +  }
@@ -1123,10 +1149,10 @@ index f4dc8a9..e2f367a 100644
  
 diff --git a/Source/Core/DolphinNoGUI/PlatformPS4.cpp b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
 new file mode 100644
-index 0000000..258e70f
+index 0000000..7433004
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
-@@ -0,0 +1,270 @@
+@@ -0,0 +1,268 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -1159,7 +1185,7 @@ index 0000000..258e70f
 +
 +namespace
 +{
-+constexpr char DATA_DIR[] = "/data/DolphinPS4";
++constexpr char PS4_DATA_DIR_PATH[] = "/data/DolphinPS4";
 +
 +class PlatformPS4 final : public Platform
 +{
@@ -1229,15 +1255,13 @@ index 0000000..258e70f
 +  wsi.display_connection = nullptr;
 +  wsi.render_window = nullptr;
 +  wsi.render_surface = nullptr;
-+  wsi.render_surface_width = 1920;
-+  wsi.render_surface_height = 1080;
 +  return wsi;
 +}
 +
 +std::string FindGame()
 +{
 +  // /data/DolphinPS4/boot.txt: path of the game to start (first line).
-+  if (FILE* file = fopen((std::string(DATA_DIR) + "/boot.txt").c_str(), "r"))
++  if (FILE* file = fopen((std::string(PS4_DATA_DIR_PATH) + "/boot.txt").c_str(), "r"))
 +  {
 +    char line[1024] = {};
 +    const bool read = fgets(line, sizeof(line), file) != nullptr;
@@ -1255,7 +1279,7 @@ index 0000000..258e70f
 +  std::vector<std::string> games;
 +  std::error_code error;
 +  for (const auto& entry :
-+       std::filesystem::directory_iterator(std::string(DATA_DIR) + "/games", error))
++       std::filesystem::directory_iterator(std::string(PS4_DATA_DIR_PATH) + "/games", error))
 +  {
 +    std::string name = entry.path().filename().string();
 +    std::string lower = name;
@@ -1371,24 +1395,24 @@ index 0000000..258e70f
 +
 +std::vector<std::string> Platform::GetPS4Arguments()
 +{
-+  mkdir(DATA_DIR, 0777);
-+  mkdir((std::string(DATA_DIR) + "/games").c_str(), 0777);
++  mkdir(PS4_DATA_DIR_PATH, 0777);
++  mkdir((std::string(PS4_DATA_DIR_PATH) + "/games").c_str(), 0777);
 +
 +  // stdout/stderr go nowhere on PS4: send them to a file, unbuffered so it survives a crash.
-+  if (FILE* log = freopen((std::string(DATA_DIR) + "/dolphin.log").c_str(), "w", stderr))
++  if (FILE* log = freopen((std::string(PS4_DATA_DIR_PATH) + "/dolphin.log").c_str(), "w", stderr))
 +    setvbuf(log, nullptr, _IONBF, 0);
 +  dup2(fileno(stderr), fileno(stdout));
 +  setvbuf(stdout, nullptr, _IONBF, 0);
 +  atexit(OnExit);
 +
-+  const std::string user_dir = std::string(DATA_DIR) + "/User";
++  const std::string user_dir = std::string(PS4_DATA_DIR_PATH) + "/User";
 +  WriteDefaultConfig(user_dir);
 +  std::vector<std::string> args = {"dolphin-emu-nogui", "--platform=ps4", "--user=" + user_dir};
 +  const std::string game = FindGame();
 +  if (game.empty())
 +  {
 +    fprintf(stderr, "[dolphin] no game: put one in %s/games or its path in %s/boot.txt\n",
-+            DATA_DIR, DATA_DIR);
++            PS4_DATA_DIR_PATH, PS4_DATA_DIR_PATH);
 +  }
 +  else
 +  {
