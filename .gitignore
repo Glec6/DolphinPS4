@@ -1,0 +1,6 @@
+# Sony system modules (devkit Piglet + shader compiler): never commit or redistribute.
+modules/*.sprx
+*.pkg
+*.self
+*.oelf
+eboot.bin
