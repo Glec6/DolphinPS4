@@ -170,6 +170,8 @@ int sysctlnametomib(const char *name, int *mibp, size_t *sizep);
 #define HW_PHYSMEM 5
 #define HW_USERMEM 6
 #define HW_PAGESIZE 7
+#define KERN_PROC_PATHNAME 12
+#define HW_REALMEM 12
 #endif
 EOF
 
@@ -315,6 +317,51 @@ static __inline uint16_t be16dec(const void* p) { const uint8_t* b = (const uint
 static __inline uint32_t be32dec(const void* p) { const uint8_t* b = (const uint8_t*)p; return ((uint32_t)b[0] << 24) | ((uint32_t)b[1] << 16) | ((uint32_t)b[2] << 8) | b[3]; }
 static __inline uint16_t le16dec(const void* p) { const uint8_t* b = (const uint8_t*)p; return (uint16_t)((b[1] << 8) | b[0]); }
 static __inline uint32_t le32dec(const void* p) { const uint8_t* b = (const uint8_t*)p; return ((uint32_t)b[3] << 24) | ((uint32_t)b[2] << 16) | ((uint32_t)b[1] << 8) | b[0]; }
+#endif
+EOF
+
+# ---------------------------------------------------------------------------
+# FreeBSD headers the PS4 kernel implements but OpenOrbis doesn't ship (DolphinPS4).
+
+# pthread_np.h: the FreeBSD thread extensions exported by libkernel.
+cat > "$OVERLAY/pthread_np.h" <<'EOF'
+/* DolphinPS4: FreeBSD <pthread_np.h> for functions exported by the PS4 libkernel. The OpenOrbis
+ * <pthread.h> already declares most of them (pthread_attr_get_np, pthread_set_name_np, ...). */
+#ifndef _DOLPHINPS4_PTHREAD_NP_H
+#define _DOLPHINPS4_PTHREAD_NP_H
+#include <pthread.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
+int pthread_getthreadid_np(void);
+int pthread_main_np(void);
+#ifdef __cplusplus
+}
+#endif
+#endif
+EOF
+
+# machine/cpufunc.h: FreeBSD's cpuid helpers.
+mkdir -p "$OVERLAY/machine"
+cat > "$OVERLAY/machine/cpufunc.h" <<'EOF'
+/* DolphinPS4: the cpuid helpers from FreeBSD's <machine/cpufunc.h>. */
+#ifndef _DOLPHINPS4_MACHINE_CPUFUNC_H
+#define _DOLPHINPS4_MACHINE_CPUFUNC_H
+static __inline void do_cpuid(unsigned int ax, unsigned int *p) {
+	__asm __volatile("cpuid" : "=a" (p[0]), "=b" (p[1]), "=c" (p[2]), "=d" (p[3]) : "0" (ax));
+}
+static __inline void cpuid_count(unsigned int ax, unsigned int cx, unsigned int *p) {
+	__asm __volatile("cpuid" : "=a" (p[0]), "=b" (p[1]), "=c" (p[2]), "=d" (p[3]) : "0" (ax), "c" (cx));
+}
+#endif
+EOF
+
+# sys/socket.h: OpenOrbis already uses FreeBSD socket values; add the missing FreeBSD option.
+cat > "$OVERLAY/sys/socket.h" <<'EOF'
+/* DolphinPS4: FreeBSD additions on top of the OpenOrbis header. */
+#include_next <sys/socket.h>
+#ifndef SO_NOSIGPIPE
+#define SO_NOSIGPIPE 0x0800
 #endif
 EOF
 

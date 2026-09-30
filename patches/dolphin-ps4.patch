@@ -1,0 +1,1785 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 5ea7f8e..874f376 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -701,7 +701,8 @@ if(ENABLE_CUBEB)
+   add_definitions(-DHAVE_CUBEB)
+ endif()
+ 
+-if(NOT ANDROID)
++# PS4: no USB passthrough (no libusb backend for the PS4 kernel).
++if(NOT ANDROID AND NOT PS4)
+   dolphin_find_optional_system_library(LibUSB Externals/libusb)
+   add_definitions(-D__LIBUSB__)
+ endif()
+@@ -722,7 +723,8 @@ dolphin_find_optional_system_library(MBEDTLS Externals/mbedtls 2.28)
+ 
+ dolphin_find_optional_system_library(CURL Externals/curl)
+ 
+-if(NOT ANDROID)
++# PS4: real Wii Remotes need Bluetooth HID access, which apps don't have.
++if(NOT ANDROID AND NOT PS4)
+   dolphin_find_optional_system_library(HIDAPI Externals/hidapi)
+ endif()
+ 
+diff --git a/Source/Core/AudioCommon/AudioCommon.cpp b/Source/Core/AudioCommon/AudioCommon.cpp
+index 73e1094..347e13a 100644
+--- a/Source/Core/AudioCommon/AudioCommon.cpp
++++ b/Source/Core/AudioCommon/AudioCommon.cpp
+@@ -12,6 +12,7 @@
+ #include "AudioCommon/NullSoundStream.h"
+ #include "AudioCommon/OpenALStream.h"
+ #include "AudioCommon/OpenSLESStream.h"
++#include "AudioCommon/PS4AudioStream.h"
+ #include "AudioCommon/PulseAudioStream.h"
+ #include "AudioCommon/WASAPIStream.h"
+ #include "Common/FileUtil.h"
+@@ -42,6 +43,8 @@ static std::unique_ptr<SoundStream> CreateSoundStreamForBackend(std::string_view
+     return std::make_unique<OpenSLESStream>();
+   else if (backend == BACKEND_WASAPI && WASAPIStream::IsValid())
+     return std::make_unique<WASAPIStream>();
++  else if (backend == BACKEND_PS4 && PS4AudioStream::IsValid())
++    return std::make_unique<PS4AudioStream>();
+   return {};
+ }
+ 
+@@ -96,6 +99,8 @@ std::string GetDefaultSoundBackend()
+ {
+ #if defined(ANDROID)
+   return BACKEND_OPENSLES;
++#elif defined(__ORBIS__)
++  return BACKEND_PS4;
+ #else
+   if (CubebStream::IsValid())
+     return BACKEND_CUBEB;
+@@ -131,6 +136,8 @@ std::vector<std::string> GetSoundBackends()
+     backends.emplace_back(BACKEND_OPENSLES);
+   if (WASAPIStream::IsValid())
+     backends.emplace_back(BACKEND_WASAPI);
++  if (PS4AudioStream::IsValid())
++    backends.emplace_back(BACKEND_PS4);
+ 
+   return backends;
+ }
+diff --git a/Source/Core/AudioCommon/CMakeLists.txt b/Source/Core/AudioCommon/CMakeLists.txt
+index 04ad967..fe170aa 100644
+--- a/Source/Core/AudioCommon/CMakeLists.txt
++++ b/Source/Core/AudioCommon/CMakeLists.txt
+@@ -23,6 +23,13 @@ if(ENABLE_CUBEB)
+   target_link_libraries(audiocommon PRIVATE cubeb)
+ endif()
+ 
++if(PS4)
++  target_sources(audiocommon PRIVATE
++    PS4AudioStream.cpp
++    PS4AudioStream.h
++  )
++endif()
++
+ if(ANDROID)
+   find_package(OpenSLES)
+   if(OPENSLES_FOUND)
+diff --git a/Source/Core/AudioCommon/PS4AudioStream.cpp b/Source/Core/AudioCommon/PS4AudioStream.cpp
+new file mode 100644
+index 0000000..078015a
+--- /dev/null
++++ b/Source/Core/AudioCommon/PS4AudioStream.cpp
+@@ -0,0 +1,77 @@
++// Copyright 2026 Dolphin Emulator Project
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++#include "AudioCommon/PS4AudioStream.h"
++
++#include <orbis/AudioOut.h>
++
++#include "Common/Logging/Log.h"
++#include "Common/Thread.h"
++
++namespace
++{
++// Any user can hear the main port; the system user avoids depending on who is signed in.
++constexpr OrbisUserServiceUserId SYSTEM_USER = 0xFF;
++constexpr int32_t VOLUME_MAX = 32768;  // SCE_AUDIO_VOLUME_0DB
++constexpr int32_t VOLUME_FLAG_LR = 0x3;  // front left + front right
++}  // namespace
++
++PS4AudioStream::~PS4AudioStream()
++{
++  SetRunning(false);
++  if (m_handle >= 0)
++    sceAudioOutClose(m_handle);
++}
++
++bool PS4AudioStream::Init()
++{
++  const int32_t init = sceAudioOutInit();
++  // Already initialized (by another part of the app) is fine.
++  if (init != 0 && init != static_cast<int32_t>(0x8026000E))
++    WARN_LOG_FMT(AUDIO, "sceAudioOutInit: {:#x}", static_cast<u32>(init));
++
++  m_handle = sceAudioOutOpen(SYSTEM_USER, ORBIS_AUDIO_OUT_PORT_TYPE_MAIN, 0, FRAMES_PER_BUFFER,
++                             m_mixer->GetSampleRate(), ORBIS_AUDIO_OUT_PARAM_FORMAT_S16_STEREO);
++  if (m_handle < 0)
++  {
++    ERROR_LOG_FMT(AUDIO, "sceAudioOutOpen failed: {:#x}", static_cast<u32>(m_handle));
++    return false;
++  }
++  return true;
++}
++
++bool PS4AudioStream::SetRunning(bool running)
++{
++  if (running == m_running)
++    return true;
++  m_running = running;
++  if (running)
++    m_thread = std::thread(&PS4AudioStream::OutputLoop, this);
++  else if (m_thread.joinable())
++    m_thread.join();
++  return true;
++}
++
++void PS4AudioStream::SetVolume(int volume)
++{
++  if (m_handle < 0)
++    return;
++  int32_t levels[2] = {VOLUME_MAX * volume / 100, VOLUME_MAX * volume / 100};
++  sceAudioOutSetVolume(m_handle, VOLUME_FLAG_LR, levels);
++}
++
++void PS4AudioStream::OutputLoop()
++{
++  Common::SetCurrentThreadName("Audio thread - PS4");
++  size_t current = 0;
++  while (m_running)
++  {
++    auto& buffer = m_buffers[current];
++    m_mixer->Mix(buffer.data(), FRAMES_PER_BUFFER);
++    // Blocks until the previous buffer has been handed to the hardware, which paces this loop.
++    sceAudioOutOutput(m_handle, buffer.data());
++    current ^= 1;
++  }
++  // Flush the last queued buffer.
++  sceAudioOutOutput(m_handle, nullptr);
++}
+diff --git a/Source/Core/AudioCommon/PS4AudioStream.h b/Source/Core/AudioCommon/PS4AudioStream.h
+new file mode 100644
+index 0000000..799b0c2
+--- /dev/null
++++ b/Source/Core/AudioCommon/PS4AudioStream.h
+@@ -0,0 +1,34 @@
++// Copyright 2026 Dolphin Emulator Project
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++#pragma once
++
++#include <array>
++#include <atomic>
++#include <thread>
++
++#include "AudioCommon/SoundStream.h"
++#include "Common/CommonTypes.h"
++
++// PS4 audio through sceAudioOut: 48 kHz 16-bit stereo on the main output port.
++class PS4AudioStream final : public SoundStream
++{
++#ifdef __ORBIS__
++public:
++  ~PS4AudioStream() override;
++  bool Init() override;
++  bool SetRunning(bool running) override;
++  void SetVolume(int volume) override;
++  static bool IsValid() { return true; }
++
++private:
++  static constexpr u32 FRAMES_PER_BUFFER = 256;  // sceAudioOut granularity
++
++  void OutputLoop();
++
++  int m_handle = -1;
++  std::thread m_thread;
++  std::atomic<bool> m_running{false};
++  std::array<std::array<s16, FRAMES_PER_BUFFER * 2>, 2> m_buffers{};
++#endif
++};
+diff --git a/Source/Core/Common/CMakeLists.txt b/Source/Core/Common/CMakeLists.txt
+index 97d8ad8..eec1c4a 100644
+--- a/Source/Core/Common/CMakeLists.txt
++++ b/Source/Core/Common/CMakeLists.txt
+@@ -244,6 +244,11 @@ elseif(APPLE)
+     Logging/ConsoleListenerNix.cpp
+     MemArenaDarwin.cpp
+   )
++elseif(PS4)
++  target_sources(common PRIVATE
++    Logging/ConsoleListenerNix.cpp
++    MemArenaPS4.cpp
++  )
+ else()
+   target_sources(common PRIVATE
+     Logging/ConsoleListenerNix.cpp
+@@ -327,6 +332,13 @@ elseif(HAIKU)
+     GL/GLInterface/BGL.h
+     GL/GLInterface/BGL.cpp
+   )
++elseif(PS4)
++  target_sources(common PRIVATE
++    GL/GLInterface/Piglet.h
++    GL/GLInterface/Piglet.cpp
++  )
++  # Types from <EGL/eglplatform.h> for the PS4 (OrbisPglWindow).
++  target_compile_definitions(common PRIVATE __PIGLET__)
+ elseif(ENABLE_X11 AND X11_FOUND)
+   target_sources(common PRIVATE
+     GL/GLX11Window.cpp
+diff --git a/Source/Core/Common/FileUtil.cpp b/Source/Core/Common/FileUtil.cpp
+index 053614f..a9e4a49 100644
+--- a/Source/Core/Common/FileUtil.cpp
++++ b/Source/Core/Common/FileUtil.cpp
+@@ -731,6 +731,9 @@ std::string GetExePath()
+   return PathToString(exe_path_absolute);
+ #elif defined(__APPLE__)
+   return GetBundleDirectory();
++#elif defined(__ORBIS__)
++  // PS4: the app package is mounted at /app0.
++  return "/app0/eboot.bin";
+ #elif defined(__FreeBSD__)
+   int name[4]{CTL_KERN, KERN_PROC, KERN_PROC_PATHNAME, -1};
+   size_t length = 0;
+diff --git a/Source/Core/Common/GL/GLContext.cpp b/Source/Core/Common/GL/GLContext.cpp
+index eef6896..5ca5dc7 100644
+--- a/Source/Core/Common/GL/GLContext.cpp
++++ b/Source/Core/Common/GL/GLContext.cpp
+@@ -14,6 +14,9 @@
+ #if defined(__HAIKU__)
+ #include "Common/GL/GLInterface/BGL.h"
+ #endif
++#if defined(__ORBIS__)
++#include "Common/GL/GLInterface/Piglet.h"
++#endif
+ #if HAVE_EGL
+ #include "Common/GL/GLInterface/EGL.h"
+ #if HAVE_X11
+@@ -95,6 +98,10 @@ std::unique_ptr<GLContext> GLContext::Create(const WindowSystemInfo& wsi, bool s
+   if (wsi.type == WindowSystemType::Haiku)
+     context = std::make_unique<GLContextBGL>();
+ #endif
++#if defined(__ORBIS__)
++  if (wsi.type == WindowSystemType::Orbis)
++    context = std::make_unique<GLContextPiglet>();
++#endif
+ #if HAVE_EGL
+ #if HAVE_X11
+   if (wsi.type == WindowSystemType::X11)
+diff --git a/Source/Core/Common/GL/GLInterface/Piglet.cpp b/Source/Core/Common/GL/GLInterface/Piglet.cpp
+new file mode 100644
+index 0000000..97c114d
+--- /dev/null
++++ b/Source/Core/Common/GL/GLInterface/Piglet.cpp
+@@ -0,0 +1,311 @@
++// Copyright 2026 Dolphin Emulator Project
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++#include "Common/GL/GLInterface/Piglet.h"
++
++#include <cstdint>
++#include <cstring>
++#include <string>
++
++#include <sys/mman.h>
++#include <sys/stat.h>
++
++#include <orbis/Pigletv2VSH.h>
++#include <orbis/libkernel.h>
++
++#include "Common/CommonTypes.h"
++#include "Common/Logging/Log.h"
++
++// Piglet is loaded at run time and every function is looked up with sceKernelDlsym, so the app
++// has no load-time dependency on the (devkit) Piglet module. <EGL/egl.h> (via Pigletv2VSH.h) is
++// only used for types and constants.
++namespace
++{
++using PigletWindow = OrbisPglWindow;
++
++struct EGLFunctions
++{
++  EGLDisplay (*GetDisplay)(EGLNativeDisplayType);
++  EGLBoolean (*Initialize)(EGLDisplay, EGLint*, EGLint*);
++  EGLBoolean (*BindAPI)(EGLenum);
++  EGLBoolean (*ChooseConfig)(EGLDisplay, const EGLint*, EGLConfig*, EGLint, EGLint*);
++  EGLSurface (*CreateWindowSurface)(EGLDisplay, EGLConfig, EGLNativeWindowType, const EGLint*);
++  EGLContext (*CreateContext)(EGLDisplay, EGLConfig, EGLContext, const EGLint*);
++  EGLBoolean (*MakeCurrent)(EGLDisplay, EGLSurface, EGLSurface, EGLContext);
++  EGLBoolean (*SwapBuffers)(EGLDisplay, EGLSurface);
++  EGLBoolean (*SwapInterval)(EGLDisplay, EGLint);
++  EGLBoolean (*DestroySurface)(EGLDisplay, EGLSurface);
++  EGLBoolean (*DestroyContext)(EGLDisplay, EGLContext);
++  EGLBoolean (*Terminate)(EGLDisplay);
++  EGLint (*GetError)();
++  __eglMustCastToProperFunctionPointerType (*GetProcAddress)(const char*);
++  int (*SetConfiguration)(OrbisPglConfig*);
++};
++
++constexpr char PIGLET_MODULE[] = "libScePigletv2VSH.sprx";
++constexpr char SHACC_MODULE[] = "libSceShaccVSH.sprx";
++
++int32_t s_piglet_module = -1;
++int32_t s_shacc_module = -1;
++EGLFunctions s_egl;
++PigletWindow s_window = {0, 1920, 1080, 0};  // uID, uWidth, uHeight, uPadding
++
++bool FileExists(const std::string& path)
++{
++  struct stat st;
++  return stat(path.c_str(), &st) == 0;
++}
++
++// GoldHEN SDK (https://github.com/GoldHEN/GoldHEN_Plugins_SDK, MIT) syscall 500: lift the
++// sandbox while loading modules from outside the package, if the console refuses otherwise.
++int64_t GoldHENCommand(uint64_t command, void* data)
++{
++  int64_t result;
++  __asm__ volatile("syscall"
++                   : "=a"(result)
++                   : "a"(uint64_t{500}), "D"(command), "S"(data)
++                   : "rcx", "r11", "rdx", "r8", "r9", "r10", "memory", "cc");
++  return result;
++}
++
++bool LoadModules(const std::string& dir)
++{
++  const std::string piglet = dir + "/" + PIGLET_MODULE;
++  const std::string shacc = dir + "/" + SHACC_MODULE;
++  s_piglet_module =
++      static_cast<int32_t>(sceKernelLoadStartModule(piglet.c_str(), 0, nullptr, 0, nullptr, nullptr));
++  if (s_piglet_module < 0)
++    return false;
++  s_shacc_module =
++      static_cast<int32_t>(sceKernelLoadStartModule(shacc.c_str(), 0, nullptr, 0, nullptr, nullptr));
++  if (s_shacc_module < 0)
++  {
++    sceKernelStopUnloadModule(s_piglet_module, 0, nullptr, 0, nullptr, nullptr);
++    s_piglet_module = -1;
++    return false;
++  }
++  return true;
++}
++
++// Enables the runtime shader compiler in the 4.74 devkit Piglet (offsets from RetroArch for PS4).
++bool PatchPiglet()
++{
++  OrbisKernelModule handles[256];
++  size_t count = 0;
++  if (sceKernelGetModuleList(handles, 256, &count) != 0)
++    return false;
++  for (size_t i = 0; i < count; i++)
++  {
++    OrbisKernelModuleInfo info;
++    std::memset(&info, 0, sizeof(info));
++    info.size = sizeof(info);
++    if (sceKernelGetModuleInfo(handles[i], &info) != 0 || std::strcmp(info.name, PIGLET_MODULE) != 0)
++      continue;
++    auto* const base = static_cast<u8*>(info.segmentInfo[0].address);
++    if (sceKernelMprotect(base, info.segmentInfo[0].size, PROT_READ | PROT_WRITE | PROT_EXEC) != 0)
++      return false;
++    const u8 set_eax_to_1[] = {0x31, 0xC0, 0xFF, 0xC0, 0x90};
++    std::memcpy(base + 0x5451F, set_eax_to_1, sizeof(set_eax_to_1));
++    base[0xB2DEC] = 0;
++    base[0xB2DED] = 0;
++    base[0xB2DEE] = 1;
++    base[0xB2E21] = 1;
++    std::memcpy(base + 0xB2E24, &s_shacc_module, sizeof(s_shacc_module));
++    return true;
++  }
++  return false;
++}
++
++template <typename T>
++bool Resolve(T& function, const char* name)
++{
++  void* address = nullptr;
++  if (sceKernelDlsym(s_piglet_module, name, &address) != 0 || !address)
++  {
++    ERROR_LOG_FMT(VIDEO, "Piglet: missing {}", name);
++    return false;
++  }
++  function = reinterpret_cast<T>(address);
++  return true;
++}
++
++// Loads and configures Piglet once per process.
++bool InitPiglet()
++{
++  if (s_piglet_module >= 0)
++    return true;
++
++  std::string dir;
++  for (const char* candidate : {"/app0/sce_module", "/data/DolphinPS4/modules"})
++  {
++    if (FileExists(std::string(candidate) + "/" + SHACC_MODULE))
++    {
++      dir = candidate;
++      break;
++    }
++  }
++  if (dir.empty())
++  {
++    ERROR_LOG_FMT(VIDEO, "Piglet: {} not found in /app0/sce_module or /data/DolphinPS4/modules",
++                  SHACC_MODULE);
++    return false;
++  }
++  if (!LoadModules(dir))
++  {
++    u8 backup[128] = {};
++    GoldHENCommand(2, backup);  // jailbreak
++    const bool loaded = LoadModules(dir);
++    GoldHENCommand(3, backup);  // restore
++    if (!loaded)
++    {
++      ERROR_LOG_FMT(VIDEO, "Piglet: could not load the modules from {}", dir);
++      return false;
++    }
++  }
++  if (!PatchPiglet())
++  {
++    ERROR_LOG_FMT(VIDEO, "Piglet: could not enable the shader compiler");
++    return false;
++  }
++
++  bool ok = Resolve(s_egl.GetDisplay, "eglGetDisplay") &&
++            Resolve(s_egl.Initialize, "eglInitialize") && Resolve(s_egl.BindAPI, "eglBindAPI") &&
++            Resolve(s_egl.ChooseConfig, "eglChooseConfig") &&
++            Resolve(s_egl.CreateWindowSurface, "eglCreateWindowSurface") &&
++            Resolve(s_egl.CreateContext, "eglCreateContext") &&
++            Resolve(s_egl.MakeCurrent, "eglMakeCurrent") &&
++            Resolve(s_egl.SwapBuffers, "eglSwapBuffers") &&
++            Resolve(s_egl.SwapInterval, "eglSwapInterval") &&
++            Resolve(s_egl.DestroySurface, "eglDestroySurface") &&
++            Resolve(s_egl.DestroyContext, "eglDestroyContext") &&
++            Resolve(s_egl.Terminate, "eglTerminate") && Resolve(s_egl.GetError, "eglGetError") &&
++            Resolve(s_egl.GetProcAddress, "eglGetProcAddress") &&
++            Resolve(s_egl.SetConfiguration, "scePigletSetConfigurationVSH");
++  if (!ok)
++    return false;
++
++  // RetroArch for PS4's configuration (graphics memory from flexible memory), which is known to
++  // get a display on retail consoles.
++  OrbisPglConfig config;
++  std::memset(&config, 0, sizeof(config));
++  config.size = sizeof(config);
++  config.flags = ORBIS_PGL_FLAGS_USE_COMPOSITE_EXT | ORBIS_PGL_FLAGS_USE_FLEXIBLE_MEMORY | 0x60;
++  config.processOrder = 1;
++  config.systemSharedMemorySize = 0x1000000;
++  config.videoSharedMemorySize = 0x3000000;
++  config.maxMappedFlexibleMemory = 0xFFFFFFFF;
++  config.drawCommandBufferSize = 0x100000;
++  config.lcueResourceBufferSize = 0x1000000;
++  config.dbgPosCmd_0x40 = s_window.uWidth;
++  config.dbgPosCmd_0x44 = s_window.uHeight;
++  config.unk_0x5C = 2;
++  if (!s_egl.SetConfiguration(&config))
++  {
++    ERROR_LOG_FMT(VIDEO, "Piglet: scePigletSetConfigurationVSH failed");
++    return false;
++  }
++  INFO_LOG_FMT(VIDEO, "Piglet: modules loaded from {}", dir);
++  return true;
++}
++}  // namespace
++
++GLContextPiglet::~GLContextPiglet()
++{
++  if (!m_display)
++    return;
++  s_egl.MakeCurrent(m_display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
++  if (m_context)
++    s_egl.DestroyContext(m_display, m_context);
++  if (m_surface)
++    s_egl.DestroySurface(m_display, m_surface);
++}
++
++bool GLContextPiglet::IsHeadless() const
++{
++  return false;
++}
++
++bool GLContextPiglet::Initialize(const WindowSystemInfo& wsi, bool stereo, bool core)
++{
++  if (!InitPiglet())
++    return false;
++
++  m_display = s_egl.GetDisplay(EGL_DEFAULT_DISPLAY);
++  EGLint major = 0, minor = 0;
++  if (!m_display || !s_egl.Initialize(m_display, &major, &minor))
++  {
++    ERROR_LOG_FMT(VIDEO, "Piglet: eglInitialize failed ({:#x})", s_egl.GetError());
++    return false;
++  }
++  s_egl.BindAPI(EGL_OPENGL_ES_API);
++
++  const EGLint attribs[] = {EGL_RED_SIZE,        8,
++                            EGL_GREEN_SIZE,      8,
++                            EGL_BLUE_SIZE,       8,
++                            EGL_ALPHA_SIZE,      8,
++                            EGL_DEPTH_SIZE,      0,
++                            EGL_STENCIL_SIZE,    0,
++                            EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
++                            EGL_SURFACE_TYPE,    EGL_WINDOW_BIT,
++                            EGL_NONE};
++  EGLConfig config = nullptr;
++  EGLint num_configs = 0;
++  if (!s_egl.ChooseConfig(m_display, attribs, &config, 1, &num_configs) || num_configs == 0)
++  {
++    ERROR_LOG_FMT(VIDEO, "Piglet: no RGBA8 config ({:#x})", s_egl.GetError());
++    return false;
++  }
++
++  m_surface = s_egl.CreateWindowSurface(m_display, config, &s_window, nullptr);
++  if (!m_surface)
++  {
++    ERROR_LOG_FMT(VIDEO, "Piglet: eglCreateWindowSurface failed ({:#x})", s_egl.GetError());
++    return false;
++  }
++
++  // Piglet's version string says ES 2.0, but the context implements ES 3.0.
++  const EGLint context_attribs[] = {EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE};
++  m_context = s_egl.CreateContext(m_display, config, EGL_NO_CONTEXT, context_attribs);
++  if (!m_context)
++  {
++    ERROR_LOG_FMT(VIDEO, "Piglet: eglCreateContext failed ({:#x})", s_egl.GetError());
++    return false;
++  }
++
++  m_opengl_mode = Mode::OpenGLES;
++  m_backbuffer_width = s_window.uWidth;
++  m_backbuffer_height = s_window.uHeight;
++  if (!MakeCurrent())
++    return false;
++  // A swap interval of 1 makes eglSwapBuffers block forever on PS4 (love-ps4).
++  s_egl.SwapInterval(m_display, 0);
++  return true;
++}
++
++bool GLContextPiglet::MakeCurrent()
++{
++  return s_egl.MakeCurrent(m_display, m_surface, m_surface, m_context);
++}
++
++bool GLContextPiglet::ClearCurrent()
++{
++  return s_egl.MakeCurrent(m_display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
++}
++
++void GLContextPiglet::Swap()
++{
++  s_egl.SwapBuffers(m_display, m_surface);
++}
++
++void GLContextPiglet::SwapInterval(int interval)
++{
++  // Ignored: see Initialize().
++}
++
++void* GLContextPiglet::GetFuncAddress(const std::string& name)
++{
++  void* address = nullptr;
++  if (sceKernelDlsym(s_piglet_module, name.c_str(), &address) == 0 && address)
++    return address;
++  return reinterpret_cast<void*>(s_egl.GetProcAddress(name.c_str()));
++}
+diff --git a/Source/Core/Common/GL/GLInterface/Piglet.h b/Source/Core/Common/GL/GLInterface/Piglet.h
+new file mode 100644
+index 0000000..90decba
+--- /dev/null
++++ b/Source/Core/Common/GL/GLInterface/Piglet.h
+@@ -0,0 +1,35 @@
++// Copyright 2026 Dolphin Emulator Project
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++#pragma once
++
++#include <string>
++
++#include "Common/GL/GLContext.h"
++
++// PS4: OpenGL ES through Piglet, the system's GLES implementation. Piglet reports "OpenGL ES 2.0"
++// but implements OpenGL ES 3.0 (verified on hardware); runtime GLSL compilation needs the devkit
++// Piglet + shader compiler modules (libScePigletv2VSH.sprx, libSceShaccVSH.sprx).
++class GLContextPiglet final : public GLContext
++{
++public:
++  ~GLContextPiglet() override;
++
++  bool IsHeadless() const override;
++
++  bool MakeCurrent() override;
++  bool ClearCurrent() override;
++
++  void Swap() override;
++  void SwapInterval(int interval) override;
++
++  void* GetFuncAddress(const std::string& name) override;
++
++protected:
++  bool Initialize(const WindowSystemInfo& wsi, bool stereo, bool core) override;
++
++private:
++  void* m_display = nullptr;
++  void* m_surface = nullptr;
++  void* m_context = nullptr;
++};
+diff --git a/Source/Core/Common/MemArena.h b/Source/Core/Common/MemArena.h
+index 1a3093c..24cbe83 100644
+--- a/Source/Core/Common/MemArena.h
++++ b/Source/Core/Common/MemArena.h
+@@ -148,6 +148,11 @@ private:
+ 
+   vm_address_t m_region_address = 0;
+   vm_size_t m_region_size = 0;
++#elif defined(__ORBIS__)
++  s64 m_direct_memory = -1;  // physical start of the segment (PS4 direct memory)
++  std::size_t m_direct_memory_size = 0;
++  void* m_reserved_region = nullptr;
++  std::size_t m_reserved_region_size = 0;
+ #else
+   int m_shm_fd = 0;
+   void* m_reserved_region = nullptr;
+diff --git a/Source/Core/Common/MemArenaPS4.cpp b/Source/Core/Common/MemArenaPS4.cpp
+new file mode 100644
+index 0000000..ddb352f
+--- /dev/null
++++ b/Source/Core/Common/MemArenaPS4.cpp
+@@ -0,0 +1,228 @@
++// Copyright 2026 Dolphin Emulator Project
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++// PS4 MemArena. The PS4 kernel can't reserve gigabytes with mmap(PROT_NONE), and apps have no
++// anonymous shared memory that can be mapped at fixed addresses. Instead:
++//   - the memory segment is a block of direct (physical) memory,
++//   - views of it are direct memory mappings, which can alias each other,
++//   - the fastmem region is a sceKernelReserveVirtualRange reservation that views are mapped
++//     into with MAP_FIXED.
++// All of this was verified on hardware (FW 12.00, GoldHEN). Mappings work at 16 KiB granularity.
++
++#include "Common/MemArena.h"
++
++#include <cerrno>
++#include <cstddef>
++#include <cstdint>
++
++#include <sys/mman.h>
++#include <sys/types.h>
++
++#include "Common/Assert.h"
++#include "Common/CommonTypes.h"
++#include "Common/Logging/Log.h"
++#include "Common/MsgHandler.h"
++
++// Declared by hand: several OpenOrbis prototypes are wrong.
++extern "C" {
++size_t sceKernelGetDirectMemorySize();
++int32_t sceKernelAllocateDirectMemory(off_t search_start, off_t search_end, size_t length,
++                                      size_t alignment, int32_t memory_type, off_t* physical_out);
++int32_t sceKernelReleaseDirectMemory(off_t start, size_t length);
++int32_t sceKernelMapDirectMemory(void** address, size_t length, int32_t protection, int32_t flags,
++                                 off_t direct_memory_start, size_t alignment);
++int32_t sceKernelReserveVirtualRange(void** address, size_t length, int32_t flags,
++                                     size_t alignment);
++int32_t sceKernelMunmap(void* address, size_t length);
++int32_t sceKernelMprotect(const void* address, size_t length, int32_t protection);
++}
++
++namespace
++{
++constexpr size_t PS4_PAGE_SIZE = 0x4000;
++constexpr size_t PS4_RESERVE_ALIGNMENT = 0x10000;
++constexpr int32_t SCE_KERNEL_WB_ONION = 0;
++constexpr int32_t SCE_KERNEL_MAP_FIXED = 0x10;
++constexpr int32_t SCE_KERNEL_PROT_CPU_READ = 0x1;
++constexpr int32_t SCE_KERNEL_PROT_CPU_RW = 0x3;
++
++size_t AlignUp(size_t value, size_t alignment)
++{
++  return (value + alignment - 1) & ~(alignment - 1);
++}
++
++int32_t Protection(bool writeable)
++{
++  return writeable ? SCE_KERNEL_PROT_CPU_RW : SCE_KERNEL_PROT_CPU_READ;
++}
++}  // namespace
++
++namespace Common
++{
++MemArena::MemArena() = default;
++MemArena::~MemArena() = default;
++
++void MemArena::GrabSHMSegment(size_t size, std::string_view base_name)
++{
++  const size_t aligned_size = AlignUp(size, PS4_PAGE_SIZE);
++  off_t physical = 0;
++  const int32_t result =
++      sceKernelAllocateDirectMemory(0, static_cast<off_t>(sceKernelGetDirectMemorySize()),
++                                    aligned_size, PS4_RESERVE_ALIGNMENT, SCE_KERNEL_WB_ONION,
++                                    &physical);
++  if (result != 0)
++  {
++    ERROR_LOG_FMT(MEMMAP, "sceKernelAllocateDirectMemory({} bytes) for {} failed: {:#x}",
++                  aligned_size, base_name, static_cast<u32>(result));
++    return;
++  }
++  m_direct_memory = physical;
++  m_direct_memory_size = aligned_size;
++}
++
++void MemArena::ReleaseSHMSegment()
++{
++  if (m_direct_memory >= 0)
++    sceKernelReleaseDirectMemory(m_direct_memory, m_direct_memory_size);
++  m_direct_memory = -1;
++  m_direct_memory_size = 0;
++}
++
++void* MemArena::CreateView(s64 offset, size_t size)
++{
++  void* address = nullptr;
++  const int32_t result =
++      sceKernelMapDirectMemory(&address, AlignUp(size, PS4_PAGE_SIZE), SCE_KERNEL_PROT_CPU_RW, 0,
++                               m_direct_memory + offset, PS4_PAGE_SIZE);
++  if (result != 0)
++  {
++    NOTICE_LOG_FMT(MEMMAP, "sceKernelMapDirectMemory failed: {:#x}", static_cast<u32>(result));
++    return nullptr;
++  }
++  return address;
++}
++
++void MemArena::ReleaseView(void* view, size_t size)
++{
++  sceKernelMunmap(view, AlignUp(size, PS4_PAGE_SIZE));
++}
++
++u8* MemArena::ReserveMemoryRegion(size_t memory_size)
++{
++  void* base = nullptr;
++  const int32_t result =
++      sceKernelReserveVirtualRange(&base, memory_size, 0, PS4_RESERVE_ALIGNMENT);
++  if (result != 0)
++  {
++    PanicAlertFmt("Failed to reserve {} bytes of address space: {:#x}", memory_size,
++                  static_cast<u32>(result));
++    return nullptr;
++  }
++  m_reserved_region = base;
++  m_reserved_region_size = memory_size;
++  return static_cast<u8*>(base);
++}
++
++void MemArena::ReleaseMemoryRegion()
++{
++  if (m_reserved_region)
++  {
++    sceKernelMunmap(m_reserved_region, m_reserved_region_size);
++    m_reserved_region = nullptr;
++    m_reserved_region_size = 0;
++  }
++}
++
++void* MemArena::MapInMemoryRegion(s64 offset, size_t size, void* base, bool writeable)
++{
++  void* address = base;
++  const int32_t result =
++      sceKernelMapDirectMemory(&address, AlignUp(size, PS4_PAGE_SIZE), Protection(writeable),
++                               SCE_KERNEL_MAP_FIXED, m_direct_memory + offset, PS4_PAGE_SIZE);
++  if (result != 0)
++  {
++    NOTICE_LOG_FMT(MEMMAP, "sceKernelMapDirectMemory at {} failed: {:#x}", base,
++                   static_cast<u32>(result));
++    return nullptr;
++  }
++  return address;
++}
++
++bool MemArena::ChangeMappingProtection(void* view, size_t size, bool writeable)
++{
++  const int32_t result =
++      sceKernelMprotect(view, AlignUp(size, PS4_PAGE_SIZE), Protection(writeable));
++  if (result != 0)
++    NOTICE_LOG_FMT(MEMMAP, "sceKernelMprotect failed: {:#x}", static_cast<u32>(result));
++  return result == 0;
++}
++
++void MemArena::UnmapFromMemoryRegion(void* view, size_t size)
++{
++  const size_t aligned_size = AlignUp(size, PS4_PAGE_SIZE);
++  sceKernelMunmap(view, aligned_size);
++  // Reserve the hole again so nothing else gets mapped inside the fastmem region.
++  void* address = view;
++  const int32_t result =
++      sceKernelReserveVirtualRange(&address, aligned_size, SCE_KERNEL_MAP_FIXED, PS4_PAGE_SIZE);
++  if (result != 0 || address != view)
++  {
++    NOTICE_LOG_FMT(MEMMAP, "re-reserving {} after unmapping failed: {:#x}", view,
++                   static_cast<u32>(result));
++  }
++}
++
++size_t MemArena::GetPageSize() const
++{
++  return PS4_PAGE_SIZE;
++}
++
++// The PS4 has no MAP_NORESERVE, but anonymous mappings are committed on first touch (verified up
++// to 1 GiB). Larger requests fail, and callers fall back (e.g. the JIT's entry points map).
++LazyMemoryRegion::LazyMemoryRegion() = default;
++
++LazyMemoryRegion::~LazyMemoryRegion()
++{
++  Release();
++}
++
++void* LazyMemoryRegion::Create(size_t size)
++{
++  ASSERT(!m_memory);
++
++  if (size == 0)
++    return nullptr;
++
++  void* memory = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
++  if (memory == MAP_FAILED)
++  {
++    NOTICE_LOG_FMT(MEMMAP, "Memory allocation of {} bytes failed.", size);
++    return nullptr;
++  }
++
++  m_memory = memory;
++  m_size = size;
++
++  return memory;
++}
++
++void LazyMemoryRegion::Clear()
++{
++  ASSERT(m_memory);
++
++  void* new_memory =
++      mmap(m_memory, m_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0);
++  ASSERT(new_memory == m_memory);
++}
++
++void LazyMemoryRegion::Release()
++{
++  if (m_memory)
++  {
++    munmap(m_memory, m_size);
++    m_memory = nullptr;
++    m_size = 0;
++  }
++}
++
++}  // namespace Common
+diff --git a/Source/Core/Common/Thread.cpp b/Source/Core/Common/Thread.cpp
+index d9a40fc..6dedc39 100644
+--- a/Source/Core/Common/Thread.cpp
++++ b/Source/Core/Common/Thread.cpp
+@@ -124,7 +124,7 @@ void SetThreadAffinity(std::thread::native_handle_type thread, u32 mask)
+ #ifdef __APPLE__
+   thread_policy_set(pthread_mach_thread_np(thread), THREAD_AFFINITY_POLICY, (integer_t*)&mask, 1);
+ #elif (defined __linux__ || defined BSD4_4 || defined __FreeBSD__ || defined __NetBSD__) &&        \
+-    !(defined ANDROID)
++    !(defined ANDROID) && !(defined __ORBIS__)  // PS4: affinity is left to the system
+ #ifndef __NetBSD__
+ #ifdef __FreeBSD__
+   cpuset_t cpu_set;
+diff --git a/Source/Core/Common/WindowSystemInfo.h b/Source/Core/Common/WindowSystemInfo.h
+index 9d15477..ac60cc5 100644
+--- a/Source/Core/Common/WindowSystemInfo.h
++++ b/Source/Core/Common/WindowSystemInfo.h
+@@ -13,6 +13,7 @@ enum class WindowSystemType
+   Wayland,
+   FBDev,
+   Haiku,
++  Orbis,  // PS4
+ };
+ 
+ struct WindowSystemInfo
+diff --git a/Source/Core/Core/Config/MainSettings.h b/Source/Core/Core/Config/MainSettings.h
+index 16cae73..0e59ae9 100644
+--- a/Source/Core/Core/Config/MainSettings.h
++++ b/Source/Core/Core/Config/MainSettings.h
+@@ -21,6 +21,7 @@
+ #define BACKEND_OPENAL "OpenAL"
+ #define BACKEND_PULSEAUDIO "Pulse"
+ #define BACKEND_OPENSLES "OpenSLES"
++#define BACKEND_PS4 "PS4"
+ #define BACKEND_WASAPI _trans("WASAPI (Exclusive Mode)")
+ 
+ namespace PowerPC
+diff --git a/Source/Core/Core/MemTools.cpp b/Source/Core/Core/MemTools.cpp
+index a7919fb..add0b3a 100644
+--- a/Source/Core/Core/MemTools.cpp
++++ b/Source/Core/Core/MemTools.cpp
+@@ -259,14 +259,14 @@ bool IsExceptionHandlerSupported()
+ #elif defined(_POSIX_VERSION) && !defined(_M_GENERIC)
+ 
+ static struct sigaction old_sa_segv;
+-#if defined(__APPLE__)
++#if defined(__APPLE__) || defined(__ORBIS__)
+ static struct sigaction old_sa_bus;
+ #endif
+ 
+ static void sigsegv_handler(int sig, siginfo_t* info, void* raw_context)
+ {
+   if (sig != SIGSEGV
+-#if defined(__APPLE__)
++#if defined(__APPLE__) || defined(__ORBIS__)
+       && sig != SIGBUS
+ #endif
+   )
+@@ -286,6 +286,11 @@ static void sigsegv_handler(int sig, siginfo_t* info, void* raw_context)
+ // Get all the information we can out of the context.
+ #ifdef __OpenBSD__
+   SContext* const ctx = context;
++#elif defined(__ORBIS__)
++  // PS4: the registers are in FreeBSD's mcontext layout, but it starts 0x40 bytes into the
++  // context the kernel passes (measured on hardware; FreeBSD's own ucontext has it at 0x10).
++  (void)context;
++  SContext* const ctx = reinterpret_cast<SContext*>(static_cast<char*>(raw_context) + 0x40);
+ #elif defined(__APPLE__)
+   // `uc_mcontext` is already a pointer here.
+   SContext* const ctx = context->uc_mcontext;
+@@ -297,7 +302,7 @@ static void sigsegv_handler(int sig, siginfo_t* info, void* raw_context)
+ 
+   // If JIT didn't handle the signal, restore the original handler and invoke it.
+   const auto& old_sa =
+-#if defined(__APPLE__)
++#if defined(__APPLE__) || defined(__ORBIS__)
+       (sig == SIGBUS) ? old_sa_bus :
+ #endif
+                         old_sa_segv;
+@@ -308,6 +313,7 @@ static void sigsegv_handler(int sig, siginfo_t* info, void* raw_context)
+ 
+ void InstallExceptionHandler()
+ {
++#ifndef __ORBIS__  // PS4: not verified on hardware; JIT faults don't need an alternate stack.
+   stack_t signal_stack;
+ #ifdef __FreeBSD__
+   signal_stack.ss_sp = (char*)malloc(SIGSTKSZ);
+@@ -318,18 +324,20 @@ void InstallExceptionHandler()
+   signal_stack.ss_flags = 0;
+   if (sigaltstack(&signal_stack, nullptr) != 0)
+     PanicAlertFmt("sigaltstack failed: {}", Common::LastStrerrorString());
++#endif
+   struct sigaction sa{};
+   sa.sa_sigaction = &sigsegv_handler;
+   sa.sa_flags = SA_SIGINFO;
+   sigemptyset(&sa.sa_mask);
+   sigaction(SIGSEGV, &sa, &old_sa_segv);
+-#ifdef __APPLE__
++#if defined(__APPLE__) || defined(__ORBIS__)
+   sigaction(SIGBUS, &sa, &old_sa_bus);
+ #endif
+ }
+ 
+ void UninstallExceptionHandler()
+ {
++#ifndef __ORBIS__
+   stack_t signal_stack;
+   stack_t old_stack;
+   signal_stack.ss_flags = SS_DISABLE;
+@@ -337,8 +345,9 @@ void UninstallExceptionHandler()
+   {
+     free(old_stack.ss_sp);
+   }
++#endif
+   sigaction(SIGSEGV, &old_sa_segv, nullptr);
+-#ifdef __APPLE__
++#if defined(__APPLE__) || defined(__ORBIS__)
+   sigaction(SIGBUS, &old_sa_bus, nullptr);
+ #endif
+ }
+diff --git a/Source/Core/DolphinNoGUI/CMakeLists.txt b/Source/Core/DolphinNoGUI/CMakeLists.txt
+index 51c3fff..57068d2 100644
+--- a/Source/Core/DolphinNoGUI/CMakeLists.txt
++++ b/Source/Core/DolphinNoGUI/CMakeLists.txt
+@@ -23,6 +23,14 @@ if(${CMAKE_SYSTEM_NAME} STREQUAL "Linux")
+   target_sources(dolphin-nogui PRIVATE PlatformFBDev.cpp)
+ endif()
+ 
++if(PS4)
++  # PS4_RUNTIME_SOURCES and ps4_add_eboot() come from DolphinPS4's ps4-love-style.cmake, included
++  # into the top-level project (CMAKE_PROJECT_dolphin-emu_INCLUDE).
++  target_sources(dolphin-nogui PRIVATE PlatformPS4.cpp ${PS4_RUNTIME_SOURCES})
++  target_link_libraries(dolphin-nogui PRIVATE
++    SceSysmodule SceSystemService SceUserService SceVideoOut SceAudioOut ScePad)
++endif()
++
+ if (WIN32)
+   target_sources(dolphin-nogui PRIVATE DolphinNoGUI.exe.manifest DolphinNoGUI.rc)
+ 
+@@ -68,3 +76,7 @@ set(CPACK_PACKAGE_EXECUTABLES ${CPACK_PACKAGE_EXECUTABLES} dolphin-nogui)
+ if (NOT WIN32)
+   install(TARGETS dolphin-nogui RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+ endif()
++
++if(PS4)
++  ps4_add_eboot(dolphin-nogui)
++endif()
+diff --git a/Source/Core/DolphinNoGUI/MainNoGUI.cpp b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
+index 3bf40ea..7ed5db4 100644
+--- a/Source/Core/DolphinNoGUI/MainNoGUI.cpp
++++ b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
+@@ -15,6 +15,7 @@
+ #include <windows.h>
+ #endif
+ 
++#include "Common/Logging/LogManager.h"
+ #include "Common/ScopeGuard.h"
+ #include "Core/Boot/Boot.h"
+ #include "Core/BootManager.h"
+@@ -173,6 +174,10 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
+   if (platform_name == "macos" || platform_name.empty())
+     return Platform::CreateMacOSPlatform();
+ #endif
++#ifdef __ORBIS__
++  if (platform_name == "ps4" || platform_name.empty())
++    return Platform::CreatePS4Platform();
++#endif
+ 
+   if (platform_name == "headless" || platform_name.empty())
+     return Platform::CreateHeadlessPlatform();
+@@ -184,8 +189,17 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
+ #define main app_main
+ #endif
+ 
+-int main(const int argc, char* argv[])
++int main(int argc, char* argv[])
+ {
++#ifdef __ORBIS__
++  std::vector<std::string> ps4_args = Platform::GetPS4Arguments();
++  std::vector<char*> ps4_argv;
++  for (std::string& arg : ps4_args)
++    ps4_argv.push_back(arg.data());
++  ps4_argv.push_back(nullptr);
++  argc = static_cast<int>(ps4_args.size());
++  argv = ps4_argv.data();
++#endif
+   const auto parser =
+       CommandLineParse::CreateParser(CommandLineParse::ParserOptions::OmitGUIOptions);
+   parser->add_option("-p", "--platform")
+@@ -207,6 +221,10 @@ int main(const int argc, char* argv[])
+ #ifdef __APPLE__
+                 ,
+                 "macos"
++#endif
++#ifdef __ORBIS__
++                ,
++                "ps4"
+ #endif
+       });
+ 
+@@ -270,6 +288,16 @@ int main(const int argc, char* argv[])
+ 
+   UICommon::SetUserDirectory(user_directory);
+   UICommon::Init();
++#ifdef __ORBIS__
++  // Everything to the console listener, which goes to /data/DolphinPS4/dolphin.log.
++  {
++    auto* log_manager = Common::Log::LogManager::GetInstance();
++    log_manager->EnableListener(Common::Log::LogListener::CONSOLE_LISTENER, true);
++    log_manager->SetLogLevel(Common::Log::LogLevel::LINFO);
++    for (int i = 0; i < static_cast<int>(Common::Log::LogType::NUMBER_OF_LOGS); i++)
++      log_manager->SetEnable(static_cast<Common::Log::LogType>(i), true);
++  }
++#endif
+   UICommon::InitControllers(wsi);
+ 
+   Common::ScopeGuard ui_common_guard([] {
+diff --git a/Source/Core/DolphinNoGUI/Platform.h b/Source/Core/DolphinNoGUI/Platform.h
+index f4dc8a9..e2f367a 100644
+--- a/Source/Core/DolphinNoGUI/Platform.h
++++ b/Source/Core/DolphinNoGUI/Platform.h
+@@ -5,6 +5,7 @@
+ 
+ #include <memory>
+ #include <string>
++#include <vector>
+ 
+ #include "Common/Flag.h"
+ #include "Common/WindowSystemInfo.h"
+@@ -47,6 +48,12 @@ public:
+   static std::unique_ptr<Platform> CreateMacOSPlatform();
+ #endif
+ 
++#ifdef __ORBIS__
++  static std::unique_ptr<Platform> CreatePS4Platform();
++  // PS4 apps start without arguments: sets up logging and builds the command line.
++  static std::vector<std::string> GetPS4Arguments();
++#endif
++
+ protected:
+   void UpdateRunningFlag();
+ 
+diff --git a/Source/Core/DolphinNoGUI/PlatformPS4.cpp b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
+new file mode 100644
+index 0000000..258e70f
+--- /dev/null
++++ b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
+@@ -0,0 +1,270 @@
++// Copyright 2026 Dolphin Emulator Project
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++// PS4 (OpenOrbis homebrew) platform: fullscreen Piglet (OpenGL ES) output, logging to
++// /data/DolphinPS4 and klog, and a command line built from /data/DolphinPS4 since PS4 apps are
++// started without arguments.
++
++#include "DolphinNoGUI/Platform.h"
++
++#include <algorithm>
++#include <array>
++#include <cstdarg>
++#include <cstdio>
++#include <filesystem>
++#include <string>
++#include <thread>
++#include <vector>
++
++#include <orbis/Sysmodule.h>
++#include <orbis/libkernel.h>
++#include <sys/stat.h>
++#include <unistd.h>
++
++#include "Common/Logging/LogManager.h"
++#include "Common/MsgHandler.h"
++#include "Core/Core.h"
++#include "Core/System.h"
++
++extern "C" int sceSystemServiceLoadExec(const char* path, char* const argv[]);
++
++namespace
++{
++constexpr char DATA_DIR[] = "/data/DolphinPS4";
++
++class PlatformPS4 final : public Platform
++{
++public:
++  bool Init() override;
++  void SetTitle(const std::string& title) override;
++  void MainLoop() override;
++
++  WindowSystemInfo GetWindowSystemInfo() const override;
++};
++
++void LoadSystemModules()
++{
++  // Calling into a system library whose module isn't loaded kills the app with
++  // PRX_NOT_RESOLVED_FUNCTION (love-ps4).
++  const std::array<std::pair<const char*, u32>, 5> modules = {{
++      {"SystemService", ORBIS_SYSMODULE_INTERNAL_SYSTEM_SERVICE},
++      {"UserService", ORBIS_SYSMODULE_INTERNAL_USER_SERVICE},
++      {"VideoOut", ORBIS_SYSMODULE_INTERNAL_VIDEO_OUT},
++      {"AudioOut", ORBIS_SYSMODULE_INTERNAL_AUDIOOUT},
++      {"Pad", ORBIS_SYSMODULE_INTERNAL_PAD},
++  }};
++  for (const auto& [name, id] : modules)
++  {
++    const int result = sceSysmoduleLoadModuleInternal(static_cast<OrbisSysModuleInternal>(id));
++    if (result != 0)
++      fprintf(stderr, "[dolphin] loading system module %s failed (%#x)\n", name, result);
++  }
++}
++
++// Panic alerts would normally be dialogs; log them and keep going.
++bool LogMessageAlert(const char* caption, const char* text, bool yes_no, Common::MsgType style)
++{
++  char line[2048];
++  snprintf(line, sizeof(line), "[dolphin] %s: %s\n", caption, text);
++  fputs(line, stderr);
++  sceKernelDebugOutText(0, line);
++  return true;
++}
++
++bool PlatformPS4::Init()
++{
++  LoadSystemModules();
++  Common::RegisterMsgAlertHandler(LogMessageAlert);
++  return true;
++}
++
++void PlatformPS4::SetTitle(const std::string& title)
++{
++  fprintf(stderr, "[dolphin] %s\n", title.c_str());
++}
++
++void PlatformPS4::MainLoop()
++{
++  while (m_running.IsSet())
++  {
++    UpdateRunningFlag();
++    Core::HostDispatchJobs(Core::System::GetInstance());
++    std::this_thread::sleep_for(std::chrono::milliseconds(16));
++  }
++}
++
++WindowSystemInfo PlatformPS4::GetWindowSystemInfo() const
++{
++  WindowSystemInfo wsi;
++  wsi.type = WindowSystemType::Orbis;
++  wsi.display_connection = nullptr;
++  wsi.render_window = nullptr;
++  wsi.render_surface = nullptr;
++  wsi.render_surface_width = 1920;
++  wsi.render_surface_height = 1080;
++  return wsi;
++}
++
++std::string FindGame()
++{
++  // /data/DolphinPS4/boot.txt: path of the game to start (first line).
++  if (FILE* file = fopen((std::string(DATA_DIR) + "/boot.txt").c_str(), "r"))
++  {
++    char line[1024] = {};
++    const bool read = fgets(line, sizeof(line), file) != nullptr;
++    fclose(file);
++    std::string path = read ? line : "";
++    while (!path.empty() && (path.back() == '\n' || path.back() == '\r' || path.back() == ' '))
++      path.pop_back();
++    if (!path.empty())
++      return path;
++  }
++
++  // Otherwise the first game in /data/DolphinPS4/games, in name order.
++  const std::array<std::string, 11> extensions = {".iso", ".gcm", ".ciso", ".gcz", ".wbfs",
++                                                  ".wia", ".rvz", ".dol", ".elf", ".wad", ".nkit.iso"};
++  std::vector<std::string> games;
++  std::error_code error;
++  for (const auto& entry :
++       std::filesystem::directory_iterator(std::string(DATA_DIR) + "/games", error))
++  {
++    std::string name = entry.path().filename().string();
++    std::string lower = name;
++    std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
++    for (const std::string& extension : extensions)
++    {
++      if (lower.size() > extension.size() &&
++          lower.compare(lower.size() - extension.size(), extension.size(), extension) == 0)
++      {
++        games.push_back(entry.path().string());
++        break;
++      }
++    }
++  }
++  std::sort(games.begin(), games.end());
++  return games.empty() ? std::string() : games.front();
++}
++
++// Controller mappings for the DualShock 4 (ciface::PS4Pad), written on first launch only so that
++// user edits are kept.
++constexpr char GCPAD_DEFAULTS[] = R"([GCPad1]
++Device = PS4/0/DualShock 4
++Buttons/A = Cross
++Buttons/B = Square
++Buttons/X = Circle
++Buttons/Y = Triangle
++Buttons/Z = R1
++Buttons/Start = Options
++Main Stick/Up = `Left Y-`
++Main Stick/Down = `Left Y+`
++Main Stick/Left = `Left X-`
++Main Stick/Right = `Left X+`
++C-Stick/Up = `Right Y-`
++C-Stick/Down = `Right Y+`
++C-Stick/Left = `Right X-`
++C-Stick/Right = `Right X+`
++Triggers/L = `L2 Click`
++Triggers/R = `R2 Click`
++Triggers/L-Analog = L2
++Triggers/R-Analog = R2
++D-Pad/Up = `Pad N`
++D-Pad/Down = `Pad S`
++D-Pad/Left = `Pad W`
++D-Pad/Right = `Pad E`
++Rumble/Motor = `Motor L`
++)";
++
++constexpr char WIIMOTE_DEFAULTS[] = R"([Wiimote1]
++Device = PS4/0/DualShock 4
++Buttons/A = Cross
++Buttons/B = R2
++Buttons/1 = Square
++Buttons/2 = Triangle
++Buttons/- = L1
++Buttons/+ = Options
++Buttons/Home = Touchpad
++D-Pad/Up = `Pad N`
++D-Pad/Down = `Pad S`
++D-Pad/Left = `Pad W`
++D-Pad/Right = `Pad E`
++IR/Up = `Right Y-`
++IR/Down = `Right Y+`
++IR/Left = `Right X-`
++IR/Right = `Right X+`
++Shake/X = R3
++Shake/Y = R3
++Shake/Z = R3
++Rumble/Motor = `Motor L`
++Extension = Nunchuk
++Nunchuk/Buttons/C = L1
++Nunchuk/Buttons/Z = L2
++Nunchuk/Stick/Up = `Left Y-`
++Nunchuk/Stick/Down = `Left Y+`
++Nunchuk/Stick/Left = `Left X-`
++Nunchuk/Stick/Right = `Left X+`
++)";
++
++void WriteDefaultFile(const std::string& path, const char* contents)
++{
++  struct stat st;
++  if (stat(path.c_str(), &st) == 0)
++    return;
++  if (FILE* file = fopen(path.c_str(), "w"))
++  {
++    fputs(contents, file);
++    fclose(file);
++  }
++}
++
++void WriteDefaultConfig(const std::string& user_dir)
++{
++  mkdir(user_dir.c_str(), 0777);
++  mkdir((user_dir + "/Config").c_str(), 0777);
++  WriteDefaultFile(user_dir + "/Config/GCPadNew.ini", GCPAD_DEFAULTS);
++  WriteDefaultFile(user_dir + "/Config/WiimoteNew.ini", WIIMOTE_DEFAULTS);
++}
++
++void OnExit()
++{
++  // The raw exit syscall isn't allowed for apps: ask the system to close us.
++  fflush(stderr);
++  sceSystemServiceLoadExec("exit", nullptr);
++  for (;;)
++    sceKernelUsleep(100000);
++}
++
++}  // namespace
++
++std::unique_ptr<Platform> Platform::CreatePS4Platform()
++{
++  return std::make_unique<PlatformPS4>();
++}
++
++std::vector<std::string> Platform::GetPS4Arguments()
++{
++  mkdir(DATA_DIR, 0777);
++  mkdir((std::string(DATA_DIR) + "/games").c_str(), 0777);
++
++  // stdout/stderr go nowhere on PS4: send them to a file, unbuffered so it survives a crash.
++  if (FILE* log = freopen((std::string(DATA_DIR) + "/dolphin.log").c_str(), "w", stderr))
++    setvbuf(log, nullptr, _IONBF, 0);
++  dup2(fileno(stderr), fileno(stdout));
++  setvbuf(stdout, nullptr, _IONBF, 0);
++  atexit(OnExit);
++
++  const std::string user_dir = std::string(DATA_DIR) + "/User";
++  WriteDefaultConfig(user_dir);
++  std::vector<std::string> args = {"dolphin-emu-nogui", "--platform=ps4", "--user=" + user_dir};
++  const std::string game = FindGame();
++  if (game.empty())
++  {
++    fprintf(stderr, "[dolphin] no game: put one in %s/games or its path in %s/boot.txt\n",
++            DATA_DIR, DATA_DIR);
++  }
++  else
++  {
++    fprintf(stderr, "[dolphin] booting %s\n", game.c_str());
++    args.push_back("--exec=" + game);
++  }
++  return args;
++}
+diff --git a/Source/Core/InputCommon/CMakeLists.txt b/Source/Core/InputCommon/CMakeLists.txt
+index 5cc6b66..67933de 100644
+--- a/Source/Core/InputCommon/CMakeLists.txt
++++ b/Source/Core/InputCommon/CMakeLists.txt
+@@ -1,7 +1,6 @@
+ add_library(inputcommon
+   DynamicInputTextureManager.cpp
+   DynamicInputTextureManager.h
+-  GCAdapter.cpp
+   GCAdapter.h
+   ImageOperations.cpp
+   ImageOperations.h
+@@ -144,7 +143,7 @@ elseif(ANDROID)
+   )
+ endif()
+ 
+-if(NOT ANDROID)
++if(TARGET LibUSB::LibUSB)
+   target_link_libraries(inputcommon PUBLIC LibUSB::LibUSB)
+ endif()
+ 
+@@ -197,3 +196,17 @@ if(TARGET Hidapi::Hidapi)
+   target_link_libraries(inputcommon PUBLIC Hidapi::Hidapi)
+   target_compile_definitions(inputcommon PRIVATE -DHAVE_HIDAPI=1)
+ endif()
++
++# PS4: apps have no USB access, so the GameCube adapter is never detected.
++if(PS4)
++  target_sources(inputcommon PRIVATE GCAdapterNull.cpp)
++else()
++  target_sources(inputcommon PRIVATE GCAdapter.cpp)
++endif()
++
++if(PS4)
++  target_sources(inputcommon PRIVATE
++    ControllerInterface/PS4Pad/PS4Pad.cpp
++    ControllerInterface/PS4Pad/PS4Pad.h
++  )
++endif()
+diff --git a/Source/Core/InputCommon/ControllerInterface/ControllerInterface.cpp b/Source/Core/InputCommon/ControllerInterface/ControllerInterface.cpp
+index 20fd517..6ea0780 100644
+--- a/Source/Core/InputCommon/ControllerInterface/ControllerInterface.cpp
++++ b/Source/Core/InputCommon/ControllerInterface/ControllerInterface.cpp
+@@ -33,6 +33,9 @@
+ #ifdef CIFACE_USE_DUALSHOCKUDPCLIENT
+ #include "InputCommon/ControllerInterface/DualShockUDPClient/DualShockUDPClient.h"
+ #endif
++#ifdef CIFACE_USE_PS4PAD
++#include "InputCommon/ControllerInterface/PS4Pad/PS4Pad.h"
++#endif
+ #ifdef CIFACE_USE_STEAMDECK
+ #include "InputCommon/ControllerInterface/SteamDeck/SteamDeck.h"
+ #endif
+@@ -82,6 +85,9 @@ void ControllerInterface::Initialize(const WindowSystemInfo& wsi)
+ #ifdef CIFACE_USE_DUALSHOCKUDPCLIENT
+   m_input_backends.emplace_back(ciface::DualShockUDPClient::CreateInputBackend(this));
+ #endif
++#ifdef CIFACE_USE_PS4PAD
++  m_input_backends.emplace_back(ciface::PS4Pad::CreateInputBackend(this));
++#endif
+ #ifdef CIFACE_USE_STEAMDECK
+   m_input_backends.emplace_back(ciface::SteamDeck::CreateInputBackend(this));
+ #endif
+diff --git a/Source/Core/InputCommon/ControllerInterface/ControllerInterface.h b/Source/Core/InputCommon/ControllerInterface/ControllerInterface.h
+index 8f7f4ba..34feb8e 100644
+--- a/Source/Core/InputCommon/ControllerInterface/ControllerInterface.h
++++ b/Source/Core/InputCommon/ControllerInterface/ControllerInterface.h
+@@ -38,6 +38,9 @@
+ #if defined(HAVE_HIDAPI)
+ #define CIFACE_USE_STEAMDECK
+ #endif
++#if defined(__ORBIS__)
++#define CIFACE_USE_PS4PAD
++#endif
+ 
+ namespace ciface
+ {
+diff --git a/Source/Core/InputCommon/ControllerInterface/PS4Pad/PS4Pad.cpp b/Source/Core/InputCommon/ControllerInterface/PS4Pad/PS4Pad.cpp
+new file mode 100644
+index 0000000..334626a
+--- /dev/null
++++ b/Source/Core/InputCommon/ControllerInterface/PS4Pad/PS4Pad.cpp
+@@ -0,0 +1,218 @@
++// Copyright 2026 Dolphin Emulator Project
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++#include "InputCommon/ControllerInterface/PS4Pad/PS4Pad.h"
++
++#include <algorithm>
++#include <cstring>
++#include <string>
++
++#include <orbis/Pad.h>
++#include <orbis/UserService.h>
++
++#include "Common/CommonTypes.h"
++#include "Common/Logging/Log.h"
++#include "InputCommon/ControllerInterface/ControllerInterface.h"
++
++namespace ciface::PS4Pad
++{
++constexpr std::string_view SOURCE_NAME = "PS4";
++constexpr int32_t INVALID_USER = -1;
++
++class Device final : public Core::Device
++{
++private:
++  class Button final : public Input
++  {
++  public:
++    Button(const char* name, const u32& buttons, u32 mask)
++        : m_name(name), m_buttons(buttons), m_mask(mask)
++    {
++    }
++    std::string GetName() const override { return m_name; }
++    ControlState GetState() const override { return (m_buttons & m_mask) != 0; }
++
++  private:
++    const char* const m_name;
++    const u32& m_buttons;
++    const u32 m_mask;
++  };
++
++  // A trigger (0..255) or one direction of a stick axis (0..255, centered at 128).
++  class Axis final : public Input
++  {
++  public:
++    Axis(const char* name, const u8& value, bool is_trigger, bool negative)
++        : m_name(name), m_value(value), m_is_trigger(is_trigger), m_negative(negative)
++    {
++    }
++    std::string GetName() const override { return m_name; }
++    ControlState GetState() const override
++    {
++      if (m_is_trigger)
++        return m_value / 255.0;
++      const ControlState centered = (m_value - 127.5) / 127.5;
++      return m_negative ? -centered : centered;
++    }
++
++  private:
++    const char* const m_name;
++    const u8& m_value;
++    const bool m_is_trigger;
++    const bool m_negative;
++  };
++
++  class Motor final : public Output
++  {
++  public:
++    Motor(const char* name, Device& device, bool large) : m_name(name), m_device(device), m_large(large)
++    {
++    }
++    std::string GetName() const override { return m_name; }
++    void SetState(ControlState state) override { m_device.SetMotor(m_large, state); }
++
++  private:
++    const char* const m_name;
++    Device& m_device;
++    const bool m_large;
++  };
++
++public:
++  Device(int32_t user_id, int32_t handle) : m_user_id(user_id), m_handle(handle)
++  {
++    // clang-format off
++    AddInput(new Button("Cross",         m_buttons, ORBIS_PAD_BUTTON_CROSS));
++    AddInput(new Button("Circle",        m_buttons, ORBIS_PAD_BUTTON_CIRCLE));
++    AddInput(new Button("Square",        m_buttons, ORBIS_PAD_BUTTON_SQUARE));
++    AddInput(new Button("Triangle",      m_buttons, ORBIS_PAD_BUTTON_TRIANGLE));
++    AddInput(new Button("L1",            m_buttons, ORBIS_PAD_BUTTON_L1));
++    AddInput(new Button("R1",            m_buttons, ORBIS_PAD_BUTTON_R1));
++    AddInput(new Button("L2 Click",      m_buttons, ORBIS_PAD_BUTTON_L2));
++    AddInput(new Button("R2 Click",      m_buttons, ORBIS_PAD_BUTTON_R2));
++    AddInput(new Button("L3",            m_buttons, ORBIS_PAD_BUTTON_L3));
++    AddInput(new Button("R3",            m_buttons, ORBIS_PAD_BUTTON_R3));
++    AddInput(new Button("Options",       m_buttons, ORBIS_PAD_BUTTON_OPTIONS));
++    AddInput(new Button("Touchpad",      m_buttons, ORBIS_PAD_BUTTON_TOUCH_PAD));
++    AddInput(new Button("Pad N",         m_buttons, ORBIS_PAD_BUTTON_UP));
++    AddInput(new Button("Pad S",         m_buttons, ORBIS_PAD_BUTTON_DOWN));
++    AddInput(new Button("Pad W",         m_buttons, ORBIS_PAD_BUTTON_LEFT));
++    AddInput(new Button("Pad E",         m_buttons, ORBIS_PAD_BUTTON_RIGHT));
++
++    AddInput(new Axis("L2",              m_state.analogButtons.l2, true, false));
++    AddInput(new Axis("R2",              m_state.analogButtons.r2, true, false));
++    // Stick Y grows downwards.
++    AddInput(new Axis("Left X-",         m_state.leftStick.x, false, true));
++    AddInput(new Axis("Left X+",         m_state.leftStick.x, false, false));
++    AddInput(new Axis("Left Y-",         m_state.leftStick.y, false, false));
++    AddInput(new Axis("Left Y+",         m_state.leftStick.y, false, true));
++    AddInput(new Axis("Right X-",        m_state.rightStick.x, false, true));
++    AddInput(new Axis("Right X+",        m_state.rightStick.x, false, false));
++    AddInput(new Axis("Right Y-",        m_state.rightStick.y, false, false));
++    AddInput(new Axis("Right Y+",        m_state.rightStick.y, false, true));
++
++    AddOutput(new Motor("Motor L",       *this, true));
++    AddOutput(new Motor("Motor R",       *this, false));
++    // clang-format on
++  }
++
++  ~Device() override
++  {
++    OrbisPadVibeParam off = {0, 0};
++    scePadSetVibration(m_handle, &off);
++    scePadClose(m_handle);
++  }
++
++  std::string GetName() const override { return "DualShock 4"; }
++  std::string GetSource() const override { return std::string(SOURCE_NAME); }
++  int32_t GetUserId() const { return m_user_id; }
++
++  Core::DeviceRemoval UpdateInput() override
++  {
++    OrbisPadData data;
++    std::memset(&data, 0, sizeof(data));
++    if (scePadReadState(m_handle, &data) == 0 && data.connected)
++    {
++      m_state = data;
++      m_buttons = data.buttons;
++    }
++    else
++    {
++      // Disconnected (or the user signed out): report a neutral pad.
++      m_buttons = 0;
++      m_state.leftStick = {128, 128};
++      m_state.rightStick = {128, 128};
++      m_state.analogButtons = {0, 0};
++    }
++    return Core::DeviceRemoval::Keep;
++  }
++
++  void SetMotor(bool large, ControlState state)
++  {
++    const u8 value = static_cast<u8>(std::clamp(state, 0.0, 1.0) * 255);
++    if (large)
++      m_vibration.lgMotor = value;
++    else
++      m_vibration.smMotor = value;
++    scePadSetVibration(m_handle, &m_vibration);
++  }
++
++private:
++  const int32_t m_user_id;
++  const int32_t m_handle;
++  OrbisPadData m_state{};
++  u32 m_buttons = 0;
++  OrbisPadVibeParam m_vibration{0, 0};
++};
++
++class InputBackend final : public ciface::InputBackend
++{
++public:
++  explicit InputBackend(ControllerInterface* controller_interface)
++      : ciface::InputBackend(controller_interface)
++  {
++    int32_t result = sceUserServiceInitialize(nullptr);
++    // Already initialized by another part of the app is fine.
++    if (result != 0 && result != static_cast<int32_t>(0x80960003))
++      WARN_LOG_FMT(CONTROLLERINTERFACE, "sceUserServiceInitialize: {:#x}", static_cast<u32>(result));
++    result = scePadInit();
++    if (result != 0)
++      ERROR_LOG_FMT(CONTROLLERINTERFACE, "scePadInit: {:#x}", static_cast<u32>(result));
++  }
++
++  void PopulateDevices() override
++  {
++    GetControllerInterface().RemoveDevice(
++        [](const auto* device) { return device->GetSource() == SOURCE_NAME; });
++
++    OrbisUserServiceLoginUserIdList users;
++    std::memset(&users, 0xFF, sizeof(users));
++    if (sceUserServiceGetLoginUserIdList(&users) != 0)
++    {
++      // Fall back to the user who started the app.
++      std::memset(&users, 0xFF, sizeof(users));
++      sceUserServiceGetInitialUser(&users.userId[0]);
++    }
++
++    for (const int32_t user : users.userId)
++    {
++      if (user == INVALID_USER)
++        continue;
++      const int32_t handle = scePadOpen(user, ORBIS_PAD_PORT_TYPE_STANDARD, 0, nullptr);
++      if (handle < 0)
++      {
++        WARN_LOG_FMT(CONTROLLERINTERFACE, "scePadOpen(user {:#x}): {:#x}", static_cast<u32>(user),
++                     static_cast<u32>(handle));
++        continue;
++      }
++      INFO_LOG_FMT(CONTROLLERINTERFACE, "DualShock 4 of user {:#x} opened (handle {})",
++                   static_cast<u32>(user), handle);
++      GetControllerInterface().AddDevice(std::make_shared<Device>(user, handle));
++    }
++  }
++};
++
++std::unique_ptr<ciface::InputBackend> CreateInputBackend(ControllerInterface* controller_interface)
++{
++  return std::make_unique<InputBackend>(controller_interface);
++}
++}  // namespace ciface::PS4Pad
+diff --git a/Source/Core/InputCommon/ControllerInterface/PS4Pad/PS4Pad.h b/Source/Core/InputCommon/ControllerInterface/PS4Pad/PS4Pad.h
+new file mode 100644
+index 0000000..53d965f
+--- /dev/null
++++ b/Source/Core/InputCommon/ControllerInterface/PS4Pad/PS4Pad.h
+@@ -0,0 +1,14 @@
++// Copyright 2026 Dolphin Emulator Project
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++#pragma once
++
++#include <memory>
++
++#include "InputCommon/ControllerInterface/InputBackend.h"
++
++// DualShock 4 controllers on PS4, through scePad: one device per signed-in user.
++namespace ciface::PS4Pad
++{
++std::unique_ptr<ciface::InputBackend> CreateInputBackend(ControllerInterface* controller_interface);
++}  // namespace ciface::PS4Pad
+diff --git a/Source/Core/InputCommon/GCAdapterNull.cpp b/Source/Core/InputCommon/GCAdapterNull.cpp
+new file mode 100644
+index 0000000..8b666df
+--- /dev/null
++++ b/Source/Core/InputCommon/GCAdapterNull.cpp
+@@ -0,0 +1,59 @@
++// Copyright 2026 Dolphin Emulator Project
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++// GameCube controller adapter for platforms without USB access (PS4): never detected.
++
++#include "InputCommon/GCAdapter.h"
++
++#include "InputCommon/GCPadStatus.h"
++
++namespace GCAdapter
++{
++void Init()
++{
++}
++
++void ResetRumble()
++{
++}
++
++void Shutdown()
++{
++}
++
++void SetAdapterCallback(std::function<void(void)> func)
++{
++}
++
++GCPadStatus Input(int chan)
++{
++  GCPadStatus status;
++  status.isConnected = false;
++  return status;
++}
++
++void Output(int chan, u8 rumble_command)
++{
++}
++
++bool IsDetected(const char** error_message)
++{
++  if (error_message)
++    *error_message = "Not supported on this platform";
++  return false;
++}
++
++bool DeviceConnected(int chan)
++{
++  return false;
++}
++
++void ResetDeviceType(int chan)
++{
++}
++
++double GetCurrentPollRate()
++{
++  return 0.0;
++}
++}  // namespace GCAdapter

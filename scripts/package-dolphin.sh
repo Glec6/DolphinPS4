@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Package the PS4 Dolphin build (after scripts/configure-dolphin.sh + ninja) as DLPH00010:
+# eboot.bin, Dolphin's Data/Sys as /app0/Sys, and the Piglet/shader compiler modules.
+#   package-dolphin.sh [upload]
+set -euo pipefail
+HERE="$(cd "$(dirname "$0")" && pwd)"
+source "$HERE/ps4-env.sh"
+SRC="${DOLPHIN_SRC:-$PS4_BUILD_ROOT/src/dolphin}"
+BUILD="$PS4_BUILD_ROOT/build/dolphin"
+EBOOT="$BUILD/Source/Core/DolphinNoGUI/dolphin-nogui_eboot/eboot.bin"
+VERSION="${DOLPHIN_PS4_VERSION:-01.00}"
+HOST="ftp://${PS4_HOST:-192.168.0.90}:${PS4_FTP_PORT:-2121}"
+
+[ -f "$EBOOT" ] || { echo "missing $EBOOT: build first" >&2; exit 1; }
+STAGE="$PS4_BUILD_ROOT/build/dolphin-stage"
+rm -rf "$STAGE"
+mkdir -p "$STAGE/sce_sys"
+cp "$EBOOT" "$STAGE/eboot.bin"
+cp "$HERE/../sce_sys/icon0.png" "$STAGE/sce_sys/"
+cp -r "$SRC/Data/Sys" "$STAGE/Sys"
+PKG="$("$HERE/make-pkg.sh" "$STAGE" DLPH00010 "Dolphin" "$VERSION" DOLPHIN "$PS4_BUILD_ROOT/out" | tail -1)"
+ls -la "$PKG"
+if [ "${1:-}" = upload ]; then
+    curl -sS -T "$PKG" "$HOST/data/pkg/"
+    echo "uploaded $(basename "$PKG")"
+fi
