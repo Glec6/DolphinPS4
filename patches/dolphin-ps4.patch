@@ -2663,7 +2663,7 @@ index 003a7ec..66d26a4 100644
    GetOGLGfx()->RestoreFramebufferBinding();
  
 diff --git a/Source/Core/VideoBackends/OGL/ProgramShaderCache.cpp b/Source/Core/VideoBackends/OGL/ProgramShaderCache.cpp
-index 1dfd026..0b7c21e 100644
+index 1dfd026..a46a79e 100644
 --- a/Source/Core/VideoBackends/OGL/ProgramShaderCache.cpp
 +++ b/Source/Core/VideoBackends/OGL/ProgramShaderCache.cpp
 @@ -37,6 +37,12 @@
@@ -2715,23 +2715,84 @@ index 1dfd026..0b7c21e 100644
    for (int a = 0; a < 8; ++a)
    {
      // Still need to get sampler locations since we aren't binding them statically in the shaders
-@@ -221,12 +256,54 @@ u32 ProgramShaderCache::GetUniformBufferAlignment()
+@@ -221,12 +256,118 @@ u32 ProgramShaderCache::GetUniformBufferAlignment()
    return s_ubo_align;
  }
  
 +#ifdef __ORBIS__
 +// Piglet's shaders read zeros from a uniform block bound with glBindBufferRange at an offset
-+// into the shared stream buffer. Give every block binding its own buffer, bound whole.
-+static GLuint s_ps4_block_buffers[5];
-+static GLuint s_ps4_utility_buffer;
-+
-+static void PS4UploadBlock(GLuint* buffer, const void* data, u32 size)
++// into the shared stream buffer, so every block binding gets whole buffers of its own.
++// Re-specifying a buffer with glBufferData for every draw led to random Piglet GPU crashes
++// (old storage released while the GPU still reads it), so each binding cycles through a ring
++// of buffers allocated once and filled with glBufferSubData. A buffer is only rewritten after
++// a fence shows the GPU is done with its previous contents.
++class PS4UniformRing
 +{
-+  if (!*buffer)
-+    glGenBuffers(1, buffer);
-+  glBindBuffer(GL_UNIFORM_BUFFER, *buffer);
-+  glBufferData(GL_UNIFORM_BUFFER, size, data, GL_STREAM_DRAW);
-+}
++public:
++  static constexpr u32 CAPACITY = 8 * 1024;
++  static constexpr u32 COUNT = 512;
++  static constexpr u32 GROUP = 32;  // buffers covered by one fence
++
++  // Uploads data into the next buffer of the ring and binds it whole to binding point index.
++  GLuint Upload(u32 index, const void* data, u32 size)
++  {
++    if (size > CAPACITY)
++    {
++      // Never expected for Dolphin's blocks; keep it working the slow way.
++      if (!m_oversized)
++        glGenBuffers(1, &m_oversized);
++      glBindBuffer(GL_UNIFORM_BUFFER, m_oversized);
++      glBufferData(GL_UNIFORM_BUFFER, size, data, GL_STREAM_DRAW);
++      glBindBufferBase(GL_UNIFORM_BUFFER, index, m_oversized);
++      return m_oversized;
++    }
++    if (m_buffers[0] == 0)
++    {
++      glGenBuffers(COUNT, m_buffers);
++      for (GLuint buffer : m_buffers)
++      {
++        glBindBuffer(GL_UNIFORM_BUFFER, buffer);
++        glBufferData(GL_UNIFORM_BUFFER, CAPACITY, nullptr, GL_DYNAMIC_DRAW);
++      }
++    }
++    if (m_next % GROUP == 0)
++    {
++      // Everything drawn with the previous group has been submitted by now: fence it.
++      if (m_used)
++      {
++        const u32 previous = (m_next == 0 ? COUNT : m_next) / GROUP - 1;
++        if (m_fences[previous])
++          glDeleteSync(m_fences[previous]);
++        m_fences[previous] = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
++      }
++      // Before rewriting this group, wait until the GPU has finished with it.
++      GLsync& fence = m_fences[m_next / GROUP];
++      if (fence)
++      {
++        glClientWaitSync(fence, GL_SYNC_FLUSH_COMMANDS_BIT, 1000000000ULL);
++        glDeleteSync(fence);
++        fence = nullptr;
++      }
++    }
++    const GLuint buffer = m_buffers[m_next];
++    m_next = (m_next + 1) % COUNT;
++    m_used = true;
++    glBindBuffer(GL_UNIFORM_BUFFER, buffer);
++    glBufferSubData(GL_UNIFORM_BUFFER, 0, size, data);
++    glBindBufferBase(GL_UNIFORM_BUFFER, index, buffer);
++    return buffer;
++  }
++
++private:
++  GLuint m_buffers[COUNT] = {};
++  GLsync m_fences[COUNT / GROUP] = {};
++  GLuint m_oversized = 0;
++  u32 m_next = 0;
++  bool m_used = false;
++};
++
++static PS4UniformRing s_ps4_pixel_ring, s_ps4_vertex_ring, s_ps4_custom_ring,
++    s_ps4_geometry_ring, s_ps4_utility_ring;
 +#endif
 +
  void ProgramShaderCache::UploadConstants()
@@ -2741,50 +2802,53 @@ index 1dfd026..0b7c21e 100644
    auto& vertex_shader_manager = system.GetVertexShaderManager();
    auto& geometry_shader_manager = system.GetGeometryShaderManager();
 +#ifdef __ORBIS__
-+  if (pixel_shader_manager.dirty || vertex_shader_manager.dirty || geometry_shader_manager.dirty ||
-+      pixel_shader_manager.custom_constants_dirty)
++  // Only the blocks that changed; the others stay bound (utility draws rebind every binding,
++  // but invalidate all constants afterwards, so everything is uploaded again after them).
++  if (pixel_shader_manager.dirty)
 +  {
-+    PS4UploadBlock(&s_ps4_block_buffers[1], &pixel_shader_manager.constants,
-+                   sizeof(PixelShaderConstants));
-+    glBindBufferBase(GL_UNIFORM_BUFFER, 1, s_ps4_block_buffers[1]);
-+    PS4UploadBlock(&s_ps4_block_buffers[2], &vertex_shader_manager.constants,
-+                   sizeof(VertexShaderConstants));
-+    glBindBufferBase(GL_UNIFORM_BUFFER, 2, s_ps4_block_buffers[2]);
++    s_ps4_pixel_ring.Upload(1, &pixel_shader_manager.constants, sizeof(PixelShaderConstants));
++    pixel_shader_manager.dirty = false;
++  }
++  if (vertex_shader_manager.dirty)
++  {
++    s_ps4_vertex_ring.Upload(2, &vertex_shader_manager.constants, sizeof(VertexShaderConstants));
++    vertex_shader_manager.dirty = false;
++  }
++  if (pixel_shader_manager.custom_constants_dirty)
++  {
 +    if (!pixel_shader_manager.custom_constants.empty())
 +    {
-+      PS4UploadBlock(&s_ps4_block_buffers[3], pixel_shader_manager.custom_constants.data(),
-+                     static_cast<u32>(pixel_shader_manager.custom_constants.size()));
-+      glBindBufferBase(GL_UNIFORM_BUFFER, 3, s_ps4_block_buffers[3]);
++      s_ps4_custom_ring.Upload(3, pixel_shader_manager.custom_constants.data(),
++                               static_cast<u32>(pixel_shader_manager.custom_constants.size()));
 +    }
-+    PS4UploadBlock(&s_ps4_block_buffers[4], &geometry_shader_manager.constants,
-+                   sizeof(GeometryShaderConstants));
-+    glBindBufferBase(GL_UNIFORM_BUFFER, 4, s_ps4_block_buffers[4]);
-+
-+    pixel_shader_manager.dirty = false;
-+    vertex_shader_manager.dirty = false;
-+    geometry_shader_manager.dirty = false;
 +    pixel_shader_manager.custom_constants_dirty = false;
++  }
++  if (geometry_shader_manager.dirty)
++  {
++    s_ps4_geometry_ring.Upload(4, &geometry_shader_manager.constants,
++                               sizeof(GeometryShaderConstants));
++    geometry_shader_manager.dirty = false;
 +  }
 +  return;
 +#endif
    if (pixel_shader_manager.dirty || vertex_shader_manager.dirty || geometry_shader_manager.dirty ||
        pixel_shader_manager.custom_constants_dirty)
    {
-@@ -280,6 +357,13 @@ void ProgramShaderCache::UploadConstants()
+@@ -280,6 +421,13 @@ void ProgramShaderCache::UploadConstants()
  
  void ProgramShaderCache::UploadConstants(const void* data, u32 data_size)
  {
 +#ifdef __ORBIS__
-+  // Utility draws: one block shared by all stages, bound whole (see PS4UploadBlock).
-+  PS4UploadBlock(&s_ps4_utility_buffer, data, data_size);
-+  for (u32 index = 1; index <= 4; index++)
-+    glBindBufferBase(GL_UNIFORM_BUFFER, index, s_ps4_utility_buffer);
++  // Utility draws: one block shared by all stages, bound whole (see PS4UniformRing).
++  const GLuint utility_buffer = s_ps4_utility_ring.Upload(1, data, data_size);
++  for (u32 index = 2; index <= 4; index++)
++    glBindBufferBase(GL_UNIFORM_BUFFER, index, utility_buffer);
 +  return;
 +#endif
    // allocate and copy
    const u32 alloc_size = Common::AlignUp(data_size, s_ubo_align);
    auto buffer = s_buffer->Map(alloc_size, s_ubo_align);
-@@ -330,6 +414,29 @@ GLuint ProgramShaderCache::CompileSingleShader(GLenum type, std::string_view cod
+@@ -330,6 +478,29 @@ GLuint ProgramShaderCache::CompileSingleShader(GLenum type, std::string_view cod
  {
    const GLuint result = glCreateShader(type);
  
@@ -2814,7 +2878,7 @@ index 1dfd026..0b7c21e 100644
    constexpr GLsizei num_strings = 2;
    const std::array<const char*, num_strings> src{
        s_glsl_header.data(),
-@@ -343,6 +450,27 @@ GLuint ProgramShaderCache::CompileSingleShader(GLenum type, std::string_view cod
+@@ -343,6 +514,27 @@ GLuint ProgramShaderCache::CompileSingleShader(GLenum type, std::string_view cod
    glShaderSource(result, num_strings, src.data(), src_sizes.data());
    glCompileShader(result);
  
@@ -2842,7 +2906,7 @@ index 1dfd026..0b7c21e 100644
    if (!CheckShaderCompileResult(result, type, code))
    {
      // Don't try to use this shader
-@@ -849,6 +977,10 @@ void ProgramShaderCache::CreateHeader()
+@@ -849,6 +1041,10 @@ void ProgramShaderCache::CreateHeader()
        "#define int4 ivec4\n"
        "#define frac fract\n"
        "#define lerp mix\n"
