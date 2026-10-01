@@ -997,10 +997,10 @@ index 16cae73..0e59ae9 100644
  
  namespace PowerPC
 diff --git a/Source/Core/Core/MemTools.cpp b/Source/Core/Core/MemTools.cpp
-index a7919fb..add0b3a 100644
+index a7919fb..8de7f4d 100644
 --- a/Source/Core/Core/MemTools.cpp
 +++ b/Source/Core/Core/MemTools.cpp
-@@ -259,14 +259,14 @@ bool IsExceptionHandlerSupported()
+@@ -259,14 +259,21 @@ bool IsExceptionHandlerSupported()
  #elif defined(_POSIX_VERSION) && !defined(_M_GENERIC)
  
  static struct sigaction old_sa_segv;
@@ -1009,15 +1009,22 @@ index a7919fb..add0b3a 100644
  static struct sigaction old_sa_bus;
  #endif
  
++#ifdef __ORBIS__
++extern "C" unsigned long long ps4_fault_count;  // DolphinPS4 port/ps4_runtime.cpp
++#endif
++
  static void sigsegv_handler(int sig, siginfo_t* info, void* raw_context)
  {
++#ifdef __ORBIS__
++  ps4_fault_count++;
++#endif
    if (sig != SIGSEGV
 -#if defined(__APPLE__)
 +#if defined(__APPLE__) || defined(__ORBIS__)
        && sig != SIGBUS
  #endif
    )
-@@ -286,6 +286,11 @@ static void sigsegv_handler(int sig, siginfo_t* info, void* raw_context)
+@@ -286,6 +293,11 @@ static void sigsegv_handler(int sig, siginfo_t* info, void* raw_context)
  // Get all the information we can out of the context.
  #ifdef __OpenBSD__
    SContext* const ctx = context;
@@ -1029,7 +1036,7 @@ index a7919fb..add0b3a 100644
  #elif defined(__APPLE__)
    // `uc_mcontext` is already a pointer here.
    SContext* const ctx = context->uc_mcontext;
-@@ -297,7 +302,7 @@ static void sigsegv_handler(int sig, siginfo_t* info, void* raw_context)
+@@ -297,7 +309,7 @@ static void sigsegv_handler(int sig, siginfo_t* info, void* raw_context)
  
    // If JIT didn't handle the signal, restore the original handler and invoke it.
    const auto& old_sa =
@@ -1038,7 +1045,7 @@ index a7919fb..add0b3a 100644
        (sig == SIGBUS) ? old_sa_bus :
  #endif
                          old_sa_segv;
-@@ -308,6 +313,7 @@ static void sigsegv_handler(int sig, siginfo_t* info, void* raw_context)
+@@ -308,6 +320,7 @@ static void sigsegv_handler(int sig, siginfo_t* info, void* raw_context)
  
  void InstallExceptionHandler()
  {
@@ -1046,7 +1053,7 @@ index a7919fb..add0b3a 100644
    stack_t signal_stack;
  #ifdef __FreeBSD__
    signal_stack.ss_sp = (char*)malloc(SIGSTKSZ);
-@@ -318,18 +324,20 @@ void InstallExceptionHandler()
+@@ -318,18 +331,20 @@ void InstallExceptionHandler()
    signal_stack.ss_flags = 0;
    if (sigaltstack(&signal_stack, nullptr) != 0)
      PanicAlertFmt("sigaltstack failed: {}", Common::LastStrerrorString());
@@ -1068,7 +1075,7 @@ index a7919fb..add0b3a 100644
    stack_t signal_stack;
    stack_t old_stack;
    signal_stack.ss_flags = SS_DISABLE;
-@@ -337,8 +345,9 @@ void UninstallExceptionHandler()
+@@ -337,8 +352,9 @@ void UninstallExceptionHandler()
    {
      free(old_stack.ss_sp);
    }
@@ -1137,10 +1144,10 @@ index 51c3fff..0b31728 100644
 +  ps4_add_eboot(dolphin-nogui)
 +endif()
 diff --git a/Source/Core/DolphinNoGUI/MainNoGUI.cpp b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
-index 3bf40ea..6f1bc7d 100644
+index 3bf40ea..974bf7c 100644
 --- a/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 +++ b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
-@@ -15,7 +15,11 @@
+@@ -15,7 +15,12 @@
  #include <windows.h>
  #endif
  
@@ -1149,10 +1156,11 @@ index 3bf40ea..6f1bc7d 100644
  #include "Common/ScopeGuard.h"
 +#include "Core/Config/GraphicsSettings.h"
 +#include "Core/Config/MainSettings.h"
++#include "Core/PowerPC/PowerPC.h"
  #include "Core/Boot/Boot.h"
  #include "Core/BootManager.h"
  #include "Core/Core.h"
-@@ -173,6 +177,10 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
+@@ -173,6 +178,10 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
    if (platform_name == "macos" || platform_name.empty())
      return Platform::CreateMacOSPlatform();
  #endif
@@ -1163,7 +1171,7 @@ index 3bf40ea..6f1bc7d 100644
  
    if (platform_name == "headless" || platform_name.empty())
      return Platform::CreateHeadlessPlatform();
-@@ -184,8 +192,17 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
+@@ -184,8 +193,17 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
  #define main app_main
  #endif
  
@@ -1182,7 +1190,7 @@ index 3bf40ea..6f1bc7d 100644
    const auto parser =
        CommandLineParse::CreateParser(CommandLineParse::ParserOptions::OmitGUIOptions);
    parser->add_option("-p", "--platform")
-@@ -207,6 +224,10 @@ int main(const int argc, char* argv[])
+@@ -207,6 +225,10 @@ int main(const int argc, char* argv[])
  #ifdef __APPLE__
                  ,
                  "macos"
@@ -1193,7 +1201,7 @@ index 3bf40ea..6f1bc7d 100644
  #endif
        });
  
-@@ -270,7 +291,33 @@ int main(const int argc, char* argv[])
+@@ -270,7 +292,42 @@ int main(const int argc, char* argv[])
  
    UICommon::SetUserDirectory(user_directory);
    UICommon::Init();
@@ -1219,6 +1227,15 @@ index 3bf40ea..6f1bc7d 100644
 +  Config::SetBase(Config::GFX_WAIT_FOR_SHADERS_BEFORE_STARTING, false);
 +  // The 64 GiB lazily committed JIT lookup table can't be mapped on PS4.
 +  Config::SetBase(Config::MAIN_LARGE_ENTRY_POINTS_MAP, false);
++  // Switches for testing on hardware without rebuilding (/data/DolphinPS4/ps4.ini).
++  {
++    const std::string core = Platform::GetPS4Option("cpu_core", "jit");
++    Config::SetBase(Config::MAIN_CPU_CORE, core == "interpreter"       ? PowerPC::CPUCore::Interpreter :
++                                           core == "cachedinterpreter" ? PowerPC::CPUCore::CachedInterpreter :
++                                                                         PowerPC::CPUCore::JIT64);
++    Config::SetBase(Config::MAIN_FASTMEM, Platform::GetPS4Option("fastmem", "on") == "on");
++    Config::SetBase(Config::MAIN_CPU_THREAD, Platform::GetPS4Option("dual_core", "on") == "on");
++  }
 +#endif
    UICommon::InitControllers(wsi);
 +#ifdef __ORBIS__
@@ -1227,7 +1244,7 @@ index 3bf40ea..6f1bc7d 100644
  
    Common::ScopeGuard ui_common_guard([] {
      UICommon::ShutdownControllers();
-@@ -284,6 +331,12 @@ int main(const int argc, char* argv[])
+@@ -284,6 +341,12 @@ int main(const int argc, char* argv[])
    }
  
    auto core_state_changed_hook = Core::AddOnStateChangedCallback([](const Core::State state) {
@@ -1240,7 +1257,7 @@ index 3bf40ea..6f1bc7d 100644
      if (state == Core::State::Uninitialized)
        s_platform->Stop();
    });
-@@ -303,6 +356,9 @@ int main(const int argc, char* argv[])
+@@ -303,6 +366,9 @@ int main(const int argc, char* argv[])
  
    DolphinAnalytics::Instance().ReportDolphinStart("nogui");
  
@@ -1251,7 +1268,7 @@ index 3bf40ea..6f1bc7d 100644
    {
      fprintf(stderr, "Could not boot the specified file\n");
 diff --git a/Source/Core/DolphinNoGUI/Platform.h b/Source/Core/DolphinNoGUI/Platform.h
-index f4dc8a9..c80cce2 100644
+index f4dc8a9..4e5ff67 100644
 --- a/Source/Core/DolphinNoGUI/Platform.h
 +++ b/Source/Core/DolphinNoGUI/Platform.h
 @@ -5,6 +5,7 @@
@@ -1262,7 +1279,7 @@ index f4dc8a9..c80cce2 100644
  
  #include "Common/Flag.h"
  #include "Common/WindowSystemInfo.h"
-@@ -47,6 +48,14 @@ public:
+@@ -47,6 +48,16 @@ public:
    static std::unique_ptr<Platform> CreateMacOSPlatform();
  #endif
  
@@ -1272,6 +1289,8 @@ index f4dc8a9..c80cce2 100644
 +  static std::vector<std::string> GetPS4Arguments();
 +  // Appends a startup milestone to /data/DolphinPS4/boot-trace.log (DolphinPS4 port/ps4_crashlog.cpp).
 +  static void BootTrace(const char* stage);
++  // Port switches from /data/DolphinPS4/ps4.ini (key=value).
++  static std::string GetPS4Option(const std::string& key, const std::string& default_value);
 +#endif
 +
  protected:
@@ -1279,10 +1298,10 @@ index f4dc8a9..c80cce2 100644
  
 diff --git a/Source/Core/DolphinNoGUI/PlatformPS4.cpp b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
 new file mode 100644
-index 0000000..71abf56
+index 0000000..18994b6
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
-@@ -0,0 +1,317 @@
+@@ -0,0 +1,353 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -1297,6 +1316,7 @@ index 0000000..71abf56
 +#include <cstdarg>
 +#include <cstdio>
 +#include <filesystem>
++#include <map>
 +#include <string>
 +#include <thread>
 +#include <vector>
@@ -1319,10 +1339,34 @@ index 0000000..71abf56
 +
 +extern "C" int sceSystemServiceLoadExec(const char* path, char* const argv[]);
 +extern "C" void ps4_boot_trace(const char* stage);
++extern "C" int ps4_jit_in_system_pool;           // DolphinPS4 port/ps4_runtime.cpp
++extern "C" unsigned long long ps4_fault_count;
 +
 +namespace
 +{
 +constexpr char PS4_DATA_DIR_PATH[] = "/data/DolphinPS4";
++
++// /data/DolphinPS4/ps4.ini: "key=value" lines, editable over FTP between runs.
++std::map<std::string, std::string> s_options;
++
++void LoadOptions()
++{
++  FILE* file = fopen((std::string(PS4_DATA_DIR_PATH) + "/ps4.ini").c_str(), "r");
++  if (!file)
++    return;
++  char line[256];
++  while (fgets(line, sizeof(line), file))
++  {
++    std::string text = line;
++    while (!text.empty() && (text.back() == '\n' || text.back() == '\r' || text.back() == ' '))
++      text.pop_back();
++    const size_t equals = text.find('=');
++    if (text.empty() || text[0] == '#' || text[0] == ';' || equals == std::string::npos)
++      continue;
++    s_options[text.substr(0, equals)] = text.substr(equals + 1);
++  }
++  fclose(file);
++}
 +
 +class PlatformPS4 final : public Platform
 +{
@@ -1395,12 +1439,12 @@ index 0000000..71abf56
 +      char line[192];
 +      snprintf(line, sizeof(line),
 +               "monitor: %d s, %zu MiB flexible memory free, speed %.0f%%, %.1f FPS, %.1f VPS, "
-+               "CPU core %d",
++               "CPU core %d, %llu fastmem faults",
 +               frame / 60, flexible / (1024 * 1024),
 +               Core::System::GetInstance().GetPerfMetrics().GetSpeed(),
 +               Core::System::GetInstance().GetPerfMetrics().GetFPS(),
 +               Core::System::GetInstance().GetPerfMetrics().GetVPS(),
-+               static_cast<int>(Config::Get(Config::MAIN_CPU_CORE)));
++               static_cast<int>(Config::Get(Config::MAIN_CPU_CORE)), ps4_fault_count);
 +      BootTrace(line);
 +    }
 +    // Port diagnostics: a screenshot every ~10 s (User/ScreenShots) shows what Dolphin renders,
@@ -1563,6 +1607,12 @@ index 0000000..71abf56
 +  ps4_boot_trace(stage);
 +}
 +
++std::string Platform::GetPS4Option(const std::string& key, const std::string& default_value)
++{
++  const auto it = s_options.find(key);
++  return it == s_options.end() ? default_value : it->second;
++}
++
 +std::vector<std::string> Platform::GetPS4Arguments()
 +{
 +  BootTrace("main");
@@ -1583,6 +1633,11 @@ index 0000000..71abf56
 +  setvbuf(stderr, nullptr, _IONBF, 0);
 +  atexit(OnExit);
 +  BootTrace("log opened");
++
++  LoadOptions();
++  for (const auto& [key, value] : s_options)
++    BootTrace(("option " + key + "=" + value).c_str());
++  ps4_jit_in_system_pool = GetPS4Option("jit_memory", "system") == "system" ? 1 : 0;
 +
 +  const std::string user_dir = std::string(PS4_DATA_DIR_PATH) + "/User";
 +  WriteDefaultConfig(user_dir);

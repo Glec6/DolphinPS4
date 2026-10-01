@@ -361,10 +361,15 @@ void* __wrap___memalign(size_t alignment, size_t size) { return __wrap_memalign(
 // otherwise come out of the regular flexible memory pool (255 MiB), which Piglet (OpenGL ES)
 // needs for all GPU memory - it ran out of it entirely. Take them from the system flexible pool
 // (like the heap) instead; fall back to a normal mmap if that fails (e.g. for executable memory).
+// Port switches, set by the app before emulation starts (DolphinPS4 ps4.ini).
+int ps4_jit_in_system_pool = 1;           // executable mappings from the system pool too
+unsigned long long ps4_fault_count = 0;   // fastmem faults seen by Dolphin's handler
+
 void* __real_mmap(void* addr, size_t len, int prot, int flags, int fd, off_t offset);
 void* __wrap_mmap(void* addr, size_t len, int prot, int flags, int fd, off_t offset) {
     const bool anonymous = fd == -1 && (flags & MAP_ANON) && !(flags & MAP_FIXED);
-    if (anonymous && len >= MB) {
+    const bool allowed = !(prot & PROT_EXEC) || ps4_jit_in_system_pool;
+    if (anonymous && allowed && len >= MB) {
         const size_t size = (len + PAGE - 1) & ~(PAGE - 1);
         void* base = reserveAwayFromKernel(size);
         if (base) {
