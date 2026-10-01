@@ -286,10 +286,10 @@ index eef6896..5ca5dc7 100644
    if (wsi.type == WindowSystemType::X11)
 diff --git a/Source/Core/Common/GL/GLInterface/Piglet.cpp b/Source/Core/Common/GL/GLInterface/Piglet.cpp
 new file mode 100644
-index 0000000..2c4b449
+index 0000000..6b04d3f
 --- /dev/null
 +++ b/Source/Core/Common/GL/GLInterface/Piglet.cpp
-@@ -0,0 +1,362 @@
+@@ -0,0 +1,358 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -482,21 +482,17 @@ index 0000000..2c4b449
 +    return false;
 +
 +  // RetroArch for PS4's configuration (graphics memory from flexible memory), which is known to
-+  // get a display on retail consoles - except the video memory: RetroArch's 48 MiB is far too
-+  // little for Dolphin (buffer and texture allocations failed). Use what flexible memory there
-+  // is, keeping some back for Dolphin's own mappings (JIT code, DSP ARAM, ...).
++  // get a display on retail consoles, with slightly larger pools. Keep them small: GL buffers and
++  // more come from "FMEM", flexible memory Piglet maps on demand *beyond* these pools, and it ran
++  // out (ftruncate ENOMEM with 6 MiB left) whenever the pools took most of the 255 MiB.
++  // Dolphin's own large mappings come from the system flexible pool (port/ps4_runtime.cpp
++  // __wrap_mmap), so nearly all regular flexible memory is left to Piglet.
 +  constexpr size_t MiB = 1024 * 1024;
 +  size_t flexible = 0;
 +  using AvailableFlexibleFn = int32_t (*)(size_t*);
 +  reinterpret_cast<AvailableFlexibleFn>(&sceKernelAvailableFlexibleMemorySize)(&flexible);
-+  // GL buffers (Dolphin's vertex/index/uniform stream buffers, 32 MiB) live in the system shared
-+  // pool: RetroArch's 16 MiB made every one of them fail and the GPU crash.
-+  const size_t system_shared = 64 * MiB;
-+  // Dolphin's own large mappings come from the system flexible pool (port/ps4_runtime.cpp
-+  // __wrap_mmap), so only a little regular flexible memory needs to be kept back.
-+  const size_t reserve = 32 * MiB + system_shared;
-+  size_t video = flexible > reserve ? flexible - reserve : 0;
-+  video = std::clamp<size_t>(video & ~(16 * MiB - 1), 48 * MiB, 192 * MiB);
++  const size_t system_shared = 32 * MiB;
++  const size_t video = 64 * MiB;
 +  char trace[160];
 +  snprintf(trace, sizeof(trace),
 +           "Piglet: %zu MiB flexible memory free, %zu MiB video + %zu MiB system shared memory",
