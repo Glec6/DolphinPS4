@@ -1857,3 +1857,50 @@ index 0000000..8b666df
 +  return 0.0;
 +}
 +}  // namespace GCAdapter
+diff --git a/Source/Core/VideoBackends/OGL/ProgramShaderCache.cpp b/Source/Core/VideoBackends/OGL/ProgramShaderCache.cpp
+index 1dfd026..ae96ff5 100644
+--- a/Source/Core/VideoBackends/OGL/ProgramShaderCache.cpp
++++ b/Source/Core/VideoBackends/OGL/ProgramShaderCache.cpp
+@@ -330,6 +330,29 @@ GLuint ProgramShaderCache::CompileSingleShader(GLenum type, std::string_view cod
+ {
+   const GLuint result = glCreateShader(type);
+ 
++#ifdef __ORBIS__
++  // PS4 Piglet's GLSL compiler rejects line continuations ("Line continuation cannot be used"),
++  // which some shaders use in multi-line macros: join those lines first.
++  std::string joined;
++  joined.reserve(code.size());
++  for (size_t i = 0; i < code.size(); i++)
++  {
++    if (code[i] == '\\')
++    {
++      size_t next = i + 1;
++      if (next < code.size() && code[next] == '\r')
++        next++;
++      if (next < code.size() && code[next] == '\n')
++      {
++        i = next;
++        continue;
++      }
++    }
++    joined.push_back(code[i]);
++  }
++  code = joined;
++#endif
++
+   constexpr GLsizei num_strings = 2;
+   const std::array<const char*, num_strings> src{
+       s_glsl_header.data(),
+diff --git a/Source/Core/VideoCommon/PostProcessing.cpp b/Source/Core/VideoCommon/PostProcessing.cpp
+index 92f7c1f..d077381 100644
+--- a/Source/Core/VideoCommon/PostProcessing.cpp
++++ b/Source/Core/VideoCommon/PostProcessing.cpp
+@@ -703,7 +703,7 @@ std::string PostProcessing::GetHeader(bool user_post_process) const
+ 
+   ss << R"(
+ float4 Sample() { return texture(samp0, v_tex0); }
+-float4 SampleLocation(float2 location) { return texture(samp0, float3(location, float(v_tex0.z))); }
++float4 SampleLocation(float2 coords) { return texture(samp0, float3(coords, float(v_tex0.z))); }
+ float4 SampleLayer(int layer) { return texture(samp0, float3(v_tex0.xy, float(layer))); }
+ #define SampleOffset(offset) textureOffset(samp0, v_tex0, offset)
+ 
