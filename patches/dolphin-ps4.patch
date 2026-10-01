@@ -1279,10 +1279,10 @@ index f4dc8a9..c80cce2 100644
  
 diff --git a/Source/Core/DolphinNoGUI/PlatformPS4.cpp b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
 new file mode 100644
-index 0000000..2d545b1
+index 0000000..ce7ec09
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
-@@ -0,0 +1,299 @@
+@@ -0,0 +1,308 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -1309,6 +1309,8 @@ index 0000000..2d545b1
 +
 +#include "Common/Logging/LogManager.h"
 +#include "Common/MsgHandler.h"
++#include <fmt/format.h>
++
 +#include "Core/Core.h"
 +#include "Core/System.h"
 +
@@ -1391,6 +1393,13 @@ index 0000000..2d545b1
 +      snprintf(line, sizeof(line), "monitor: %d s, %zu MiB flexible memory free", frame / 60,
 +               flexible / (1024 * 1024));
 +      BootTrace(line);
++    }
++    // Port diagnostics: a screenshot every ~10 s (User/ScreenShots) shows what Dolphin renders,
++    // independently of what reaches the TV.
++    if (frame % 600 == 0 && Core::GetState(Core::System::GetInstance()) == Core::State::Running)
++    {
++      Core::SaveScreenShot(fmt::format("diag_{:03d}", frame / 60));
++      BootTrace("screenshot requested");
 +    }
 +  }
 +}
@@ -2082,7 +2091,7 @@ index 92f7c1f..3378a49 100644
      m_default_pixel_shader = g_gfx->CreateShaderFromSource(
          ShaderStage::Pixel, GetHeader(false) + default_pixel_shader_code + GetFooter(), nullptr,
 diff --git a/Source/Core/VideoCommon/Present.cpp b/Source/Core/VideoCommon/Present.cpp
-index 41d05f3..8ffedab 100644
+index 41d05f3..6dbe372 100644
 --- a/Source/Core/VideoCommon/Present.cpp
 +++ b/Source/Core/VideoCommon/Present.cpp
 @@ -124,9 +124,12 @@ bool Presenter::Initialize()
@@ -2098,6 +2107,56 @@ index 41d05f3..8ffedab 100644
  
      // Draw a blank frame (and complete OnScreenUI initialization)
      g_gfx->BindBackbuffer({{0.0f, 0.0f, 0.0f, 1.0f}});
+@@ -903,10 +906,30 @@ void Presenter::RenderXFBToScreen(const MathUtil::Rectangle<int>& target_rc,
+   }
+ }
+ 
++#ifdef __ORBIS__
++extern "C" void ps4_boot_trace(const char* stage);
++#endif
++
+ void Presenter::Present(PresentInfo* present_info)
+ {
+   m_present_count++;
+ 
++#ifdef __ORBIS__
++  // Port diagnostics: is there an XFB to show at all?
++  static u64 s_with_xfb = 0;
++  if (m_xfb_entry)
++    s_with_xfb++;
++  if (m_present_count % 120 == 0)
++  {
++    char line[160];
++    snprintf(line, sizeof(line), "present: %llu calls, %llu with an XFB, XFB rect %dx%d",
++             static_cast<unsigned long long>(m_present_count),
++             static_cast<unsigned long long>(s_with_xfb), m_xfb_rect.GetWidth(),
++             m_xfb_rect.GetHeight());
++    ps4_boot_trace(line);
++  }
++#endif
++
+   if (g_gfx->IsHeadless() || (!m_onscreen_ui && !m_xfb_entry))
+     return;
+ 
+@@ -934,7 +957,18 @@ void Presenter::Present(PresentInfo* present_info)
+   UpdateDrawRectangle();
+ 
+   g_gfx->BeginUtilityDrawing();
++#ifdef __ORBIS__
++  // Port diagnostics: dark blue around/behind the game image shows that presenting works.
++  const bool backbuffer_bound = g_gfx->BindBackbuffer({{0.0f, 0.0f, 0.3f, 1.0f}});
++  static bool s_reported_unbound = false;
++  if (!backbuffer_bound && !s_reported_unbound)
++  {
++    s_reported_unbound = true;
++    ps4_boot_trace("present: backbuffer could not be bound");
++  }
++#else
+   const bool backbuffer_bound = g_gfx->BindBackbuffer({{0.0f, 0.0f, 0.0f, 1.0f}});
++#endif
+ 
+   // Render the XFB to the screen.
+   if (backbuffer_bound && m_xfb_entry)
 diff --git a/Source/Core/VideoCommon/VertexManagerBase.h b/Source/Core/VideoCommon/VertexManagerBase.h
 index 715dbee..a434471 100644
 --- a/Source/Core/VideoCommon/VertexManagerBase.h
