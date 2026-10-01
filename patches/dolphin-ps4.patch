@@ -1144,7 +1144,7 @@ index 51c3fff..0b31728 100644
 +  ps4_add_eboot(dolphin-nogui)
 +endif()
 diff --git a/Source/Core/DolphinNoGUI/MainNoGUI.cpp b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
-index 3bf40ea..974bf7c 100644
+index 3bf40ea..bea44be 100644
 --- a/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 +++ b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 @@ -15,7 +15,12 @@
@@ -1201,7 +1201,7 @@ index 3bf40ea..974bf7c 100644
  #endif
        });
  
-@@ -270,7 +292,42 @@ int main(const int argc, char* argv[])
+@@ -270,7 +292,47 @@ int main(const int argc, char* argv[])
  
    UICommon::SetUserDirectory(user_directory);
    UICommon::Init();
@@ -1235,6 +1235,11 @@ index 3bf40ea..974bf7c 100644
 +                                                                         PowerPC::CPUCore::JIT64);
 +    Config::SetBase(Config::MAIN_FASTMEM, Platform::GetPS4Option("fastmem", "on") == "on");
 +    Config::SetBase(Config::MAIN_CPU_THREAD, Platform::GetPS4Option("dual_core", "on") == "on");
++    // dump=on writes game textures and EFB/XFB copies as PNGs to User/Dump/Textures.
++    const bool dump = Platform::GetPS4Option("dump", "off") == "on";
++    Config::SetBase(Config::GFX_DUMP_TEXTURES, dump);
++    Config::SetBase(Config::GFX_DUMP_EFB_TARGET, dump);
++    Config::SetBase(Config::GFX_DUMP_XFB_TARGET, dump);
 +  }
 +#endif
    UICommon::InitControllers(wsi);
@@ -1244,7 +1249,7 @@ index 3bf40ea..974bf7c 100644
  
    Common::ScopeGuard ui_common_guard([] {
      UICommon::ShutdownControllers();
-@@ -284,6 +341,12 @@ int main(const int argc, char* argv[])
+@@ -284,6 +346,12 @@ int main(const int argc, char* argv[])
    }
  
    auto core_state_changed_hook = Core::AddOnStateChangedCallback([](const Core::State state) {
@@ -1257,7 +1262,7 @@ index 3bf40ea..974bf7c 100644
      if (state == Core::State::Uninitialized)
        s_platform->Stop();
    });
-@@ -303,6 +366,9 @@ int main(const int argc, char* argv[])
+@@ -303,6 +371,9 @@ int main(const int argc, char* argv[])
  
    DolphinAnalytics::Instance().ReportDolphinStart("nogui");
  
@@ -2041,6 +2046,119 @@ index 0000000..8b666df
 +  return 0.0;
 +}
 +}  // namespace GCAdapter
+diff --git a/Source/Core/VideoBackends/OGL/OGLGfx.cpp b/Source/Core/VideoBackends/OGL/OGLGfx.cpp
+index ff5402b..2b4c1ca 100644
+--- a/Source/Core/VideoBackends/OGL/OGLGfx.cpp
++++ b/Source/Core/VideoBackends/OGL/OGLGfx.cpp
+@@ -21,8 +21,13 @@
+ #include "VideoCommon/VideoConfig.h"
+ 
+ #include <algorithm>
++#include <cstdio>
+ #include <string_view>
+ 
++#ifdef __ORBIS__
++extern "C" void ps4_boot_trace(const char* stage);  // DolphinPS4 port/ps4_crashlog.cpp
++#endif
++
+ namespace OGL
+ {
+ VideoConfig g_ogl_config;
+@@ -290,6 +295,28 @@ void OGLGfx::DrawIndexed(u32 base_index, u32 num_indices, u32 base_vertex)
+     glDrawElements(static_cast<const OGLPipeline*>(m_current_pipeline)->GetGLPrimitive(),
+                    num_indices, GL_UNSIGNED_SHORT, static_cast<u16*>(nullptr) + base_index);
+   }
++#ifdef __ORBIS__
++  // Port diagnostics: does Piglet accept Dolphin's draws?
++  static int s_draws = 0, s_errors = 0;
++  s_draws++;
++  const GLenum error = glGetError();
++  if (error != GL_NO_ERROR && s_errors < 16)
++  {
++    s_errors++;
++    char line[160];
++    snprintf(line, sizeof(line),
++             "draw #%d: GL error 0x%x (primitive 0x%x, %u indices from %u, base vertex %u)", s_draws,
++             error, static_cast<const OGLPipeline*>(m_current_pipeline)->GetGLPrimitive(),
++             num_indices, base_index, base_vertex);
++    ps4_boot_trace(line);
++  }
++  if (s_draws == 1 || s_draws == 100 || s_draws == 10000)
++  {
++    char line[64];
++    snprintf(line, sizeof(line), "draw #%d done, %d with GL errors", s_draws, s_errors);
++    ps4_boot_trace(line);
++  }
++#endif
+ }
+ 
+ void OGLGfx::DispatchComputeShader(const AbstractShader* shader, u32 groupsize_x, u32 groupsize_y,
+@@ -733,3 +760,65 @@ SurfaceInfo OGLGfx::GetSurfaceInfo() const
+ }
+ 
+ }  // namespace OGL
++
++#ifdef __ORBIS__
++// Port diagnostics: logs the centre pixel of a texture (the EFB or the XFB copy), or of the
++// backbuffer when texture is null. Restores the framebuffer bindings it touches.
++extern "C" void ps4_probe_center_pixel(const char* name, const AbstractTexture* texture)
++{
++  GLint prev_read = 0;
++  glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &prev_read);
++  while (glGetError() != GL_NO_ERROR)
++  {
++  }
++
++  GLuint fbo = 0;
++  int x = 0, y = 0;
++  GLenum status = GL_FRAMEBUFFER_COMPLETE;
++  if (texture)
++  {
++    const auto* gltex = static_cast<const OGL::OGLTexture*>(texture);
++    x = static_cast<int>(texture->GetWidth() / 2);
++    y = static_cast<int>(texture->GetHeight() / 2);
++    glGenFramebuffers(1, &fbo);
++    glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo);
++    if (gltex->GetGLTarget() == GL_TEXTURE_2D_ARRAY)
++    {
++      glFramebufferTextureLayer(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
++                                gltex->GetGLTextureId(), 0, 0);
++    }
++    else
++    {
++      glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, gltex->GetGLTarget(),
++                             gltex->GetGLTextureId(), 0);
++    }
++    status = glCheckFramebufferStatus(GL_READ_FRAMEBUFFER);
++  }
++  else
++  {
++    GLint viewport[4] = {};
++    glGetIntegerv(GL_VIEWPORT, viewport);
++    x = viewport[0] + viewport[2] / 2;
++    y = viewport[1] + viewport[3] / 2;
++    glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
++  }
++
++  u8 pixel[4] = {7, 7, 7, 7};
++  if (status == GL_FRAMEBUFFER_COMPLETE)
++    glReadPixels(x, y, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
++  const GLenum error = glGetError();
++
++  glBindFramebuffer(GL_READ_FRAMEBUFFER, prev_read);
++  if (fbo)
++    glDeleteFramebuffers(1, &fbo);
++
++  char line[192];
++  snprintf(line, sizeof(line),
++           "pixel %s (%dx%d at %d,%d, target 0x%x): rgba %u %u %u %u, fbo 0x%x, GL error 0x%x", name,
++           texture ? static_cast<int>(texture->GetWidth()) : 0,
++           texture ? static_cast<int>(texture->GetHeight()) : 0, x, y,
++           texture ? static_cast<const OGL::OGLTexture*>(texture)->GetGLTarget() : 0, pixel[0],
++           pixel[1], pixel[2], pixel[3], status, error);
++  ps4_boot_trace(line);
++}
++#endif
 diff --git a/Source/Core/VideoBackends/OGL/OGLStreamBuffer.cpp b/Source/Core/VideoBackends/OGL/OGLStreamBuffer.cpp
 index 2eec584..69146a2 100644
 --- a/Source/Core/VideoBackends/OGL/OGLStreamBuffer.cpp
@@ -2126,10 +2244,58 @@ index 003a7ec..66d26a4 100644
    GetOGLGfx()->RestoreFramebufferBinding();
  
 diff --git a/Source/Core/VideoBackends/OGL/ProgramShaderCache.cpp b/Source/Core/VideoBackends/OGL/ProgramShaderCache.cpp
-index 1dfd026..77b2e6e 100644
+index 1dfd026..d4acc81 100644
 --- a/Source/Core/VideoBackends/OGL/ProgramShaderCache.cpp
 +++ b/Source/Core/VideoBackends/OGL/ProgramShaderCache.cpp
-@@ -330,6 +330,29 @@ GLuint ProgramShaderCache::CompileSingleShader(GLenum type, std::string_view cod
+@@ -37,6 +37,11 @@
+ #include "VideoCommon/VideoBackendBase.h"
+ #include "VideoCommon/VideoConfig.h"
+ 
++#ifdef __ORBIS__
++#include <cstdio>
++extern "C" void ps4_boot_trace(const char* stage);  // DolphinPS4 port/ps4_crashlog.cpp
++#endif
++
+ namespace OGL
+ {
+ u32 ProgramShaderCache::s_ubo_buffer_size;
+@@ -110,6 +115,35 @@ void SHADER::SetProgramVariables()
+     glUniformBlockBinding(glprogid, UBERBlock_id, 5);
+ 
+   // Bind Texture Samplers
++#ifdef __ORBIS__
++  // Piglet rejects "samp[N]" lookups ("Cannot access uniform array"); set the whole sampler
++  // array through its base name instead (values past the array's active size are ignored).
++  {
++    const GLint array_loc = glGetUniformLocation(glprogid, "samp");
++    if (array_loc >= 0)
++    {
++      while (glGetError() != GL_NO_ERROR)
++      {
++      }
++      static constexpr GLint units[8] = {0, 1, 2, 3, 4, 5, 6, 7};
++      glUniform1iv(array_loc, 8, units);
++      const GLenum error = glGetError();
++      if (error != GL_NO_ERROR)
++        glUniform1i(array_loc, 0);  // a single sampler named samp
++      static int s_reported = 0;
++      if (s_reported < 4)
++      {
++        s_reported++;
++        char line[96];
++        snprintf(line, sizeof(line), "program %u: samp array at %d, GL error 0x%x", glprogid,
++                 array_loc, error);
++        ps4_boot_trace(line);
++      }
++      glUseProgram(CurrentProgram);
++      return;
++    }
++  }
++#endif
+   for (int a = 0; a < 8; ++a)
+   {
+     // Still need to get sampler locations since we aren't binding them statically in the shaders
+@@ -330,6 +364,29 @@ GLuint ProgramShaderCache::CompileSingleShader(GLenum type, std::string_view cod
  {
    const GLuint result = glCreateShader(type);
  
@@ -2159,7 +2325,7 @@ index 1dfd026..77b2e6e 100644
    constexpr GLsizei num_strings = 2;
    const std::array<const char*, num_strings> src{
        s_glsl_header.data(),
-@@ -849,6 +872,10 @@ void ProgramShaderCache::CreateHeader()
+@@ -849,6 +906,10 @@ void ProgramShaderCache::CreateHeader()
        "#define int4 ivec4\n"
        "#define frac fract\n"
        "#define lerp mix\n"
@@ -2222,7 +2388,7 @@ index 92f7c1f..3378a49 100644
      m_default_pixel_shader = g_gfx->CreateShaderFromSource(
          ShaderStage::Pixel, GetHeader(false) + default_pixel_shader_code + GetFooter(), nullptr,
 diff --git a/Source/Core/VideoCommon/Present.cpp b/Source/Core/VideoCommon/Present.cpp
-index 41d05f3..6dbe372 100644
+index 41d05f3..e9662f3 100644
 --- a/Source/Core/VideoCommon/Present.cpp
 +++ b/Source/Core/VideoCommon/Present.cpp
 @@ -124,9 +124,12 @@ bool Presenter::Initialize()
@@ -2238,12 +2404,14 @@ index 41d05f3..6dbe372 100644
  
      // Draw a blank frame (and complete OnScreenUI initialization)
      g_gfx->BindBackbuffer({{0.0f, 0.0f, 0.0f, 1.0f}});
-@@ -903,10 +906,30 @@ void Presenter::RenderXFBToScreen(const MathUtil::Rectangle<int>& target_rc,
+@@ -903,10 +906,32 @@ void Presenter::RenderXFBToScreen(const MathUtil::Rectangle<int>& target_rc,
    }
  }
  
 +#ifdef __ORBIS__
 +extern "C" void ps4_boot_trace(const char* stage);
++// VideoBackends/OGL/OGLGfx.cpp
++extern "C" void ps4_probe_center_pixel(const char* name, const AbstractTexture* texture);
 +#endif
 +
  void Presenter::Present(PresentInfo* present_info)
@@ -2269,7 +2437,7 @@ index 41d05f3..6dbe372 100644
    if (g_gfx->IsHeadless() || (!m_onscreen_ui && !m_xfb_entry))
      return;
  
-@@ -934,7 +957,18 @@ void Presenter::Present(PresentInfo* present_info)
+@@ -934,7 +959,18 @@ void Presenter::Present(PresentInfo* present_info)
    UpdateDrawRectangle();
  
    g_gfx->BeginUtilityDrawing();
@@ -2288,6 +2456,24 @@ index 41d05f3..6dbe372 100644
  
    // Render the XFB to the screen.
    if (backbuffer_bound && m_xfb_entry)
+@@ -945,6 +981,17 @@ void Presenter::Present(PresentInfo* present_info)
+     AdjustRectanglesToFitBounds(&render_target_rc, &render_source_rc, m_backbuffer_width,
+                                 m_backbuffer_height);
+     RenderXFBToScreen(render_target_rc, m_xfb_entry->texture.get(), render_source_rc);
++#ifdef __ORBIS__
++    // Port diagnostics: where does the picture turn black? Game frame (EFB), its copy (XFB),
++    // and the screen after the copy was drawn.
++    static u64 s_probes = 0;
++    if (s_probes++ % 300 == 30)
++    {
++      ps4_probe_center_pixel("EFB", g_framebuffer_manager->GetEFBColorTexture());
++      ps4_probe_center_pixel("XFB", m_xfb_entry->texture.get());
++      ps4_probe_center_pixel("screen", nullptr);
++    }
++#endif
+   }
+ 
+   if (m_onscreen_ui)
 diff --git a/Source/Core/VideoCommon/VertexManagerBase.h b/Source/Core/VideoCommon/VertexManagerBase.h
 index 715dbee..a434471 100644
 --- a/Source/Core/VideoCommon/VertexManagerBase.h
