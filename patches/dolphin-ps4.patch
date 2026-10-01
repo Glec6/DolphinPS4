@@ -2557,7 +2557,7 @@ index ce1b7a5..941b744 100644
    g_backend_info.bSupportsPipelineCacheData = supports_glsl_cache;
  
 diff --git a/Source/Core/VideoBackends/OGL/OGLGfx.cpp b/Source/Core/VideoBackends/OGL/OGLGfx.cpp
-index ff5402b..3b81d71 100644
+index ff5402b..15d48cb 100644
 --- a/Source/Core/VideoBackends/OGL/OGLGfx.cpp
 +++ b/Source/Core/VideoBackends/OGL/OGLGfx.cpp
 @@ -2,6 +2,7 @@
@@ -3272,15 +3272,37 @@ index ff5402b..3b81d71 100644
  }
  
  void OGLGfx::DispatchComputeShader(const AbstractShader* shader, u32 groupsize_x, u32 groupsize_y,
-@@ -417,6 +1068,7 @@ bool OGLGfx::BindBackbuffer(const ClearColor& clear_color)
+@@ -415,8 +1066,29 @@ bool OGLGfx::BindBackbuffer(const ClearColor& clear_color)
+   return true;
+ }
  
++#ifdef __ORBIS__
++void OGLGfx::PS4DeferDelete(GLuint texture, GLuint framebuffer)
++{
++  m_ps4_pending_deletes.push_back({m_ps4_frame, texture, framebuffer});
++}
++#endif
++
  void OGLGfx::PresentBackbuffer()
  {
 +  PS4_PROFILE(PS4_PROF_PRESENT);
++#ifdef __ORBIS__
++  // Delete what was released at least 4 presented frames ago (see PS4DeferDelete).
++  m_ps4_frame++;
++  std::erase_if(m_ps4_pending_deletes, [this](const PS4PendingDelete& pending) {
++    if (pending.frame + 4 > m_ps4_frame)
++      return false;
++    if (pending.framebuffer)
++      glDeleteFramebuffers(1, &pending.framebuffer);
++    if (pending.texture)
++      glDeleteTextures(1, &pending.texture);
++    return true;
++  });
++#endif
    if (g_ogl_config.bSupportsDebug)
    {
      if (Common::Log::LogManager::GetInstance()->IsEnabled(Common::Log::LogType::HOST_GPU,
-@@ -618,6 +1270,7 @@ void OGLGfx::ApplyBlendingState(const BlendingState state)
+@@ -618,6 +1290,7 @@ void OGLGfx::ApplyBlendingState(const BlendingState state)
  
  void OGLGfx::SetPipeline(const AbstractPipeline* pipeline)
  {
@@ -3288,7 +3310,7 @@ index ff5402b..3b81d71 100644
    if (m_current_pipeline == pipeline)
      return;
  
-@@ -733,3 +1386,133 @@ SurfaceInfo OGLGfx::GetSurfaceInfo() const
+@@ -733,3 +1406,133 @@ SurfaceInfo OGLGfx::GetSurfaceInfo() const
  }
  
  }  // namespace OGL
@@ -3422,6 +3444,40 @@ index ff5402b..3b81d71 100644
 +  glColorMask(mask[0], mask[1], mask[2], mask[3]);
 +}
 +#endif
+diff --git a/Source/Core/VideoBackends/OGL/OGLGfx.h b/Source/Core/VideoBackends/OGL/OGLGfx.h
+index a76008f..c53cd6a 100644
+--- a/Source/Core/VideoBackends/OGL/OGLGfx.h
++++ b/Source/Core/VideoBackends/OGL/OGLGfx.h
+@@ -53,6 +53,12 @@ public:
+   void SetSamplerState(u32 index, const SamplerState& state) override;
+   void SetComputeImageTexture(u32 index, AbstractTexture* texture, bool read, bool write) override;
+   void UnbindTexture(const AbstractTexture* texture) override;
++#ifdef __ORBIS__
++  // Piglet frees a deleted texture's memory right away, while queued GPU work may still use it
++  // (GPU crash in Sonic Adventure DX's FMVs, which create and delete textures every frame).
++  // Textures and framebuffers are deleted a few presented frames later instead.
++  void PS4DeferDelete(GLuint texture, GLuint framebuffer);
++#endif
+   void SetViewport(float x, float y, float width, float height, float near_depth,
+                    float far_depth) override;
+   void Draw(u32 base_vertex, u32 num_vertices) override;
+@@ -114,6 +120,16 @@ private:
+   u32 m_shared_read_framebuffer = 0;
+   u32 m_shared_draw_framebuffer = 0;
+   float m_backbuffer_scale;
++#ifdef __ORBIS__
++  struct PS4PendingDelete
++  {
++    u64 frame;
++    GLuint texture;
++    GLuint framebuffer;
++  };
++  std::vector<PS4PendingDelete> m_ps4_pending_deletes;
++  u64 m_ps4_frame = 0;
++#endif
+ };
+ 
+ inline OGLGfx* GetOGLGfx()
 diff --git a/Source/Core/VideoBackends/OGL/OGLNativeVertexFormat.cpp b/Source/Core/VideoBackends/OGL/OGLNativeVertexFormat.cpp
 index 921ef61..bad85c2 100644
 --- a/Source/Core/VideoBackends/OGL/OGLNativeVertexFormat.cpp
@@ -3691,7 +3747,7 @@ index efbb826..73f3d03 100644
    const u32 m_buffertype;
    const u32 m_size;
 diff --git a/Source/Core/VideoBackends/OGL/OGLTexture.cpp b/Source/Core/VideoBackends/OGL/OGLTexture.cpp
-index 003a7ec..82a4ad7 100644
+index 003a7ec..df9ffc5 100644
 --- a/Source/Core/VideoBackends/OGL/OGLTexture.cpp
 +++ b/Source/Core/VideoBackends/OGL/OGLTexture.cpp
 @@ -2,6 +2,7 @@
@@ -3749,7 +3805,7 @@ index 003a7ec..82a4ad7 100644
    if (m_config.IsRenderTarget())
    {
      // We can't render to compressed formats.
-@@ -216,6 +243,9 @@ OGLTexture::OGLTexture(const TextureConfig& tex_config, std::string_view name)
+@@ -216,8 +243,15 @@ OGLTexture::OGLTexture(const TextureConfig& tex_config, std::string_view name)
  
  OGLTexture::~OGLTexture()
  {
@@ -3757,9 +3813,15 @@ index 003a7ec..82a4ad7 100644
 +  ps4_gl_textures--;
 +#endif
    GetOGLGfx()->UnbindTexture(this);
++#ifdef __ORBIS__
++  GetOGLGfx()->PS4DeferDelete(m_texId, 0);
++#else
    glDeleteTextures(1, &m_texId);
++#endif
  }
-@@ -279,6 +309,7 @@ void OGLTexture::ResolveFromTexture(const AbstractTexture* src,
+ 
+ void OGLTexture::CopyRectangleFromTexture(const AbstractTexture* src,
+@@ -279,6 +313,7 @@ void OGLTexture::ResolveFromTexture(const AbstractTexture* src,
  void OGLTexture::Load(u32 level, u32 width, u32 height, u32 row_length, const u8* buffer,
                        size_t buffer_size, u32 layer)
  {
@@ -3767,7 +3829,19 @@ index 003a7ec..82a4ad7 100644
    if (level >= m_config.levels)
      PanicAlertFmt("Texture only has {} levels, can't update level {}", m_config.levels, level);
  
-@@ -744,6 +775,25 @@ OGLFramebuffer::Create(OGLTexture* color_attachment, OGLTexture* depth_attachmen
+@@ -670,7 +705,11 @@ OGLFramebuffer::OGLFramebuffer(AbstractTexture* color_attachment, AbstractTextur
+ 
+ OGLFramebuffer::~OGLFramebuffer()
+ {
++#ifdef __ORBIS__
++  GetOGLGfx()->PS4DeferDelete(0, m_fbo);
++#else
+   glDeleteFramebuffers(1, &m_fbo);
++#endif
+ }
+ 
+ std::unique_ptr<OGLFramebuffer>
+@@ -744,6 +783,25 @@ OGLFramebuffer::Create(OGLTexture* color_attachment, OGLTexture* depth_attachmen
  
    glDrawBuffers(static_cast<GLsizei>(buffers.size()), buffers.data());
  
