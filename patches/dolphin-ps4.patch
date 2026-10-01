@@ -294,10 +294,10 @@ index eef6896..5ca5dc7 100644
    if (wsi.type == WindowSystemType::X11)
 diff --git a/Source/Core/Common/GL/GLInterface/Piglet.cpp b/Source/Core/Common/GL/GLInterface/Piglet.cpp
 new file mode 100644
-index 0000000..19c9e5b
+index 0000000..ecee95e
 --- /dev/null
 +++ b/Source/Core/Common/GL/GLInterface/Piglet.cpp
-@@ -0,0 +1,365 @@
+@@ -0,0 +1,371 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -320,6 +320,9 @@ index 0000000..19c9e5b
 +
 +// /data/DolphinPS4/boot-trace.log (DolphinPS4 port/ps4_crashlog.cpp, linked into the app).
 +extern "C" void ps4_boot_trace(const char* stage);
++// ps4.ini gpu_cmdbuf_mb, set by DolphinNoGUI before the video backend starts.
++extern "C" int ps4_gpu_cmdbuf_mb;
++int ps4_gpu_cmdbuf_mb = 8;
 +
 +// Piglet is loaded at run time and every function is looked up with sceKernelDlsym, so the app
 +// has no load-time dependency on the (devkit) Piglet module. <EGL/egl.h> (via Pigletv2VSH.h) is
@@ -516,7 +519,10 @@ index 0000000..19c9e5b
 +  config.systemSharedMemorySize = static_cast<uint32_t>(system_shared);
 +  config.videoSharedMemorySize = static_cast<uint32_t>(video);
 +  config.maxMappedFlexibleMemory = 0xFFFFFFFF;
-+  config.drawCommandBufferSize = 0x100000;
++  // Piglet records a frame's GPU commands into this buffer and drops what doesn't fit ("Out of
++  // commandbuffer memory"): with RetroArch's 1 MiB, Sonic Adventure DX lost its menus and parts
++  // of each level. ps4.ini gpu_cmdbuf_mb (default 8).
++  config.drawCommandBufferSize = static_cast<uint32_t>(ps4_gpu_cmdbuf_mb) * 0x100000;
 +  config.lcueResourceBufferSize = 0x1000000;
 +  config.dbgPosCmd_0x40 = s_window.uWidth;
 +  config.dbgPosCmd_0x44 = s_window.uHeight;
@@ -1454,18 +1460,20 @@ index 51c3fff..0b31728 100644
 +  ps4_add_eboot(dolphin-nogui)
 +endif()
 diff --git a/Source/Core/DolphinNoGUI/MainNoGUI.cpp b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
-index 3bf40ea..b8e54c0 100644
+index 3bf40ea..2c7fe94 100644
 --- a/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 +++ b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
-@@ -6,6 +6,7 @@
+@@ -5,7 +5,9 @@
+ 
  #include <OptionParser.h>
  #include <csignal>
++#include <algorithm>
  #include <cstdio>
 +#include <cstdlib>
  #include <string>
  #include <vector>
  
-@@ -15,7 +16,13 @@
+@@ -15,7 +17,13 @@
  #include <windows.h>
  #endif
  
@@ -1479,7 +1487,7 @@ index 3bf40ea..b8e54c0 100644
  #include "Core/Boot/Boot.h"
  #include "Core/BootManager.h"
  #include "Core/Core.h"
-@@ -31,6 +38,19 @@
+@@ -31,6 +39,20 @@
  
  static std::unique_ptr<Platform> s_platform;
  
@@ -1494,12 +1502,13 @@ index 3bf40ea..b8e54c0 100644
 +extern "C" int ps4_audio_thread_core;   // AudioCommon/PS4AudioStream.cpp
 +extern "C" unsigned ps4_uniform_ring_count;  // VideoBackends/OGL/ProgramShaderCache.cpp
 +extern "C" int ps4_pagetable_deferred;           // Core/PowerPC/MMU.cpp
++extern "C" int ps4_gpu_cmdbuf_mb;                // Common/GL/GLInterface/Piglet.cpp
 +#endif
 +
  static void signal_handler(int)
  {
    constexpr char message[] = "A signal was received. A second signal will force Dolphin to stop.\n";
-@@ -173,6 +193,10 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
+@@ -173,6 +195,10 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
    if (platform_name == "macos" || platform_name.empty())
      return Platform::CreateMacOSPlatform();
  #endif
@@ -1510,7 +1519,7 @@ index 3bf40ea..b8e54c0 100644
  
    if (platform_name == "headless" || platform_name.empty())
      return Platform::CreateHeadlessPlatform();
-@@ -184,8 +208,17 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
+@@ -184,8 +210,17 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
  #define main app_main
  #endif
  
@@ -1529,7 +1538,7 @@ index 3bf40ea..b8e54c0 100644
    const auto parser =
        CommandLineParse::CreateParser(CommandLineParse::ParserOptions::OmitGUIOptions);
    parser->add_option("-p", "--platform")
-@@ -207,6 +240,10 @@ int main(const int argc, char* argv[])
+@@ -207,6 +242,10 @@ int main(const int argc, char* argv[])
  #ifdef __APPLE__
                  ,
                  "macos"
@@ -1540,7 +1549,7 @@ index 3bf40ea..b8e54c0 100644
  #endif
        });
  
-@@ -270,7 +307,120 @@ int main(const int argc, char* argv[])
+@@ -270,7 +309,123 @@ int main(const int argc, char* argv[])
  
    UICommon::SetUserDirectory(user_directory);
    UICommon::Init();
@@ -1610,6 +1619,9 @@ index 3bf40ea..b8e54c0 100644
 +      Config::SetBase(Config::MAIN_PAGE_TABLE_FASTMEM, mode == "on" || mode == "deferred");
 +      ps4_pagetable_deferred = mode == "deferred";
 +    }
++    // gpu_cmdbuf_mb=<MiB>: Piglet GPU command buffer (too small drops draws, see Piglet.cpp).
++    ps4_gpu_cmdbuf_mb =
++        std::max(1, std::atoi(Platform::GetPS4Option("gpu_cmdbuf_mb", "8").c_str()));
 +    // audio_buffer=<ms>: how much sound the mixer keeps queued. When emulation runs below full
 +    // speed it stretches the sound to fill the gaps; a larger buffer makes that smoother (Dolphin's
 +    // default is 80 ms).
@@ -1661,7 +1673,7 @@ index 3bf40ea..b8e54c0 100644
  
    Common::ScopeGuard ui_common_guard([] {
      UICommon::ShutdownControllers();
-@@ -284,6 +434,12 @@ int main(const int argc, char* argv[])
+@@ -284,6 +439,12 @@ int main(const int argc, char* argv[])
    }
  
    auto core_state_changed_hook = Core::AddOnStateChangedCallback([](const Core::State state) {
@@ -1674,7 +1686,7 @@ index 3bf40ea..b8e54c0 100644
      if (state == Core::State::Uninitialized)
        s_platform->Stop();
    });
-@@ -303,6 +459,9 @@ int main(const int argc, char* argv[])
+@@ -303,6 +464,9 @@ int main(const int argc, char* argv[])
  
    DolphinAnalytics::Instance().ReportDolphinStart("nogui");
  
