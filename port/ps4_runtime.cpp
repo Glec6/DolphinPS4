@@ -172,7 +172,10 @@ mspace createHeap() {
         pthread_mutexattr_destroy(reinterpret_cast<pthread_mutexattr_t*>(attr));
     }
     // Preferred: the system flexible memory pool, leaving regular flexible memory to Piglet.
-    const size_t systemSizes[] = {1024 * MB, 768 * MB, 512 * MB, 384 * MB, 256 * MB, 192 * MB, 128 * MB};
+    // Not all of it: the kernel's own objects ("ScePthread internal memory") and the system libc
+    // heap that Sony modules (Piglet's shader compiler) grow on demand come from the same pool.
+    // With a 1 GiB heap, compiling Dolphin's larger shaders ran the system out of memory.
+    const size_t systemSizes[] = {512 * MB, 384 * MB, 256 * MB, 192 * MB, 128 * MB};
     for (size_t size : systemSizes) {
         if (mspace msp = mapAndCreate(true, size))
             return msp;
