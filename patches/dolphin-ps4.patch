@@ -1968,6 +1968,23 @@ index 0000000..8b666df
 +  return 0.0;
 +}
 +}  // namespace GCAdapter
+diff --git a/Source/Core/VideoBackends/OGL/OGLStreamBuffer.cpp b/Source/Core/VideoBackends/OGL/OGLStreamBuffer.cpp
+index 2eec584..69146a2 100644
+--- a/Source/Core/VideoBackends/OGL/OGLStreamBuffer.cpp
++++ b/Source/Core/VideoBackends/OGL/OGLStreamBuffer.cpp
+@@ -349,6 +349,12 @@ std::unique_ptr<StreamBuffer> StreamBuffer::Create(u32 type, u32 size)
+   // without basevertex support, only streaming methods whith uploads everything to zero works fine:
+   if (!g_ogl_config.bSupportsGLBaseVertex)
+   {
++#ifdef __ORBIS__
++    // PS4 Piglet copies the *whole* buffer (8-16 MiB) on every glBufferSubData into a buffer the
++    // GPU may still use, which exhausted its memory within seconds and crashed the GPU. With
++    // glBufferData each upload gets a buffer of exactly its own (small) size.
++    return std::make_unique<BufferData>(type, size);
++#endif
+     if (!DriverDetails::HasBug(DriverDetails::BUG_BROKEN_BUFFER_STREAM))
+       return std::make_unique<BufferSubData>(type, size);
+ 
 diff --git a/Source/Core/VideoBackends/OGL/ProgramShaderCache.cpp b/Source/Core/VideoBackends/OGL/ProgramShaderCache.cpp
 index 1dfd026..77b2e6e 100644
 --- a/Source/Core/VideoBackends/OGL/ProgramShaderCache.cpp
