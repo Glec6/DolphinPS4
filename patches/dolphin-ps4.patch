@@ -1279,10 +1279,10 @@ index f4dc8a9..c80cce2 100644
  
 diff --git a/Source/Core/DolphinNoGUI/PlatformPS4.cpp b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
 new file mode 100644
-index 0000000..fa8052f
+index 0000000..71abf56
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
-@@ -0,0 +1,315 @@
+@@ -0,0 +1,317 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -1396,8 +1396,10 @@ index 0000000..fa8052f
 +      snprintf(line, sizeof(line),
 +               "monitor: %d s, %zu MiB flexible memory free, speed %.0f%%, %.1f FPS, %.1f VPS, "
 +               "CPU core %d",
-+               frame / 60, flexible / (1024 * 1024), g_perf_metrics.GetSpeed(),
-+               g_perf_metrics.GetFPS(), g_perf_metrics.GetVPS(),
++               frame / 60, flexible / (1024 * 1024),
++               Core::System::GetInstance().GetPerfMetrics().GetSpeed(),
++               Core::System::GetInstance().GetPerfMetrics().GetFPS(),
++               Core::System::GetInstance().GetPerfMetrics().GetVPS(),
 +               static_cast<int>(Config::Get(Config::MAIN_CPU_CORE)));
 +      BootTrace(line);
 +    }
