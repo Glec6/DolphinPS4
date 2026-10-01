@@ -286,16 +286,18 @@ index eef6896..5ca5dc7 100644
    if (wsi.type == WindowSystemType::X11)
 diff --git a/Source/Core/Common/GL/GLInterface/Piglet.cpp b/Source/Core/Common/GL/GLInterface/Piglet.cpp
 new file mode 100644
-index 0000000..97c114d
+index 0000000..8c82886
 --- /dev/null
 +++ b/Source/Core/Common/GL/GLInterface/Piglet.cpp
-@@ -0,0 +1,311 @@
+@@ -0,0 +1,355 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
 +#include "Common/GL/GLInterface/Piglet.h"
 +
++#include <algorithm>
 +#include <cstdint>
++#include <cstdio>
 +#include <cstring>
 +#include <string>
 +
@@ -307,6 +309,9 @@ index 0000000..97c114d
 +
 +#include "Common/CommonTypes.h"
 +#include "Common/Logging/Log.h"
++
++// /data/DolphinPS4/boot-trace.log (DolphinPS4 port/ps4_crashlog.cpp, linked into the app).
++extern "C" void ps4_boot_trace(const char* stage);
 +
 +// Piglet is loaded at run time and every function is looked up with sceKernelDlsym, so the app
 +// has no load-time dependency on the (devkit) Piglet module. <EGL/egl.h> (via Pigletv2VSH.h) is
@@ -477,14 +482,28 @@ index 0000000..97c114d
 +    return false;
 +
 +  // RetroArch for PS4's configuration (graphics memory from flexible memory), which is known to
-+  // get a display on retail consoles.
++  // get a display on retail consoles - except the video memory: RetroArch's 48 MiB is far too
++  // little for Dolphin (buffer and texture allocations failed). Use what flexible memory there
++  // is, keeping some back for Dolphin's own mappings (JIT code, DSP ARAM, ...).
++  constexpr size_t MiB = 1024 * 1024;
++  size_t flexible = 0;
++  using AvailableFlexibleFn = int32_t (*)(size_t*);
++  reinterpret_cast<AvailableFlexibleFn>(&sceKernelAvailableFlexibleMemorySize)(&flexible);
++  size_t video = flexible > 96 * MiB ? flexible - 96 * MiB : 0;
++  video = std::clamp<size_t>(video & ~(16 * MiB - 1), 48 * MiB, 192 * MiB);
++  char trace[160];
++  snprintf(trace, sizeof(trace), "Piglet: %zu MiB flexible memory free, %zu MiB video memory",
++           flexible / MiB, video / MiB);
++  ps4_boot_trace(trace);
++  INFO_LOG_FMT(VIDEO, "{}", trace);
++
 +  OrbisPglConfig config;
 +  std::memset(&config, 0, sizeof(config));
 +  config.size = sizeof(config);
 +  config.flags = ORBIS_PGL_FLAGS_USE_COMPOSITE_EXT | ORBIS_PGL_FLAGS_USE_FLEXIBLE_MEMORY | 0x60;
 +  config.processOrder = 1;
 +  config.systemSharedMemorySize = 0x1000000;
-+  config.videoSharedMemorySize = 0x3000000;
++  config.videoSharedMemorySize = static_cast<uint32_t>(video);
 +  config.maxMappedFlexibleMemory = 0xFFFFFFFF;
 +  config.drawCommandBufferSize = 0x100000;
 +  config.lcueResourceBufferSize = 0x1000000;
@@ -495,6 +514,31 @@ index 0000000..97c114d
 +  {
 +    ERROR_LOG_FMT(VIDEO, "Piglet: scePigletSetConfigurationVSH failed");
 +    return false;
++  }
++
++  // Compiled shader cache, like RetroArch (optional).
++  struct ShaderCacheConfig
++  {
++    uint32_t version;
++    uint32_t unknown[2];
++    char cache_dir[128];
++  } cache_config{};
++  static_assert(sizeof(ShaderCacheConfig) == 0x8C);
++  int (*set_shader_cache)(const void*) = nullptr;
++  if (sceKernelDlsym(s_piglet_module, "scePigletSetShaderCacheConfiguration",
++                     reinterpret_cast<void**>(&set_shader_cache)) == 0 &&
++      set_shader_cache)
++  {
++    mkdir("/data/DolphinPS4/User/Cache", 0777);
++    mkdir("/data/DolphinPS4/User/Cache/Piglet", 0777);
++    // The structure is 0x10C bytes in RetroArch's declaration; pass a zeroed buffer that size.
++    char buffer[0x10C] = {};
++    cache_config.version = 0x00010064;
++    snprintf(cache_config.cache_dir, sizeof(cache_config.cache_dir), "%s",
++             "/data/DolphinPS4/User/Cache/Piglet/");
++    std::memcpy(buffer, &cache_config, sizeof(cache_config));
++    if (!set_shader_cache(buffer))
++      WARN_LOG_FMT(VIDEO, "Piglet: scePigletSetShaderCacheConfiguration failed");
 +  }
 +  INFO_LOG_FMT(VIDEO, "Piglet: modules loaded from {}", dir);
 +  return true;
@@ -1025,6 +1069,36 @@ index a7919fb..add0b3a 100644
    sigaction(SIGBUS, &old_sa_bus, nullptr);
  #endif
  }
+diff --git a/Source/Core/Core/PowerPC/Jit64Common/FarCodeCache.h b/Source/Core/Core/PowerPC/Jit64Common/FarCodeCache.h
+index 08cfe3f..04ee875 100644
+--- a/Source/Core/Core/PowerPC/Jit64Common/FarCodeCache.h
++++ b/Source/Core/Core/PowerPC/Jit64Common/FarCodeCache.h
+@@ -8,7 +8,11 @@
+ 
+ // a bit of a hack; the MMU results in a vast amount more code ending up in the far cache,
+ // mostly exception handling, so give it a whole bunch more space if the MMU is on.
++#ifdef __ORBIS__
++constexpr size_t FARCODE_SIZE = 1024 * 1024 * 32;
++#else
+ constexpr size_t FARCODE_SIZE = 1024 * 1024 * 64;
++#endif
+ constexpr size_t FARCODE_SIZE_MMU = 1024 * 1024 * 128;
+ 
+ // A place to throw blocks of code we don't want polluting the cache, e.g. rarely taken
+diff --git a/Source/Core/Core/PowerPC/Jit64Common/Jit64Constants.h b/Source/Core/Core/PowerPC/Jit64Common/Jit64Constants.h
+index 39e16c7..bba4032 100644
+--- a/Source/Core/Core/PowerPC/Jit64Common/Jit64Constants.h
++++ b/Source/Core/Core/PowerPC/Jit64Common/Jit64Constants.h
+@@ -20,4 +20,9 @@ constexpr Gen::X64Reg RMEM = Gen::RBX;
+ // to address as much as possible in a one-byte offset form.
+ constexpr Gen::X64Reg RPPCSTATE = Gen::RBP;
+ 
++#ifdef __ORBIS__
++// PS4: JIT code comes out of the same flexible memory as Piglet's GPU memory.
++constexpr size_t CODE_SIZE = 1024 * 1024 * 64;
++#else
+ constexpr size_t CODE_SIZE = 1024 * 1024 * 128;
++#endif
 diff --git a/Source/Core/DolphinNoGUI/CMakeLists.txt b/Source/Core/DolphinNoGUI/CMakeLists.txt
 index 51c3fff..0b31728 100644
 --- a/Source/Core/DolphinNoGUI/CMakeLists.txt
