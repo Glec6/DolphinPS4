@@ -996,6 +996,69 @@ index 16cae73..0e59ae9 100644
  #define BACKEND_WASAPI _trans("WASAPI (Exclusive Mode)")
  
  namespace PowerPC
+diff --git a/Source/Core/Core/Core.cpp b/Source/Core/Core/Core.cpp
+index fc614fd..bbe55e6 100644
+--- a/Source/Core/Core/Core.cpp
++++ b/Source/Core/Core/Core.cpp
+@@ -91,6 +91,14 @@
+ #include "VideoCommon/VideoBackendBase.h"
+ #include "VideoCommon/VideoEvents.h"
+ 
++
++#ifdef __ORBIS__
++extern "C" void ps4_boot_trace(const char* stage);  // DolphinPS4 port/ps4_crashlog.cpp
++#define PS4_BOOT_MARK(text) ps4_boot_trace(text)
++#else
++#define PS4_BOOT_MARK(text)
++#endif
++
+ namespace Core
+ {
+ static bool s_wants_determinism;
+@@ -574,9 +582,11 @@ static void EmuThread(Core::System& system, std::unique_ptr<BootParameters> boot
+   system.GetMovie().Init(*boot);
+   Common::ScopeGuard movie_guard([&system] { system.GetMovie().Shutdown(); });
+ 
++  PS4_BOOT_MARK("emu: sound stream init");
+   AudioCommon::InitSoundStream(system);
+   Common::ScopeGuard audio_guard([&system] { AudioCommon::ShutdownSoundStream(system); });
+ 
++  PS4_BOOT_MARK("emu: HW init");
+   HW::Init(system,
+            NetPlay::IsNetPlayRunning() ? &(boot_session_data.GetNetplaySettings()->sram) : nullptr);
+ 
+@@ -599,6 +609,7 @@ static void EmuThread(Core::System& system, std::unique_ptr<BootParameters> boot
+   // In single-core mode: This holds a video backend shutdown function.
+   // In dual-core mode: This holds a GPU thread stopping function (which does the backend shutdown).
+   const auto video_guard = GetInitializedVideoGuard(system, wsi);
++  PS4_BOOT_MARK("emu: video backend initialized");
+   if (!video_guard)
+   {
+     PanicAlertFmt("Failed to initialize video backend!");
+@@ -617,6 +628,7 @@ static void EmuThread(Core::System& system, std::unique_ptr<BootParameters> boot
+     return;
+   }
+ 
++  PS4_BOOT_MARK("emu: DSP initialized");
+   AudioCommon::PostInitSoundStream(system);
+ 
+   // Set execution state to known values (CPU/FIFO/Audio Paused)
+@@ -636,6 +648,7 @@ static void EmuThread(Core::System& system, std::unique_ptr<BootParameters> boot
+   {
+     ASSERT(IsCPUThread());
+     CPUThreadGuard guard(system);
++    PS4_BOOT_MARK("emu: BootUp");
+     if (!CBoot::BootUp(system, guard, std::move(boot)))
+       return;
+   }
+@@ -659,6 +672,7 @@ static void EmuThread(Core::System& system, std::unique_ptr<BootParameters> boot
+       GetVideoEvents().after_present_event.Register(&Core::Callback_FramePresented);
+ 
+   // Setup our core
++  PS4_BOOT_MARK("emu: booted");
+   if (Config::Get(Config::MAIN_CPU_CORE) != PowerPC::CPUCore::Interpreter)
+   {
+     system.GetPowerPC().SetMode(PowerPC::CoreMode::JIT);
 diff --git a/Source/Core/Core/MemTools.cpp b/Source/Core/Core/MemTools.cpp
 index a7919fb..8de7f4d 100644
 --- a/Source/Core/Core/MemTools.cpp
@@ -1338,10 +1401,10 @@ index f4dc8a9..4e5ff67 100644
  
 diff --git a/Source/Core/DolphinNoGUI/PlatformPS4.cpp b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
 new file mode 100644
-index 0000000..202d7ea
+index 0000000..8aeb425
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
-@@ -0,0 +1,360 @@
+@@ -0,0 +1,404 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -1375,6 +1438,7 @@ index 0000000..202d7ea
 +#include "Core/Config/MainSettings.h"
 +#include "Core/Core.h"
 +#include "VideoCommon/PerformanceMetrics.h"
++#include "VideoCommon/PS4Profile.h"
 +#include "Core/System.h"
 +
 +extern "C" int sceSystemServiceLoadExec(const char* path, char* const argv[]);
@@ -1461,6 +1525,48 @@ index 0000000..202d7ea
 +  fprintf(stderr, "[dolphin] %s\n", title.c_str());
 +}
 +
++// Video thread time per category since the last call (VideoCommon/PS4Profile.h), as
++// milliseconds per second of real time, with calls per second.
++static void LogProfile()
++{
++  static const char* const names[PS4_PROF_CATEGORY_COUNT] = {
++      "flush", "vtx-upload", "uniforms", "draw", "pipeline", "tex-cache",
++      "tex-upload", "compile", "link", "efb-copy", "efb-peek", "present"};
++  static unsigned long long s_ticks[PS4_PROF_CATEGORY_COUNT], s_count[PS4_PROF_CATEGORY_COUNT];
++  static unsigned long long s_tsc = 0;
++  static auto s_time = std::chrono::steady_clock::now();
++
++  const unsigned long long tsc = __rdtsc();
++  const auto time = std::chrono::steady_clock::now();
++  const double seconds = std::chrono::duration<double>(time - s_time).count();
++  if (s_tsc != 0 && seconds > 0.1)
++  {
++    const double ticks_per_ms = static_cast<double>(tsc - s_tsc) / (seconds * 1000.0);
++    char line[512];
++    int len = snprintf(line, sizeof(line), "prof (ms/s, calls/s):");
++    for (int i = 0; i < PS4_PROF_CATEGORY_COUNT; i++)
++    {
++      const unsigned long long ticks = ps4_prof_ticks[i], count = ps4_prof_count[i];
++      len += snprintf(line + len, sizeof(line) - len, " %s %.0f/%.0f", names[i],
++                      static_cast<double>(ticks - s_ticks[i]) / ticks_per_ms / seconds,
++                      static_cast<double>(count - s_count[i]) / seconds);
++      s_ticks[i] = ticks;
++      s_count[i] = count;
++    }
++    Platform::BootTrace(line);
++  }
++  else
++  {
++    for (int i = 0; i < PS4_PROF_CATEGORY_COUNT; i++)
++    {
++      s_ticks[i] = ps4_prof_ticks[i];
++      s_count[i] = ps4_prof_count[i];
++    }
++  }
++  s_tsc = tsc;
++  s_time = time;
++}
++
 +void PlatformPS4::MainLoop()
 +{
 +  BootTrace("main loop");
@@ -1493,6 +1599,7 @@ index 0000000..202d7ea
 +               flexible / (1024 * 1024), static_cast<int>(Config::Get(Config::MAIN_CPU_CORE)),
 +               ps4_fault_count);
 +      BootTrace(line);
++      LogProfile();
 +    }
 +    // Port diagnostics: a screenshot every ~10 s (User/ScreenShots) shows what Dolphin renders,
 +    // independently of what reaches the TV.
@@ -2089,10 +2196,18 @@ index 0000000..8b666df
 +}
 +}  // namespace GCAdapter
 diff --git a/Source/Core/VideoBackends/OGL/OGLGfx.cpp b/Source/Core/VideoBackends/OGL/OGLGfx.cpp
-index ff5402b..dd1c2eb 100644
+index ff5402b..eb9683d 100644
 --- a/Source/Core/VideoBackends/OGL/OGLGfx.cpp
 +++ b/Source/Core/VideoBackends/OGL/OGLGfx.cpp
-@@ -12,17 +12,27 @@
+@@ -2,6 +2,7 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
+ #include "VideoBackends/OGL/OGLGfx.h"
++#include "VideoCommon/PS4Profile.h"
+ 
+ #include "Common/GL/GLContext.h"
+ #include "Common/GL/GLExtensions/GLExtensions.h"
+@@ -12,17 +13,27 @@
  #include "VideoBackends/OGL/OGLPipeline.h"
  #include "VideoBackends/OGL/OGLShader.h"
  #include "VideoBackends/OGL/OGLTexture.h"
@@ -2120,7 +2235,7 @@ index ff5402b..dd1c2eb 100644
  namespace OGL
  {
  VideoConfig g_ogl_config;
-@@ -277,8 +287,350 @@ void OGLGfx::Draw(u32 base_vertex, u32 num_vertices)
+@@ -277,8 +288,351 @@ void OGLGfx::Draw(u32 base_vertex, u32 num_vertices)
                 num_vertices);
  }
  
@@ -2401,6 +2516,7 @@ index ff5402b..dd1c2eb 100644
 +
  void OGLGfx::DrawIndexed(u32 base_index, u32 num_indices, u32 base_vertex)
  {
++  PS4_PROFILE(PS4_PROF_DRAW);
 +#ifdef __ORBIS__
 +  static int s_draw_number = 0;
 +  s_draw_number++;
@@ -2471,7 +2587,7 @@ index ff5402b..dd1c2eb 100644
    if (g_ogl_config.bSupportsGLBaseVertex)
    {
      glDrawElementsBaseVertex(static_cast<const OGLPipeline*>(m_current_pipeline)->GetGLPrimitive(),
-@@ -290,6 +642,28 @@ void OGLGfx::DrawIndexed(u32 base_index, u32 num_indices, u32 base_vertex)
+@@ -290,6 +644,28 @@ void OGLGfx::DrawIndexed(u32 base_index, u32 num_indices, u32 base_vertex)
      glDrawElements(static_cast<const OGLPipeline*>(m_current_pipeline)->GetGLPrimitive(),
                     num_indices, GL_UNSIGNED_SHORT, static_cast<u16*>(nullptr) + base_index);
    }
@@ -2500,7 +2616,23 @@ index ff5402b..dd1c2eb 100644
  }
  
  void OGLGfx::DispatchComputeShader(const AbstractShader* shader, u32 groupsize_x, u32 groupsize_y,
-@@ -733,3 +1107,65 @@ SurfaceInfo OGLGfx::GetSurfaceInfo() const
+@@ -417,6 +793,7 @@ bool OGLGfx::BindBackbuffer(const ClearColor& clear_color)
+ 
+ void OGLGfx::PresentBackbuffer()
+ {
++  PS4_PROFILE(PS4_PROF_PRESENT);
+   if (g_ogl_config.bSupportsDebug)
+   {
+     if (Common::Log::LogManager::GetInstance()->IsEnabled(Common::Log::LogType::HOST_GPU,
+@@ -618,6 +995,7 @@ void OGLGfx::ApplyBlendingState(const BlendingState state)
+ 
+ void OGLGfx::SetPipeline(const AbstractPipeline* pipeline)
+ {
++  PS4_PROFILE(PS4_PROF_PIPELINE);
+   if (m_current_pipeline == pipeline)
+     return;
+ 
+@@ -733,3 +1111,65 @@ SurfaceInfo OGLGfx::GetSurfaceInfo() const
  }
  
  }  // namespace OGL
@@ -2596,10 +2728,18 @@ index 2eec584..c86c93a 100644
        return std::make_unique<BufferSubData>(type, size);
  
 diff --git a/Source/Core/VideoBackends/OGL/OGLTexture.cpp b/Source/Core/VideoBackends/OGL/OGLTexture.cpp
-index 003a7ec..66d26a4 100644
+index 003a7ec..121bd8e 100644
 --- a/Source/Core/VideoBackends/OGL/OGLTexture.cpp
 +++ b/Source/Core/VideoBackends/OGL/OGLTexture.cpp
-@@ -13,6 +13,11 @@
+@@ -2,6 +2,7 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
+ #include "VideoBackends/OGL/OGLTexture.h"
++#include "VideoCommon/PS4Profile.h"
+ 
+ #include "Common/Assert.h"
+ #include "Common/CommonTypes.h"
+@@ -13,6 +14,11 @@
  
  #include "VideoCommon/VideoConfig.h"
  
@@ -2611,7 +2751,7 @@ index 003a7ec..66d26a4 100644
  namespace OGL
  {
  GLenum OGLTexture::GetGLInternalFormatForTextureFormat(AbstractTextureFormat format, bool storage)
-@@ -197,6 +202,24 @@ OGLTexture::OGLTexture(const TextureConfig& tex_config, std::string_view name)
+@@ -197,6 +203,24 @@ OGLTexture::OGLTexture(const TextureConfig& tex_config, std::string_view name)
      }
    }
  
@@ -2636,7 +2776,15 @@ index 003a7ec..66d26a4 100644
    if (m_config.IsRenderTarget())
    {
      // We can't render to compressed formats.
-@@ -744,6 +767,25 @@ OGLFramebuffer::Create(OGLTexture* color_attachment, OGLTexture* depth_attachmen
+@@ -279,6 +303,7 @@ void OGLTexture::ResolveFromTexture(const AbstractTexture* src,
+ void OGLTexture::Load(u32 level, u32 width, u32 height, u32 row_length, const u8* buffer,
+                       size_t buffer_size, u32 layer)
+ {
++  PS4_PROFILE(PS4_PROF_TEXTURE_UPLOAD);
+   if (level >= m_config.levels)
+     PanicAlertFmt("Texture only has {} levels, can't update level {}", m_config.levels, level);
+ 
+@@ -744,6 +769,25 @@ OGLFramebuffer::Create(OGLTexture* color_attachment, OGLTexture* depth_attachmen
  
    glDrawBuffers(static_cast<GLsizei>(buffers.size()), buffers.data());
  
@@ -2662,11 +2810,47 @@ index 003a7ec..66d26a4 100644
    DEBUG_ASSERT(glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE);
    GetOGLGfx()->RestoreFramebufferBinding();
  
+diff --git a/Source/Core/VideoBackends/OGL/OGLVertexManager.cpp b/Source/Core/VideoBackends/OGL/OGLVertexManager.cpp
+index c5382cf..b73f769 100644
+--- a/Source/Core/VideoBackends/OGL/OGLVertexManager.cpp
++++ b/Source/Core/VideoBackends/OGL/OGLVertexManager.cpp
+@@ -2,6 +2,7 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
+ #include "VideoBackends/OGL/OGLVertexManager.h"
++#include "VideoCommon/PS4Profile.h"
+ 
+ #include <memory>
+ 
+@@ -171,6 +172,7 @@ void VertexManager::ResetBuffer(u32 vertex_stride)
+ void VertexManager::CommitBuffer(u32 num_vertices, u32 vertex_stride, u32 num_indices,
+                                  u32* out_base_vertex, u32* out_base_index)
+ {
++  PS4_PROFILE(PS4_PROF_VERTEX_UPLOAD);
+   u32 vertex_data_size = num_vertices * vertex_stride;
+   u32 index_data_size = num_indices * sizeof(u16);
+ 
+@@ -187,6 +189,7 @@ void VertexManager::CommitBuffer(u32 num_vertices, u32 vertex_stride, u32 num_in
+ 
+ void VertexManager::UploadUniforms()
+ {
++  PS4_PROFILE(PS4_PROF_UNIFORMS);
+   ProgramShaderCache::UploadConstants();
+ }
+ }  // namespace OGL
 diff --git a/Source/Core/VideoBackends/OGL/ProgramShaderCache.cpp b/Source/Core/VideoBackends/OGL/ProgramShaderCache.cpp
-index 1dfd026..a46a79e 100644
+index 1dfd026..9b61f07 100644
 --- a/Source/Core/VideoBackends/OGL/ProgramShaderCache.cpp
 +++ b/Source/Core/VideoBackends/OGL/ProgramShaderCache.cpp
-@@ -37,6 +37,12 @@
+@@ -2,6 +2,7 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
+ #include "VideoBackends/OGL/ProgramShaderCache.h"
++#include "VideoCommon/PS4Profile.h"
+ 
+ #include <array>
+ #include <atomic>
+@@ -37,6 +38,12 @@
  #include "VideoCommon/VideoBackendBase.h"
  #include "VideoCommon/VideoConfig.h"
  
@@ -2679,7 +2863,7 @@ index 1dfd026..a46a79e 100644
  namespace OGL
  {
  u32 ProgramShaderCache::s_ubo_buffer_size;
-@@ -110,6 +116,35 @@ void SHADER::SetProgramVariables()
+@@ -110,6 +117,35 @@ void SHADER::SetProgramVariables()
      glUniformBlockBinding(glprogid, UBERBlock_id, 5);
  
    // Bind Texture Samplers
@@ -2715,7 +2899,7 @@ index 1dfd026..a46a79e 100644
    for (int a = 0; a < 8; ++a)
    {
      // Still need to get sampler locations since we aren't binding them statically in the shaders
-@@ -221,12 +256,118 @@ u32 ProgramShaderCache::GetUniformBufferAlignment()
+@@ -221,12 +257,118 @@ u32 ProgramShaderCache::GetUniformBufferAlignment()
    return s_ubo_align;
  }
  
@@ -2834,7 +3018,7 @@ index 1dfd026..a46a79e 100644
    if (pixel_shader_manager.dirty || vertex_shader_manager.dirty || geometry_shader_manager.dirty ||
        pixel_shader_manager.custom_constants_dirty)
    {
-@@ -280,6 +421,13 @@ void ProgramShaderCache::UploadConstants()
+@@ -280,6 +422,13 @@ void ProgramShaderCache::UploadConstants()
  
  void ProgramShaderCache::UploadConstants(const void* data, u32 data_size)
  {
@@ -2848,8 +3032,11 @@ index 1dfd026..a46a79e 100644
    // allocate and copy
    const u32 alloc_size = Common::AlignUp(data_size, s_ubo_align);
    auto buffer = s_buffer->Map(alloc_size, s_ubo_align);
-@@ -330,6 +478,29 @@ GLuint ProgramShaderCache::CompileSingleShader(GLenum type, std::string_view cod
+@@ -328,8 +477,32 @@ bool ProgramShaderCache::CompileComputeShader(SHADER& shader, std::string_view c
+ 
+ GLuint ProgramShaderCache::CompileSingleShader(GLenum type, std::string_view code)
  {
++  PS4_PROFILE(PS4_PROF_SHADER_COMPILE);
    const GLuint result = glCreateShader(type);
  
 +#ifdef __ORBIS__
@@ -2878,7 +3065,7 @@ index 1dfd026..a46a79e 100644
    constexpr GLsizei num_strings = 2;
    const std::array<const char*, num_strings> src{
        s_glsl_header.data(),
-@@ -343,6 +514,27 @@ GLuint ProgramShaderCache::CompileSingleShader(GLenum type, std::string_view cod
+@@ -343,6 +516,27 @@ GLuint ProgramShaderCache::CompileSingleShader(GLenum type, std::string_view cod
    glShaderSource(result, num_strings, src.data(), src_sizes.data());
    glCompileShader(result);
  
@@ -2906,7 +3093,19 @@ index 1dfd026..a46a79e 100644
    if (!CheckShaderCompileResult(result, type, code))
    {
      // Don't try to use this shader
-@@ -849,6 +1041,10 @@ void ProgramShaderCache::CreateHeader()
+@@ -620,7 +814,10 @@ PipelineProgram* ProgramShaderCache::GetPipelineProgram(const GLVertexFormat* ve
+ 
+     // Link program.
+     prog->shader.SetProgramBindings(false);
+-    glLinkProgram(prog->shader.glprogid);
++    {
++      PS4_PROFILE(PS4_PROF_PROGRAM_LINK);
++      glLinkProgram(prog->shader.glprogid);
++    }
+ 
+     // Restore VAO binding after linking.
+     if (!s_is_shared_context && vao != s_last_VAO)
+@@ -849,6 +1046,10 @@ void ProgramShaderCache::CreateHeader()
        "#define int4 ivec4\n"
        "#define frac fract\n"
        "#define lerp mix\n"
@@ -2917,6 +3116,89 @@ index 1dfd026..a46a79e 100644
  
        ,
        GetGLSLVersionString(), v < Glsl140 ? "#extension GL_ARB_uniform_buffer_object : enable" : "",
+diff --git a/Source/Core/VideoCommon/FramebufferManager.cpp b/Source/Core/VideoCommon/FramebufferManager.cpp
+index 6277598..f1455dc 100644
+--- a/Source/Core/VideoCommon/FramebufferManager.cpp
++++ b/Source/Core/VideoCommon/FramebufferManager.cpp
+@@ -2,6 +2,7 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
+ #include "VideoCommon/FramebufferManager.h"
++#include "VideoCommon/PS4Profile.h"
+ 
+ #include <fmt/format.h>
+ #include <memory>
+@@ -477,6 +478,7 @@ MathUtil::Rectangle<int> FramebufferManager::GetEFBCacheTileRect(u32 tile_index)
+ 
+ u32 FramebufferManager::PeekEFBColor(u32 x, u32 y)
+ {
++  PS4_PROFILE(PS4_PROF_EFB_PEEK);
+   // The y coordinate here assumes upper-left origin, but the readback texture is lower-left in GL.
+   if (g_backend_info.bUsesLowerLeftOrigin)
+     y = EFB_HEIGHT - 1 - y;
+@@ -500,6 +502,7 @@ u32 FramebufferManager::PeekEFBColor(u32 x, u32 y)
+ 
+ float FramebufferManager::PeekEFBDepth(u32 x, u32 y)
+ {
++  PS4_PROFILE(PS4_PROF_EFB_PEEK);
+   // The y coordinate here assumes upper-left origin, but the readback texture is lower-left in GL.
+   if (g_backend_info.bUsesLowerLeftOrigin)
+     y = EFB_HEIGHT - 1 - y;
+diff --git a/Source/Core/VideoCommon/PS4Profile.h b/Source/Core/VideoCommon/PS4Profile.h
+new file mode 100644
+index 0000000..4bd8cc7
+--- /dev/null
++++ b/Source/Core/VideoCommon/PS4Profile.h
+@@ -0,0 +1,49 @@
++// Copyright 2026 Dolphin Emulator Project
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++// PS4 port: cheap per-category timing of the video thread, reported by the DolphinNoGUI
++// monitor (boot-trace.log) as milliseconds per second. Timed with the TSC (rdtsc), so a scope
++// costs a few nanoseconds. Counters are shared between threads without locking: they are
++// approximate on purpose.
++
++#pragma once
++
++#ifdef __ORBIS__
++#include <x86intrin.h>
++
++enum PS4ProfileCategory
++{
++  PS4_PROF_FLUSH,           // VertexManagerBase::Flush: one whole game draw, all below included
++  PS4_PROF_VERTEX_UPLOAD,   // vertex + index stream upload
++  PS4_PROF_UNIFORMS,        // shader constant upload
++  PS4_PROF_DRAW,            // glDrawElements
++  PS4_PROF_PIPELINE,        // pipeline (program + state) switch
++  PS4_PROF_TEXTURE_CACHE,   // texture cache lookup/decode for a draw
++  PS4_PROF_TEXTURE_UPLOAD,  // glTexSubImage of decoded textures
++  PS4_PROF_SHADER_COMPILE,  // GLSL compile
++  PS4_PROF_PROGRAM_LINK,    // program link
++  PS4_PROF_EFB_COPY,        // EFB to texture/XFB copies
++  PS4_PROF_EFB_PEEK,        // CPU reads of the EFB (GPU readback)
++  PS4_PROF_PRESENT,         // swap
++  PS4_PROF_CATEGORY_COUNT
++};
++
++extern "C" unsigned long long ps4_prof_ticks[PS4_PROF_CATEGORY_COUNT];
++extern "C" unsigned long long ps4_prof_count[PS4_PROF_CATEGORY_COUNT];
++
++struct PS4ProfileScope
++{
++  explicit PS4ProfileScope(int category) : m_category(category), m_start(__rdtsc()) {}
++  ~PS4ProfileScope()
++  {
++    ps4_prof_ticks[m_category] += __rdtsc() - m_start;
++    ps4_prof_count[m_category]++;
++  }
++  int m_category;
++  unsigned long long m_start;
++};
++
++#define PS4_PROFILE(category) PS4ProfileScope ps4_profile_scope(category)
++#else
++#define PS4_PROFILE(category)
++#endif
 diff --git a/Source/Core/VideoCommon/PerformanceMetrics.cpp b/Source/Core/VideoCommon/PerformanceMetrics.cpp
 index 7ea96bd..7c8d876 100644
 --- a/Source/Core/VideoCommon/PerformanceMetrics.cpp
@@ -3086,6 +3368,59 @@ index 41d05f3..cdd1240 100644
    }
  
    if (m_onscreen_ui)
+diff --git a/Source/Core/VideoCommon/TextureCacheBase.cpp b/Source/Core/VideoCommon/TextureCacheBase.cpp
+index 4e4567d..92d5dbb 100644
+--- a/Source/Core/VideoCommon/TextureCacheBase.cpp
++++ b/Source/Core/VideoCommon/TextureCacheBase.cpp
+@@ -2,6 +2,7 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
+ #include "VideoCommon/TextureCacheBase.h"
++#include "VideoCommon/PS4Profile.h"
+ 
+ #include <algorithm>
+ #include <chrono>
+@@ -1241,6 +1242,7 @@ private:
+ 
+ TCacheEntry* TextureCacheBase::Load(u32 stage)
+ {
++  PS4_PROFILE(PS4_PROF_TEXTURE_CACHE);
+   if (auto entry = LoadImpl(stage, false))
+   {
+     if (!DidLinkedAssetsChange(*entry))
+@@ -2151,6 +2153,7 @@ void TextureCacheBase::CopyRenderTargetToTexture(
+     float gamma, bool clamp_top, bool clamp_bottom,
+     const CopyFilterCoefficients::Values& filter_coefficients)
+ {
++  PS4_PROFILE(PS4_PROF_EFB_COPY);
+   // Emulation methods:
+   //
+   // - EFB to RAM:
+diff --git a/Source/Core/VideoCommon/VertexManagerBase.cpp b/Source/Core/VideoCommon/VertexManagerBase.cpp
+index 2bc6d58..7877e71 100644
+--- a/Source/Core/VideoCommon/VertexManagerBase.cpp
++++ b/Source/Core/VideoCommon/VertexManagerBase.cpp
+@@ -2,6 +2,12 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
+ #include "VideoCommon/VertexManagerBase.h"
++#include "VideoCommon/PS4Profile.h"
++
++#ifdef __ORBIS__
++unsigned long long ps4_prof_ticks[PS4_PROF_CATEGORY_COUNT];
++unsigned long long ps4_prof_count[PS4_PROF_CATEGORY_COUNT];
++#endif
+ 
+ #include <array>
+ #include <cmath>
+@@ -434,6 +440,7 @@ BitSet32 VertexManagerBase::UsedTextures() const
+ 
+ void VertexManagerBase::Flush()
+ {
++  PS4_PROFILE(PS4_PROF_FLUSH);
+   if (m_is_flushed)
+     return;
+ 
 diff --git a/Source/Core/VideoCommon/VertexManagerBase.h b/Source/Core/VideoCommon/VertexManagerBase.h
 index 715dbee..a434471 100644
 --- a/Source/Core/VideoCommon/VertexManagerBase.h

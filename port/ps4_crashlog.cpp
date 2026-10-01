@@ -17,6 +17,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <cxxabi.h>
@@ -156,12 +157,26 @@ __attribute__((constructor(101))) void earlyInit() {
 
 }  // namespace
 
-// Appends a line to /data/DolphinPS4/boot-trace.log (startup milestones).
+// Appends a line to /data/DolphinPS4/boot-trace.log (startup milestones), prefixed with the
+// seconds since the first trace line.
 extern "C" void ps4_boot_trace(const char* stage) {
     const int fd = traceFd();
     if (fd < 0)
         return;
-    writeAll(fd, stage);
-    if (stage[0] == '\0' || stage[strlen(stage) - 1] != '\n')
-        writeAll(fd, "\n");
+    static timespec s_start;
+    static bool s_started = false;
+    timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    if (!s_started) {
+        s_start = now;
+        s_started = true;
+    }
+    const double seconds = static_cast<double>(now.tv_sec - s_start.tv_sec) +
+                           static_cast<double>(now.tv_nsec - s_start.tv_nsec) / 1e9;
+    // One write per line, so lines from different threads don't interleave.
+    char line[512];
+    const size_t length = strlen(stage);
+    const bool newline = length == 0 || stage[length - 1] != '\n';
+    snprintf(line, sizeof(line), "[%8.3f] %s%s", seconds, stage, newline ? "\n" : "");
+    writeAll(fd, line);
 }
