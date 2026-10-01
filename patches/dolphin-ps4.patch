@@ -2569,7 +2569,7 @@ index ce1b7a5..941b744 100644
    g_backend_info.bSupportsPipelineCacheData = supports_glsl_cache;
  
 diff --git a/Source/Core/VideoBackends/OGL/OGLGfx.cpp b/Source/Core/VideoBackends/OGL/OGLGfx.cpp
-index ff5402b..6f627d8 100644
+index ff5402b..3318e3f 100644
 --- a/Source/Core/VideoBackends/OGL/OGLGfx.cpp
 +++ b/Source/Core/VideoBackends/OGL/OGLGfx.cpp
 @@ -2,6 +2,7 @@
@@ -2872,7 +2872,7 @@ index ff5402b..6f627d8 100644
    UpdateActiveConfig();
  }
  
-@@ -271,14 +532,382 @@ void OGLGfx::SetViewport(float x, float y, float width, float height, float near
+@@ -271,14 +532,383 @@ void OGLGfx::SetViewport(float x, float y, float width, float height, float near
    glDepthRangef(near_depth, far_depth);
  }
  
@@ -2909,7 +2909,8 @@ index ff5402b..6f627d8 100644
 +static int s_sampled_draws = 0;
 +static bool PS4ShouldSampleDraw(int draw)
 +{
-+  return ps4_render_diagnostics && s_sampled_draws < 24 && (draw >= 300 && draw % 50 == 0);
++  // Every 3000th draw (up to 60): covers menus and levels, not just the first frames.
++  return ps4_render_diagnostics && s_sampled_draws < 60 && draw % 3000 == 0;
 +}
 +
 +static void PS4LogDrawState(int draw, GLenum primitive, u32 num_indices, GLuint samples,
@@ -3223,7 +3224,7 @@ index ff5402b..6f627d8 100644
 +    }
 +    glDeleteQueries(1, &query);
 +    PS4LogDrawState(s_draw_number, primitive, num_indices, samples, samples_unrestricted);
-+    if (s_sampled_draws <= 6)
++    if (s_sampled_draws % 4 == 1)
 +      PS4LogVertexInput(s_draw_number, base_index, num_indices);
 +    if (s_sampled_draws <= 2)
 +    {
@@ -3255,7 +3256,7 @@ index ff5402b..6f627d8 100644
    if (g_ogl_config.bSupportsGLBaseVertex)
    {
      glDrawElementsBaseVertex(static_cast<const OGLPipeline*>(m_current_pipeline)->GetGLPrimitive(),
-@@ -290,6 +919,28 @@ void OGLGfx::DrawIndexed(u32 base_index, u32 num_indices, u32 base_vertex)
+@@ -290,6 +920,28 @@ void OGLGfx::DrawIndexed(u32 base_index, u32 num_indices, u32 base_vertex)
      glDrawElements(static_cast<const OGLPipeline*>(m_current_pipeline)->GetGLPrimitive(),
                     num_indices, GL_UNSIGNED_SHORT, static_cast<u16*>(nullptr) + base_index);
    }
@@ -3284,7 +3285,7 @@ index ff5402b..6f627d8 100644
  }
  
  void OGLGfx::DispatchComputeShader(const AbstractShader* shader, u32 groupsize_x, u32 groupsize_y,
-@@ -415,8 +1066,29 @@ bool OGLGfx::BindBackbuffer(const ClearColor& clear_color)
+@@ -415,8 +1067,30 @@ bool OGLGfx::BindBackbuffer(const ClearColor& clear_color)
    return true;
  }
  
@@ -3299,10 +3300,11 @@ index ff5402b..6f627d8 100644
  {
 +  PS4_PROFILE(PS4_PROF_PRESENT);
 +#ifdef __ORBIS__
-+  // Delete what was released at least 4 presented frames ago (see PS4DeferDelete).
++  // Delete what was released at least 2 presented frames ago (see PS4DeferDelete): long
++  // enough for the GPU, short enough not to pile up textures in games that churn them.
 +  m_ps4_frame++;
 +  std::erase_if(m_ps4_pending_deletes, [this](const PS4PendingDelete& pending) {
-+    if (pending.frame + 4 > m_ps4_frame)
++    if (pending.frame + 2 > m_ps4_frame)
 +      return false;
 +    if (pending.framebuffer)
 +      glDeleteFramebuffers(1, &pending.framebuffer);
@@ -3314,7 +3316,7 @@ index ff5402b..6f627d8 100644
    if (g_ogl_config.bSupportsDebug)
    {
      if (Common::Log::LogManager::GetInstance()->IsEnabled(Common::Log::LogType::HOST_GPU,
-@@ -618,6 +1290,7 @@ void OGLGfx::ApplyBlendingState(const BlendingState state)
+@@ -618,6 +1292,7 @@ void OGLGfx::ApplyBlendingState(const BlendingState state)
  
  void OGLGfx::SetPipeline(const AbstractPipeline* pipeline)
  {
@@ -3322,7 +3324,7 @@ index ff5402b..6f627d8 100644
    if (m_current_pipeline == pipeline)
      return;
  
-@@ -733,3 +1406,133 @@ SurfaceInfo OGLGfx::GetSurfaceInfo() const
+@@ -733,3 +1408,133 @@ SurfaceInfo OGLGfx::GetSurfaceInfo() const
  }
  
  }  // namespace OGL
