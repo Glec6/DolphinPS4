@@ -1053,7 +1053,7 @@ index 51c3fff..0b31728 100644
 +  ps4_add_eboot(dolphin-nogui)
 +endif()
 diff --git a/Source/Core/DolphinNoGUI/MainNoGUI.cpp b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
-index 3bf40ea..1a69eac 100644
+index 3bf40ea..2add5c7 100644
 --- a/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 +++ b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 @@ -15,6 +15,7 @@
@@ -1105,7 +1105,7 @@ index 3bf40ea..1a69eac 100644
  #endif
        });
  
-@@ -270,6 +288,16 @@ int main(const int argc, char* argv[])
+@@ -270,7 +288,22 @@ int main(const int argc, char* argv[])
  
    UICommon::SetUserDirectory(user_directory);
    UICommon::Init();
@@ -1114,16 +1114,45 @@ index 3bf40ea..1a69eac 100644
 +  {
 +    auto* log_manager = Common::Log::LogManager::GetInstance();
 +    log_manager->EnableListener(Common::Log::LogListener::CONSOLE_LISTENER, true);
++    // Also User/Logs/dolphin.log, written by Dolphin itself.
++    log_manager->EnableListener(Common::Log::LogListener::FILE_LISTENER, true);
 +    log_manager->SetConfigLogLevel(Common::Log::LogLevel::LINFO);
 +    for (int i = 0; i < static_cast<int>(Common::Log::LogType::NUMBER_OF_LOGS); i++)
 +      log_manager->SetEnable(static_cast<Common::Log::LogType>(i), true);
 +  }
 +#endif
    UICommon::InitControllers(wsi);
++#ifdef __ORBIS__
++  Platform::BootTrace("UICommon and controllers initialized");
++#endif
  
    Common::ScopeGuard ui_common_guard([] {
+     UICommon::ShutdownControllers();
+@@ -284,6 +317,12 @@ int main(const int argc, char* argv[])
+   }
+ 
+   auto core_state_changed_hook = Core::AddOnStateChangedCallback([](const Core::State state) {
++#ifdef __ORBIS__
++    const char* names[] = {"Uninitialized", "Paused", "Running", "Stopping", "Starting"};
++    const int index = static_cast<int>(state);
++    Platform::BootTrace((std::string("core state: ") +
++                         (index >= 0 && index < 5 ? names[index] : "?")).c_str());
++#endif
+     if (state == Core::State::Uninitialized)
+       s_platform->Stop();
+   });
+@@ -303,6 +342,9 @@ int main(const int argc, char* argv[])
+ 
+   DolphinAnalytics::Instance().ReportDolphinStart("nogui");
+ 
++#ifdef __ORBIS__
++  Platform::BootTrace("BootCore");
++#endif
+   if (!BootManager::BootCore(Core::System::GetInstance(), std::move(boot), wsi))
+   {
+     fprintf(stderr, "Could not boot the specified file\n");
 diff --git a/Source/Core/DolphinNoGUI/Platform.h b/Source/Core/DolphinNoGUI/Platform.h
-index f4dc8a9..e2f367a 100644
+index f4dc8a9..c80cce2 100644
 --- a/Source/Core/DolphinNoGUI/Platform.h
 +++ b/Source/Core/DolphinNoGUI/Platform.h
 @@ -5,6 +5,7 @@
@@ -1134,7 +1163,7 @@ index f4dc8a9..e2f367a 100644
  
  #include "Common/Flag.h"
  #include "Common/WindowSystemInfo.h"
-@@ -47,6 +48,12 @@ public:
+@@ -47,6 +48,14 @@ public:
    static std::unique_ptr<Platform> CreateMacOSPlatform();
  #endif
  
@@ -1142,6 +1171,8 @@ index f4dc8a9..e2f367a 100644
 +  static std::unique_ptr<Platform> CreatePS4Platform();
 +  // PS4 apps start without arguments: sets up logging and builds the command line.
 +  static std::vector<std::string> GetPS4Arguments();
++  // Appends a startup milestone to /data/DolphinPS4/boot-trace.log (DolphinPS4 port/ps4_crashlog.cpp).
++  static void BootTrace(const char* stage);
 +#endif
 +
  protected:
@@ -1149,10 +1180,10 @@ index f4dc8a9..e2f367a 100644
  
 diff --git a/Source/Core/DolphinNoGUI/PlatformPS4.cpp b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
 new file mode 100644
-index 0000000..7433004
+index 0000000..487a91f
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
-@@ -0,0 +1,268 @@
+@@ -0,0 +1,287 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -1173,6 +1204,7 @@ index 0000000..7433004
 +
 +#include <orbis/Sysmodule.h>
 +#include <orbis/libkernel.h>
++#include <fcntl.h>
 +#include <sys/stat.h>
 +#include <unistd.h>
 +
@@ -1182,6 +1214,7 @@ index 0000000..7433004
 +#include "Core/System.h"
 +
 +extern "C" int sceSystemServiceLoadExec(const char* path, char* const argv[]);
++extern "C" void ps4_boot_trace(const char* stage);
 +
 +namespace
 +{
@@ -1223,11 +1256,13 @@ index 0000000..7433004
 +  snprintf(line, sizeof(line), "[dolphin] %s: %s\n", caption, text);
 +  fputs(line, stderr);
 +  sceKernelDebugOutText(0, line);
++  ps4_boot_trace(line);
 +  return true;
 +}
 +
 +bool PlatformPS4::Init()
 +{
++  BootTrace("platform init");
 +  LoadSystemModules();
 +  Common::RegisterMsgAlertHandler(LogMessageAlert);
 +  return true;
@@ -1240,6 +1275,7 @@ index 0000000..7433004
 +
 +void PlatformPS4::MainLoop()
 +{
++  BootTrace("main loop");
 +  while (m_running.IsSet())
 +  {
 +    UpdateRunningFlag();
@@ -1393,17 +1429,31 @@ index 0000000..7433004
 +  return std::make_unique<PlatformPS4>();
 +}
 +
++void Platform::BootTrace(const char* stage)
++{
++  ps4_boot_trace(stage);
++}
++
 +std::vector<std::string> Platform::GetPS4Arguments()
 +{
++  BootTrace("main");
 +  mkdir(PS4_DATA_DIR_PATH, 0777);
 +  mkdir((std::string(PS4_DATA_DIR_PATH) + "/games").c_str(), 0777);
 +
 +  // stdout/stderr go nowhere on PS4: send them to a file, unbuffered so it survives a crash.
-+  if (FILE* log = freopen((std::string(PS4_DATA_DIR_PATH) + "/dolphin.log").c_str(), "w", stderr))
-+    setvbuf(log, nullptr, _IONBF, 0);
-+  dup2(fileno(stderr), fileno(stdout));
++  // (Not freopen: the OpenOrbis libc's freopen frees the static stderr FILE and output is lost.)
++  const int log_fd =
++      open((std::string(PS4_DATA_DIR_PATH) + "/dolphin.log").c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0666);
++  if (log_fd >= 0)
++  {
++    dup2(log_fd, STDOUT_FILENO);
++    dup2(log_fd, STDERR_FILENO);
++    close(log_fd);
++  }
 +  setvbuf(stdout, nullptr, _IONBF, 0);
++  setvbuf(stderr, nullptr, _IONBF, 0);
 +  atexit(OnExit);
++  BootTrace("log opened");
 +
 +  const std::string user_dir = std::string(PS4_DATA_DIR_PATH) + "/User";
 +  WriteDefaultConfig(user_dir);
