@@ -2196,7 +2196,7 @@ index 0000000..8b666df
 +}
 +}  // namespace GCAdapter
 diff --git a/Source/Core/VideoBackends/OGL/OGLGfx.cpp b/Source/Core/VideoBackends/OGL/OGLGfx.cpp
-index ff5402b..eb9683d 100644
+index ff5402b..3c716c2 100644
 --- a/Source/Core/VideoBackends/OGL/OGLGfx.cpp
 +++ b/Source/Core/VideoBackends/OGL/OGLGfx.cpp
 @@ -2,6 +2,7 @@
@@ -2235,7 +2235,30 @@ index ff5402b..eb9683d 100644
  namespace OGL
  {
  VideoConfig g_ogl_config;
-@@ -277,8 +288,351 @@ void OGLGfx::Draw(u32 base_vertex, u32 num_vertices)
+@@ -271,14 +282,376 @@ void OGLGfx::SetViewport(float x, float y, float width, float height, float near
+   glDepthRangef(near_depth, far_depth);
+ }
+ 
++#ifdef __ORBIS__
++// Base vertex emulation (see GLVertexFormat::SetBaseVertex): point the pipeline's VAO at the
++// draw's first vertex.
++static void PS4ApplyBaseVertex(const AbstractPipeline* pipeline, u32 base_vertex)
++{
++  const GLVertexFormat* format = static_cast<const OGLPipeline*>(pipeline)->GetVertexFormat();
++  if (!format)
++    return;
++  ProgramShaderCache::BindVertexFormat(format);
++  format->SetBaseVertex(base_vertex);
++}
++#endif
++
+ void OGLGfx::Draw(u32 base_vertex, u32 num_vertices)
+ {
++#ifdef __ORBIS__
++  // glDrawArrays takes the first vertex itself: the VAO must point at the buffer start.
++  PS4ApplyBaseVertex(m_current_pipeline, 0);
++#endif
+   glDrawArrays(static_cast<const OGLPipeline*>(m_current_pipeline)->GetGLPrimitive(), base_vertex,
                 num_vertices);
  }
  
@@ -2518,6 +2541,8 @@ index ff5402b..eb9683d 100644
  {
 +  PS4_PROFILE(PS4_PROF_DRAW);
 +#ifdef __ORBIS__
++  if (!g_ogl_config.bSupportsGLBaseVertex)
++    PS4ApplyBaseVertex(m_current_pipeline, base_vertex);
 +  static int s_draw_number = 0;
 +  s_draw_number++;
 +  if (PS4ShouldSampleDraw(s_draw_number))
@@ -2587,7 +2612,7 @@ index ff5402b..eb9683d 100644
    if (g_ogl_config.bSupportsGLBaseVertex)
    {
      glDrawElementsBaseVertex(static_cast<const OGLPipeline*>(m_current_pipeline)->GetGLPrimitive(),
-@@ -290,6 +644,28 @@ void OGLGfx::DrawIndexed(u32 base_index, u32 num_indices, u32 base_vertex)
+@@ -290,6 +663,28 @@ void OGLGfx::DrawIndexed(u32 base_index, u32 num_indices, u32 base_vertex)
      glDrawElements(static_cast<const OGLPipeline*>(m_current_pipeline)->GetGLPrimitive(),
                     num_indices, GL_UNSIGNED_SHORT, static_cast<u16*>(nullptr) + base_index);
    }
@@ -2616,7 +2641,7 @@ index ff5402b..eb9683d 100644
  }
  
  void OGLGfx::DispatchComputeShader(const AbstractShader* shader, u32 groupsize_x, u32 groupsize_y,
-@@ -417,6 +793,7 @@ bool OGLGfx::BindBackbuffer(const ClearColor& clear_color)
+@@ -417,6 +812,7 @@ bool OGLGfx::BindBackbuffer(const ClearColor& clear_color)
  
  void OGLGfx::PresentBackbuffer()
  {
@@ -2624,7 +2649,7 @@ index ff5402b..eb9683d 100644
    if (g_ogl_config.bSupportsDebug)
    {
      if (Common::Log::LogManager::GetInstance()->IsEnabled(Common::Log::LogType::HOST_GPU,
-@@ -618,6 +995,7 @@ void OGLGfx::ApplyBlendingState(const BlendingState state)
+@@ -618,6 +1014,7 @@ void OGLGfx::ApplyBlendingState(const BlendingState state)
  
  void OGLGfx::SetPipeline(const AbstractPipeline* pipeline)
  {
@@ -2632,7 +2657,7 @@ index ff5402b..eb9683d 100644
    if (m_current_pipeline == pipeline)
      return;
  
-@@ -733,3 +1111,65 @@ SurfaceInfo OGLGfx::GetSurfaceInfo() const
+@@ -733,3 +1130,65 @@ SurfaceInfo OGLGfx::GetSurfaceInfo() const
  }
  
  }  // namespace OGL
@@ -2698,11 +2723,110 @@ index ff5402b..eb9683d 100644
 +  ps4_boot_trace(line);
 +}
 +#endif
+diff --git a/Source/Core/VideoBackends/OGL/OGLNativeVertexFormat.cpp b/Source/Core/VideoBackends/OGL/OGLNativeVertexFormat.cpp
+index 921ef61..bad85c2 100644
+--- a/Source/Core/VideoBackends/OGL/OGLNativeVertexFormat.cpp
++++ b/Source/Core/VideoBackends/OGL/OGLNativeVertexFormat.cpp
+@@ -32,7 +32,8 @@ static inline GLuint VarToGL(ComponentFormat t)
+   return lookup[t];
+ }
+ 
+-static void SetPointer(ShaderAttrib attrib, u32 stride, const AttributeFormat& format)
++static void SetPointer(ShaderAttrib attrib, u32 stride, const AttributeFormat& format,
++                       u32 base_offset = 0)
+ {
+   if (!format.enable)
+     return;
+@@ -40,12 +41,42 @@ static void SetPointer(ShaderAttrib attrib, u32 stride, const AttributeFormat& f
+   glEnableVertexAttribArray(static_cast<GLuint>(attrib));
+   if (format.integer)
+     glVertexAttribIPointer(static_cast<GLuint>(attrib), format.components, VarToGL(format.type),
+-                           stride, (u8*)nullptr + format.offset);
++                           stride, (u8*)nullptr + base_offset + format.offset);
+   else
+     glVertexAttribPointer(static_cast<GLuint>(attrib), format.components, VarToGL(format.type),
+-                          true, stride, (u8*)nullptr + format.offset);
++                          true, stride, (u8*)nullptr + base_offset + format.offset);
+ }
+ 
++static void SetPointers(const PortableVertexDeclaration& vtx_decl, u32 base_offset)
++{
++  const u32 vertex_stride = vtx_decl.stride;
++  SetPointer(ShaderAttrib::Position, vertex_stride, vtx_decl.position, base_offset);
++
++  for (u32 i = 0; i < 3; i++)
++    SetPointer(ShaderAttrib::Normal + i, vertex_stride, vtx_decl.normals[i], base_offset);
++
++  for (u32 i = 0; i < 2; i++)
++    SetPointer(ShaderAttrib::Color0 + i, vertex_stride, vtx_decl.colors[i], base_offset);
++
++  for (u32 i = 0; i < 8; i++)
++    SetPointer(ShaderAttrib::TexCoord0 + i, vertex_stride, vtx_decl.texcoords[i], base_offset);
++
++  SetPointer(ShaderAttrib::PositionMatrix, vertex_stride, vtx_decl.posmtx, base_offset);
++}
++
++#ifdef __ORBIS__
++void GLVertexFormat::SetBaseVertex(u32 base_vertex) const
++{
++  if (base_vertex == m_base_vertex)
++    return;
++  m_base_vertex = base_vertex;
++  // Attribute pointers capture the GL_ARRAY_BUFFER binding when they are set.
++  glBindBuffer(GL_ARRAY_BUFFER,
++               static_cast<VertexManager*>(g_vertex_manager.get())->GetVertexBufferHandle());
++  SetPointers(m_decl, base_vertex * m_decl.stride);
++}
++#endif
++
+ GLVertexFormat::GLVertexFormat(const PortableVertexDeclaration& vtx_decl)
+     : NativeVertexFormat(vtx_decl)
+ {
+@@ -64,18 +95,7 @@ GLVertexFormat::GLVertexFormat(const PortableVertexDeclaration& vtx_decl)
+   glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, vm->GetIndexBufferHandle());
+   glBindBuffer(GL_ARRAY_BUFFER, vm->GetVertexBufferHandle());
+ 
+-  SetPointer(ShaderAttrib::Position, vertex_stride, vtx_decl.position);
+-
+-  for (u32 i = 0; i < 3; i++)
+-    SetPointer(ShaderAttrib::Normal + i, vertex_stride, vtx_decl.normals[i]);
+-
+-  for (u32 i = 0; i < 2; i++)
+-    SetPointer(ShaderAttrib::Color0 + i, vertex_stride, vtx_decl.colors[i]);
+-
+-  for (u32 i = 0; i < 8; i++)
+-    SetPointer(ShaderAttrib::TexCoord0 + i, vertex_stride, vtx_decl.texcoords[i]);
+-
+-  SetPointer(ShaderAttrib::PositionMatrix, vertex_stride, vtx_decl.posmtx);
++  SetPointers(vtx_decl, 0);
+ 
+   // Other code shouldn't have to worry about its vertex formats being randomly unbound
+   ProgramShaderCache::ReBindVertexFormat();
 diff --git a/Source/Core/VideoBackends/OGL/OGLStreamBuffer.cpp b/Source/Core/VideoBackends/OGL/OGLStreamBuffer.cpp
-index 2eec584..c86c93a 100644
+index 2eec584..897f594 100644
 --- a/Source/Core/VideoBackends/OGL/OGLStreamBuffer.cpp
 +++ b/Source/Core/VideoBackends/OGL/OGLStreamBuffer.cpp
-@@ -337,6 +337,11 @@ public:
+@@ -183,6 +183,9 @@ public:
+   std::pair<u8*, u32> Map(u32 size) override
+   {
+     AllocMemory(size);
++#ifdef __ORBIS__
++    glBindBuffer(m_buffertype, m_buffer);
++#endif
+     u8* pointer = (u8*)glMapBufferRange(m_buffertype, m_iterator, size,
+                                         GL_MAP_WRITE_BIT | GL_MAP_FLUSH_EXPLICIT_BIT |
+                                             GL_MAP_UNSYNCHRONIZED_BIT);
+@@ -191,6 +194,9 @@ public:
+ 
+   void Unmap(u32 used_size) override
+   {
++#ifdef __ORBIS__
++    glBindBuffer(m_buffertype, m_buffer);
++#endif
+     glFlushMappedBufferRange(m_buffertype, 0, used_size);
+     glUnmapBuffer(m_buffertype);
+     m_iterator += used_size;
+@@ -337,6 +343,11 @@ public:
    std::pair<u8*, u32> Map(u32 size) override { return std::make_pair(m_pointer, 0); }
    void Unmap(u32 used_size) override
    {
@@ -2714,14 +2838,18 @@ index 2eec584..c86c93a 100644
      glBufferData(m_buffertype, used_size, m_pointer, GL_STREAM_DRAW);
    }
  
-@@ -349,6 +354,12 @@ std::unique_ptr<StreamBuffer> StreamBuffer::Create(u32 type, u32 size)
+@@ -349,6 +360,16 @@ std::unique_ptr<StreamBuffer> StreamBuffer::Create(u32 type, u32 size)
    // without basevertex support, only streaming methods whith uploads everything to zero works fine:
    if (!g_ogl_config.bSupportsGLBaseVertex)
    {
 +#ifdef __ORBIS__
 +    // PS4 Piglet copies the *whole* buffer (8-16 MiB) on every glBufferSubData into a buffer the
-+    // GPU may still use, which exhausted its memory within seconds and crashed the GPU. With
-+    // glBufferData each upload gets a buffer of exactly its own (small) size.
++    // GPU may still use, which exhausted its memory within seconds and crashed the GPU, and
++    // glBufferData costs ~140 us per draw (a fresh allocation each time). Vertices and indices
++    // stream through a fenced ring instead, written with unsynchronized maps; the missing base
++    // vertex is emulated by GLVertexFormat::SetBaseVertex.
++    if (type == GL_ARRAY_BUFFER || type == GL_ELEMENT_ARRAY_BUFFER)
++      return std::make_unique<MapAndSync>(type, size);
 +    return std::make_unique<BufferData>(type, size);
 +#endif
      if (!DriverDetails::HasBug(DriverDetails::BUG_BROKEN_BUFFER_STREAM))
@@ -2838,6 +2966,24 @@ index c5382cf..b73f769 100644
    ProgramShaderCache::UploadConstants();
  }
  }  // namespace OGL
+diff --git a/Source/Core/VideoBackends/OGL/OGLVertexManager.h b/Source/Core/VideoBackends/OGL/OGLVertexManager.h
+index 55a3ef1..67a093a 100644
+--- a/Source/Core/VideoBackends/OGL/OGLVertexManager.h
++++ b/Source/Core/VideoBackends/OGL/OGLVertexManager.h
+@@ -20,6 +20,13 @@ public:
+   GLVertexFormat(const PortableVertexDeclaration& vtx_decl);
+   ~GLVertexFormat() override;
+ 
++#ifdef __ORBIS__
++  // Piglet has no glDrawElementsBaseVertex: emulate it by pointing this VAO's attributes
++  // base_vertex vertices into the stream buffer. The VAO must be bound.
++  void SetBaseVertex(u32 base_vertex) const;
++  mutable u32 m_base_vertex = 0;
++#endif
++
+   GLuint VAO;
+ };
+ 
 diff --git a/Source/Core/VideoBackends/OGL/ProgramShaderCache.cpp b/Source/Core/VideoBackends/OGL/ProgramShaderCache.cpp
 index 1dfd026..9b61f07 100644
 --- a/Source/Core/VideoBackends/OGL/ProgramShaderCache.cpp
