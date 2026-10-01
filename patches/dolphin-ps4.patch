@@ -1279,10 +1279,10 @@ index f4dc8a9..c80cce2 100644
  
 diff --git a/Source/Core/DolphinNoGUI/PlatformPS4.cpp b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
 new file mode 100644
-index 0000000..ce7ec09
+index 0000000..fa8052f
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
-@@ -0,0 +1,308 @@
+@@ -0,0 +1,315 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -1311,7 +1311,10 @@ index 0000000..ce7ec09
 +#include "Common/MsgHandler.h"
 +#include <fmt/format.h>
 +
++#include "Common/Config/Config.h"
++#include "Core/Config/MainSettings.h"
 +#include "Core/Core.h"
++#include "VideoCommon/PerformanceMetrics.h"
 +#include "Core/System.h"
 +
 +extern "C" int sceSystemServiceLoadExec(const char* path, char* const argv[]);
@@ -1389,9 +1392,13 @@ index 0000000..ce7ec09
 +      size_t flexible = 0;
 +      using AvailableFlexibleFn = int32_t (*)(size_t*);
 +      reinterpret_cast<AvailableFlexibleFn>(&sceKernelAvailableFlexibleMemorySize)(&flexible);
-+      char line[96];
-+      snprintf(line, sizeof(line), "monitor: %d s, %zu MiB flexible memory free", frame / 60,
-+               flexible / (1024 * 1024));
++      char line[192];
++      snprintf(line, sizeof(line),
++               "monitor: %d s, %zu MiB flexible memory free, speed %.0f%%, %.1f FPS, %.1f VPS, "
++               "CPU core %d",
++               frame / 60, flexible / (1024 * 1024), g_perf_metrics.GetSpeed(),
++               g_perf_metrics.GetFPS(), g_perf_metrics.GetVPS(),
++               static_cast<int>(Config::Get(Config::MAIN_CPU_CORE)));
 +      BootTrace(line);
 +    }
 +    // Port diagnostics: a screenshot every ~10 s (User/ScreenShots) shows what Dolphin renders,
@@ -1993,6 +2000,73 @@ index 2eec584..69146a2 100644
 +#endif
      if (!DriverDetails::HasBug(DriverDetails::BUG_BROKEN_BUFFER_STREAM))
        return std::make_unique<BufferSubData>(type, size);
+ 
+diff --git a/Source/Core/VideoBackends/OGL/OGLTexture.cpp b/Source/Core/VideoBackends/OGL/OGLTexture.cpp
+index 003a7ec..66d26a4 100644
+--- a/Source/Core/VideoBackends/OGL/OGLTexture.cpp
++++ b/Source/Core/VideoBackends/OGL/OGLTexture.cpp
+@@ -13,6 +13,11 @@
+ 
+ #include "VideoCommon/VideoConfig.h"
+ 
++#ifdef __ORBIS__
++#include <cstdio>
++extern "C" void ps4_boot_trace(const char* stage);  // DolphinPS4 port/ps4_crashlog.cpp
++#endif
++
+ namespace OGL
+ {
+ GLenum OGLTexture::GetGLInternalFormatForTextureFormat(AbstractTextureFormat format, bool storage)
+@@ -197,6 +202,24 @@ OGLTexture::OGLTexture(const TextureConfig& tex_config, std::string_view name)
+     }
+   }
+ 
++#ifdef __ORBIS__
++  // Port diagnostics: does Piglet accept the texture storage Dolphin asks for?
++  {
++    static int s_reported = 0;
++    const GLenum error = glGetError();
++    if (error != GL_NO_ERROR && s_reported++ < 24)
++    {
++      char line[192];
++      snprintf(line, sizeof(line),
++               "texture: GL error 0x%x creating %ux%u levels %u layers %u, format %d (GL 0x%x), "
++               "render target %d",
++               error, m_config.width, m_config.height, m_config.levels, m_config.layers,
++               static_cast<int>(m_config.format), gl_internal_format, m_config.IsRenderTarget());
++      ps4_boot_trace(line);
++    }
++  }
++#endif
++
+   if (m_config.IsRenderTarget())
+   {
+     // We can't render to compressed formats.
+@@ -744,6 +767,25 @@ OGLFramebuffer::Create(OGLTexture* color_attachment, OGLTexture* depth_attachmen
+ 
+   glDrawBuffers(static_cast<GLsizei>(buffers.size()), buffers.data());
+ 
++#ifdef __ORBIS__
++  // Port diagnostics: does Piglet accept Dolphin's framebuffers?
++  {
++    static int s_reported = 0;
++    const GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
++    if (s_reported < 24 || status != GL_FRAMEBUFFER_COMPLETE)
++    {
++      s_reported++;
++      char line[192];
++      snprintf(line, sizeof(line),
++               "fbo %u: %ux%u layers %u samples %u, color fmt %d, depth fmt %d, extra %zu -> status 0x%x%s",
++               fbo, width, height, layers, samples, static_cast<int>(color_format),
++               static_cast<int>(depth_format), additional_color_attachments.size(), status,
++               status == GL_FRAMEBUFFER_COMPLETE ? "" : " INCOMPLETE");
++      ps4_boot_trace(line);
++    }
++  }
++#endif
++
+   DEBUG_ASSERT(glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE);
+   GetOGLGfx()->RestoreFramebufferBinding();
  
 diff --git a/Source/Core/VideoBackends/OGL/ProgramShaderCache.cpp b/Source/Core/VideoBackends/OGL/ProgramShaderCache.cpp
 index 1dfd026..77b2e6e 100644
