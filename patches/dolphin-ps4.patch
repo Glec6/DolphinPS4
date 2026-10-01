@@ -1556,7 +1556,7 @@ index f4dc8a9..4e5ff67 100644
  
 diff --git a/Source/Core/DolphinNoGUI/PlatformPS4.cpp b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
 new file mode 100644
-index 0000000..e9d18ed
+index 0000000..8979ad9
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
 @@ -0,0 +1,410 @@
@@ -1747,16 +1747,16 @@ index 0000000..e9d18ed
 +      const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(
 +                               std::chrono::steady_clock::now() - start)
 +                               .count();
-+      char line[224];
++      char line[320];
 +      // speed: emulated time per real time; max speed: what the CPU thread could reach if it
 +      // never waited (below 100% means the emulated CPU itself is the bottleneck).
 +      snprintf(line, sizeof(line),
 +               "monitor: %lld s, speed %.0f%% (max %.0f%%), %.1f FPS, %.1f VPS, %zu MiB flexible "
-+               "free, CPU core %d, %llu fastmem faults",
++               "free, CPU core %d, %llu fastmem faults, GL shaders %d programs %d textures %d",
 +               static_cast<long long>(seconds), perf.GetSpeed() * 100.0,
 +               perf.GetMaxSpeed() * 100.0, perf.GetFPS(), perf.GetVPS(),
 +               flexible / (1024 * 1024), static_cast<int>(Config::Get(Config::MAIN_CPU_CORE)),
-+               ps4_fault_count);
++               ps4_fault_count, ps4_gl_shaders, ps4_gl_programs, ps4_gl_textures);
 +      BootTrace(line);
 +      LogProfile();
 +    }
@@ -3336,8 +3336,40 @@ index 921ef61..bad85c2 100644
  
    // Other code shouldn't have to worry about its vertex formats being randomly unbound
    ProgramShaderCache::ReBindVertexFormat();
+diff --git a/Source/Core/VideoBackends/OGL/OGLShader.cpp b/Source/Core/VideoBackends/OGL/OGLShader.cpp
+index 3d6c4ed..63ab45c 100644
+--- a/Source/Core/VideoBackends/OGL/OGLShader.cpp
++++ b/Source/Core/VideoBackends/OGL/OGLShader.cpp
+@@ -2,6 +2,7 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
+ #include "VideoBackends/OGL/OGLShader.h"
++#include "VideoCommon/PS4Profile.h"
+ 
+ #include <algorithm>
+ #include <cctype>
+@@ -148,6 +149,9 @@ OGLShader::OGLShader(GLuint gl_compute_program_id, std::string source, std::stri
+ 
+ OGLShader::~OGLShader()
+ {
++#ifdef __ORBIS__
++  ps4_gl_shaders--;
++#endif
+   if (m_stage != ShaderStage::Compute)
+     glDeleteShader(m_gl_id);
+   else
+@@ -168,6 +172,9 @@ std::unique_ptr<OGLShader> OGLShader::CreateFromSource(ShaderStage stage, std::s
+     GLuint shader_id = ProgramShaderCache::CompileSingleShader(shader_type, source_str);
+     if (!shader_id)
+       return nullptr;
++#ifdef __ORBIS__
++    ps4_gl_shaders++;
++#endif
+ 
+     return std::make_unique<OGLShader>(stage, shader_type, shader_id, std::move(source_str),
+                                        std::move(name_str));
 diff --git a/Source/Core/VideoBackends/OGL/OGLStreamBuffer.cpp b/Source/Core/VideoBackends/OGL/OGLStreamBuffer.cpp
-index 2eec584..47d3d1c 100644
+index 2eec584..6084bb1 100644
 --- a/Source/Core/VideoBackends/OGL/OGLStreamBuffer.cpp
 +++ b/Source/Core/VideoBackends/OGL/OGLStreamBuffer.cpp
 @@ -11,6 +11,12 @@
@@ -3413,9 +3445,18 @@ index 2eec584..47d3d1c 100644
      m_free_iterator = m_iterator + size;
    }
  }
-@@ -183,6 +199,9 @@ public:
+@@ -182,7 +198,18 @@ public:
+   ~MapAndSync() override { DeleteFences(); }
    std::pair<u8*, u32> Map(u32 size) override
    {
++#ifdef __ORBIS__
++    // Mapped again without an Unmap in between (Piglet: "Buffer already mapped!", and the failed
++    // map returned null): release the previous mapping, nothing was committed from it.
++    glBindBuffer(m_buffertype, m_buffer);
++    if (m_mapped)
++      glUnmapBuffer(m_buffertype);
++    m_mapped = true;
++#endif
      AllocMemory(size);
 +#ifdef __ORBIS__
 +    glBindBuffer(m_buffertype, m_buffer);
@@ -3423,7 +3464,7 @@ index 2eec584..47d3d1c 100644
      u8* pointer = (u8*)glMapBufferRange(m_buffertype, m_iterator, size,
                                          GL_MAP_WRITE_BIT | GL_MAP_FLUSH_EXPLICIT_BIT |
                                              GL_MAP_UNSYNCHRONIZED_BIT);
-@@ -191,6 +210,9 @@ public:
+@@ -191,10 +218,19 @@ public:
  
    void Unmap(u32 used_size) override
    {
@@ -3433,7 +3474,17 @@ index 2eec584..47d3d1c 100644
      glFlushMappedBufferRange(m_buffertype, 0, used_size);
      glUnmapBuffer(m_buffertype);
      m_iterator += used_size;
-@@ -337,6 +359,11 @@ public:
++#ifdef __ORBIS__
++    m_mapped = false;
++#endif
+   }
++#ifdef __ORBIS__
++  bool m_mapped = false;
++#endif
+ };
+ 
+ /* Streaming fifo without mapping overhead.
+@@ -337,6 +373,11 @@ public:
    std::pair<u8*, u32> Map(u32 size) override { return std::make_pair(m_pointer, 0); }
    void Unmap(u32 used_size) override
    {
@@ -3445,7 +3496,7 @@ index 2eec584..47d3d1c 100644
      glBufferData(m_buffertype, used_size, m_pointer, GL_STREAM_DRAW);
    }
  
-@@ -349,6 +376,16 @@ std::unique_ptr<StreamBuffer> StreamBuffer::Create(u32 type, u32 size)
+@@ -349,6 +390,16 @@ std::unique_ptr<StreamBuffer> StreamBuffer::Create(u32 type, u32 size)
    // without basevertex support, only streaming methods whith uploads everything to zero works fine:
    if (!g_ogl_config.bSupportsGLBaseVertex)
    {
@@ -3475,7 +3526,7 @@ index efbb826..73f3d03 100644
    const u32 m_buffertype;
    const u32 m_size;
 diff --git a/Source/Core/VideoBackends/OGL/OGLTexture.cpp b/Source/Core/VideoBackends/OGL/OGLTexture.cpp
-index 003a7ec..121bd8e 100644
+index 003a7ec..82a4ad7 100644
 --- a/Source/Core/VideoBackends/OGL/OGLTexture.cpp
 +++ b/Source/Core/VideoBackends/OGL/OGLTexture.cpp
 @@ -2,6 +2,7 @@
@@ -3498,7 +3549,17 @@ index 003a7ec..121bd8e 100644
  namespace OGL
  {
  GLenum OGLTexture::GetGLInternalFormatForTextureFormat(AbstractTextureFormat format, bool storage)
-@@ -197,6 +203,24 @@ OGLTexture::OGLTexture(const TextureConfig& tex_config, std::string_view name)
+@@ -129,6 +135,9 @@ OGLTexture::OGLTexture(const TextureConfig& tex_config, std::string_view name)
+ 
+   const GLenum target = GetGLTarget();
+   glGenTextures(1, &m_texId);
++#ifdef __ORBIS__
++  ps4_gl_textures++;
++#endif
+   glActiveTexture(GL_MUTABLE_TEXTURE_INDEX);
+   glBindTexture(target, m_texId);
+ 
+@@ -197,6 +206,24 @@ OGLTexture::OGLTexture(const TextureConfig& tex_config, std::string_view name)
      }
    }
  
@@ -3523,7 +3584,17 @@ index 003a7ec..121bd8e 100644
    if (m_config.IsRenderTarget())
    {
      // We can't render to compressed formats.
-@@ -279,6 +303,7 @@ void OGLTexture::ResolveFromTexture(const AbstractTexture* src,
+@@ -216,6 +243,9 @@ OGLTexture::OGLTexture(const TextureConfig& tex_config, std::string_view name)
+ 
+ OGLTexture::~OGLTexture()
+ {
++#ifdef __ORBIS__
++  ps4_gl_textures--;
++#endif
+   GetOGLGfx()->UnbindTexture(this);
+   glDeleteTextures(1, &m_texId);
+ }
+@@ -279,6 +309,7 @@ void OGLTexture::ResolveFromTexture(const AbstractTexture* src,
  void OGLTexture::Load(u32 level, u32 width, u32 height, u32 row_length, const u8* buffer,
                        size_t buffer_size, u32 layer)
  {
@@ -3531,7 +3602,7 @@ index 003a7ec..121bd8e 100644
    if (level >= m_config.levels)
      PanicAlertFmt("Texture only has {} levels, can't update level {}", m_config.levels, level);
  
-@@ -744,6 +769,25 @@ OGLFramebuffer::Create(OGLTexture* color_attachment, OGLTexture* depth_attachmen
+@@ -744,6 +775,25 @@ OGLFramebuffer::Create(OGLTexture* color_attachment, OGLTexture* depth_attachmen
  
    glDrawBuffers(static_cast<GLsizei>(buffers.size()), buffers.data());
  
@@ -3625,7 +3696,7 @@ index 55a3ef1..67a093a 100644
  };
  
 diff --git a/Source/Core/VideoBackends/OGL/ProgramShaderCache.cpp b/Source/Core/VideoBackends/OGL/ProgramShaderCache.cpp
-index 1dfd026..6fd3c6c 100644
+index 1dfd026..2b23830 100644
 --- a/Source/Core/VideoBackends/OGL/ProgramShaderCache.cpp
 +++ b/Source/Core/VideoBackends/OGL/ProgramShaderCache.cpp
 @@ -2,12 +2,14 @@
@@ -3698,7 +3769,7 @@ index 1dfd026..6fd3c6c 100644
    for (int a = 0; a < 8; ++a)
    {
      // Still need to get sampler locations since we aren't binding them statically in the shaders
-@@ -221,12 +264,200 @@ u32 ProgramShaderCache::GetUniformBufferAlignment()
+@@ -221,12 +264,202 @@ u32 ProgramShaderCache::GetUniformBufferAlignment()
    return s_ubo_align;
  }
  
@@ -3726,7 +3797,9 @@ index 1dfd026..6fd3c6c 100644
 +  {
 +    if (m_buffers.empty())
 +    {
-+      m_count = m_per_draw ? std::max<u32>(GROUP, ps4_uniform_ring_count / GROUP * GROUP) : 512;
++      // The other rings (utility draws, custom constants) see a few uploads per frame: 64 is
++      // plenty, and every GL buffer takes kernel-internal memory on Piglet.
++      m_count = m_per_draw ? std::max<u32>(GROUP, ps4_uniform_ring_count / GROUP * GROUP) : 64;
 +      m_alloc_size = m_per_draw ? (size + 255) / 256 * 256 : CAPACITY;
 +      m_buffers.resize(m_count);
 +      m_fences.resize(m_count / GROUP);
@@ -3899,7 +3972,7 @@ index 1dfd026..6fd3c6c 100644
    if (pixel_shader_manager.dirty || vertex_shader_manager.dirty || geometry_shader_manager.dirty ||
        pixel_shader_manager.custom_constants_dirty)
    {
-@@ -280,6 +511,13 @@ void ProgramShaderCache::UploadConstants()
+@@ -280,6 +513,13 @@ void ProgramShaderCache::UploadConstants()
  
  void ProgramShaderCache::UploadConstants(const void* data, u32 data_size)
  {
@@ -3913,7 +3986,7 @@ index 1dfd026..6fd3c6c 100644
    // allocate and copy
    const u32 alloc_size = Common::AlignUp(data_size, s_ubo_align);
    auto buffer = s_buffer->Map(alloc_size, s_ubo_align);
-@@ -328,8 +566,32 @@ bool ProgramShaderCache::CompileComputeShader(SHADER& shader, std::string_view c
+@@ -328,8 +568,32 @@ bool ProgramShaderCache::CompileComputeShader(SHADER& shader, std::string_view c
  
  GLuint ProgramShaderCache::CompileSingleShader(GLenum type, std::string_view code)
  {
@@ -3946,7 +4019,7 @@ index 1dfd026..6fd3c6c 100644
    constexpr GLsizei num_strings = 2;
    const std::array<const char*, num_strings> src{
        s_glsl_header.data(),
-@@ -343,6 +605,27 @@ GLuint ProgramShaderCache::CompileSingleShader(GLenum type, std::string_view cod
+@@ -343,6 +607,27 @@ GLuint ProgramShaderCache::CompileSingleShader(GLenum type, std::string_view cod
    glShaderSource(result, num_strings, src.data(), src_sizes.data());
    glCompileShader(result);
  
@@ -3974,7 +4047,17 @@ index 1dfd026..6fd3c6c 100644
    if (!CheckShaderCompileResult(result, type, code))
    {
      // Don't try to use this shader
-@@ -620,7 +903,10 @@ PipelineProgram* ProgramShaderCache::GetPipelineProgram(const GLVertexFormat* ve
+@@ -571,6 +856,9 @@ PipelineProgram* ProgramShaderCache::GetPipelineProgram(const GLVertexFormat* ve
+   std::unique_ptr<PipelineProgram> prog = std::make_unique<PipelineProgram>();
+   prog->key = key;
+   prog->shader.glprogid = glCreateProgram();
++#ifdef __ORBIS__
++  ps4_gl_programs++;
++#endif
+ 
+   // Use the cache data, if present. If this fails, we want to return an error, so the shader cache
+   // doesn't attempt to use the same binary data in the future.
+@@ -620,7 +908,10 @@ PipelineProgram* ProgramShaderCache::GetPipelineProgram(const GLVertexFormat* ve
  
      // Link program.
      prog->shader.SetProgramBindings(false);
@@ -3986,7 +4069,7 @@ index 1dfd026..6fd3c6c 100644
  
      // Restore VAO binding after linking.
      if (!s_is_shared_context && vao != s_last_VAO)
-@@ -849,6 +1135,10 @@ void ProgramShaderCache::CreateHeader()
+@@ -849,6 +1140,10 @@ void ProgramShaderCache::CreateHeader()
        "#define int4 ivec4\n"
        "#define frac fract\n"
        "#define lerp mix\n"
@@ -3997,6 +4080,29 @@ index 1dfd026..6fd3c6c 100644
  
        ,
        GetGLSLVersionString(), v < Glsl140 ? "#extension GL_ARB_uniform_buffer_object : enable" : "",
+diff --git a/Source/Core/VideoBackends/OGL/ProgramShaderCache.h b/Source/Core/VideoBackends/OGL/ProgramShaderCache.h
+index 1454385..66b807c 100644
+--- a/Source/Core/VideoBackends/OGL/ProgramShaderCache.h
++++ b/Source/Core/VideoBackends/OGL/ProgramShaderCache.h
+@@ -3,6 +3,8 @@
+ 
+ #pragma once
+ 
++#include "VideoCommon/PS4Profile.h"
++
+ #include <atomic>
+ #include <memory>
+ #include <mutex>
+@@ -27,6 +29,9 @@ struct SHADER
+     {
+       glDeleteProgram(glprogid);
+       glprogid = 0;
++#ifdef __ORBIS__
++      ps4_gl_programs--;
++#endif
+     }
+   }
+ 
 diff --git a/Source/Core/VideoCommon/Fifo.cpp b/Source/Core/VideoCommon/Fifo.cpp
 index f183c93..c378916 100644
 --- a/Source/Core/VideoCommon/Fifo.cpp
@@ -4072,10 +4178,10 @@ index 6277598..f1455dc 100644
      y = EFB_HEIGHT - 1 - y;
 diff --git a/Source/Core/VideoCommon/PS4Profile.h b/Source/Core/VideoCommon/PS4Profile.h
 new file mode 100644
-index 0000000..b08e7df
+index 0000000..febfe0f
 --- /dev/null
 +++ b/Source/Core/VideoCommon/PS4Profile.h
-@@ -0,0 +1,51 @@
+@@ -0,0 +1,54 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -4107,6 +4213,9 @@ index 0000000..b08e7df
 +  PS4_PROF_CPU_WAIT,        // emulated CPU thread waiting for the video thread (Sync GPU)
 +  PS4_PROF_CATEGORY_COUNT
 +};
++
++// Live GL objects (Piglet takes kernel-internal memory per object; running out crashes it).
++extern "C" int ps4_gl_shaders, ps4_gl_programs, ps4_gl_textures;
 +
 +extern "C" unsigned long long ps4_prof_ticks[PS4_PROF_CATEGORY_COUNT];
 +extern "C" unsigned long long ps4_prof_count[PS4_PROF_CATEGORY_COUNT];
@@ -4348,10 +4457,10 @@ index 4e4567d..92d5dbb 100644
    //
    // - EFB to RAM:
 diff --git a/Source/Core/VideoCommon/VertexManagerBase.cpp b/Source/Core/VideoCommon/VertexManagerBase.cpp
-index 2bc6d58..7877e71 100644
+index 2bc6d58..d28410b 100644
 --- a/Source/Core/VideoCommon/VertexManagerBase.cpp
 +++ b/Source/Core/VideoCommon/VertexManagerBase.cpp
-@@ -2,6 +2,12 @@
+@@ -2,6 +2,13 @@
  // SPDX-License-Identifier: GPL-2.0-or-later
  
  #include "VideoCommon/VertexManagerBase.h"
@@ -4359,12 +4468,13 @@ index 2bc6d58..7877e71 100644
 +
 +#ifdef __ORBIS__
 +unsigned long long ps4_prof_ticks[PS4_PROF_CATEGORY_COUNT];
++int ps4_gl_shaders, ps4_gl_programs, ps4_gl_textures;
 +unsigned long long ps4_prof_count[PS4_PROF_CATEGORY_COUNT];
 +#endif
  
  #include <array>
  #include <cmath>
-@@ -434,6 +440,7 @@ BitSet32 VertexManagerBase::UsedTextures() const
+@@ -434,6 +441,7 @@ BitSet32 VertexManagerBase::UsedTextures() const
  
  void VertexManagerBase::Flush()
  {
