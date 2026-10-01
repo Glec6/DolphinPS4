@@ -947,7 +947,7 @@ index 0000000..ddb352f
 +
 +}  // namespace Common
 diff --git a/Source/Core/Common/Thread.cpp b/Source/Core/Common/Thread.cpp
-index d9a40fc..6dedc39 100644
+index d9a40fc..f65690c 100644
 --- a/Source/Core/Common/Thread.cpp
 +++ b/Source/Core/Common/Thread.cpp
 @@ -124,7 +124,7 @@ void SetThreadAffinity(std::thread::native_handle_type thread, u32 mask)
@@ -959,6 +959,54 @@ index d9a40fc..6dedc39 100644
  #ifndef __NetBSD__
  #ifdef __FreeBSD__
    cpuset_t cpu_set;
+@@ -156,6 +156,22 @@ void SetCurrentThreadAffinity(u32 mask)
+   SetThreadAffinity(pthread_self(), mask);
+ }
+ 
++#ifdef __ORBIS__
++// libkernel; declared here because orbis/libkernel.h declares scePthreadSetaffinity without
++// parameters.
++extern "C" void* scePthreadSelf();
++extern "C" int scePthreadSetaffinity(void* thread, unsigned long long mask);
++extern "C" int scePthreadSetprio(void* thread, int priority);
++
++std::pair<int, int> PS4SetCurrentThreadCoreAndPriority(int core, int priority)
++{
++  void* const self = scePthreadSelf();
++  const int affinity_result = core >= 0 ? scePthreadSetaffinity(self, 1ULL << core) : 0;
++  const int priority_result = priority > 0 ? scePthreadSetprio(self, priority) : 0;
++  return {affinity_result, priority_result};
++}
++#endif
++
+ void SleepCurrentThread(int ms)
+ {
+   usleep(1000 * ms);
+diff --git a/Source/Core/Common/Thread.h b/Source/Core/Common/Thread.h
+index fbba27a..905cf17 100644
+--- a/Source/Core/Common/Thread.h
++++ b/Source/Core/Common/Thread.h
+@@ -3,6 +3,8 @@
+ 
+ #pragma once
+ 
++#include <utility>
++
+ #include <thread>
+ 
+ #ifndef _WIN32
+@@ -25,6 +27,11 @@ int CurrentThreadId();
+ 
+ void SetThreadAffinity(std::thread::native_handle_type thread, u32 mask);
+ void SetCurrentThreadAffinity(u32 mask);
++#ifdef __ORBIS__
++// PS4: pins the calling thread to one core (-1: leave it) and sets its scheduling priority
++// (256 highest .. 767 lowest, 700 default; 0: leave it). Returns the system's result codes.
++std::pair<int, int> PS4SetCurrentThreadCoreAndPriority(int core, int priority);
++#endif
+ 
+ void SleepCurrentThread(int ms);
+ void SwitchCurrentThread();  // On Linux, this is equal to sleep 1ms
 diff --git a/Source/Core/Common/WindowSystemInfo.h b/Source/Core/Common/WindowSystemInfo.h
 index 9d15477..ac60cc5 100644
 --- a/Source/Core/Common/WindowSystemInfo.h
@@ -997,17 +1045,31 @@ index 16cae73..0e59ae9 100644
  
  namespace PowerPC
 diff --git a/Source/Core/Core/Core.cpp b/Source/Core/Core/Core.cpp
-index fc614fd..bbe55e6 100644
+index fc614fd..bd036e3 100644
 --- a/Source/Core/Core/Core.cpp
 +++ b/Source/Core/Core/Core.cpp
-@@ -91,6 +91,14 @@
+@@ -91,6 +91,28 @@
  #include "VideoCommon/VideoBackendBase.h"
  #include "VideoCommon/VideoEvents.h"
  
 +
 +#ifdef __ORBIS__
++#include <cstdio>
++#include "Common/Thread.h"
 +extern "C" void ps4_boot_trace(const char* stage);  // DolphinPS4 port/ps4_crashlog.cpp
 +#define PS4_BOOT_MARK(text) ps4_boot_trace(text)
++// ps4.ini cpu_thread_core / gpu_thread_core / thread_priority, set by DolphinNoGUI.
++extern "C" int ps4_cpu_thread_core, ps4_gpu_thread_core, ps4_thread_priority;
++int ps4_cpu_thread_core = -1, ps4_gpu_thread_core = -1, ps4_thread_priority = 0;
++static void PS4PinThread(const char* name, int core)
++{
++  const auto [affinity, priority] =
++      Common::PS4SetCurrentThreadCoreAndPriority(core, ps4_thread_priority);
++  char line[128];
++  snprintf(line, sizeof(line), "%s: core %d (result 0x%x), priority %d (result 0x%x)", name, core,
++           affinity, ps4_thread_priority, priority);
++  ps4_boot_trace(line);
++}
 +#else
 +#define PS4_BOOT_MARK(text)
 +#endif
@@ -1015,7 +1077,28 @@ index fc614fd..bbe55e6 100644
  namespace Core
  {
  static bool s_wants_determinism;
-@@ -574,9 +582,11 @@ static void EmuThread(Core::System& system, std::unique_ptr<BootParameters> boot
+@@ -325,6 +347,10 @@ static void CpuThread(Core::System& system, const std::optional<std::string>& sa
+     Common::SetCurrentThreadName("CPU thread");
+   else
+     Common::SetCurrentThreadName("CPU-GPU thread");
++#ifdef __ORBIS__
++  // The emulated CPU thread limits the speed: give it a core of its own.
++  PS4PinThread("CPU thread", ps4_cpu_thread_core);
++#endif
+ 
+   // This needs to be delayed until after the video backend is ready.
+   DolphinAnalytics::Instance().ReportGameStart();
+@@ -468,6 +494,9 @@ static void FifoPlayerThread(Core::System& system, const std::optional<std::stri
+     // Spawn the GPU thread.
+     std::thread gpu_thread{[&] {
+       Common::SetCurrentThreadName("Video thread");
++#ifdef __ORBIS__
++      PS4PinThread("Video thread", ps4_gpu_thread_core);
++#endif
+ 
+       const bool is_init = init_video();
+       init_from_thread.set_value(is_init);
+@@ -574,9 +603,11 @@ static void EmuThread(Core::System& system, std::unique_ptr<BootParameters> boot
    system.GetMovie().Init(*boot);
    Common::ScopeGuard movie_guard([&system] { system.GetMovie().Shutdown(); });
  
@@ -1027,7 +1110,7 @@ index fc614fd..bbe55e6 100644
    HW::Init(system,
             NetPlay::IsNetPlayRunning() ? &(boot_session_data.GetNetplaySettings()->sram) : nullptr);
  
-@@ -599,6 +609,7 @@ static void EmuThread(Core::System& system, std::unique_ptr<BootParameters> boot
+@@ -599,6 +630,7 @@ static void EmuThread(Core::System& system, std::unique_ptr<BootParameters> boot
    // In single-core mode: This holds a video backend shutdown function.
    // In dual-core mode: This holds a GPU thread stopping function (which does the backend shutdown).
    const auto video_guard = GetInitializedVideoGuard(system, wsi);
@@ -1035,7 +1118,7 @@ index fc614fd..bbe55e6 100644
    if (!video_guard)
    {
      PanicAlertFmt("Failed to initialize video backend!");
-@@ -617,6 +628,7 @@ static void EmuThread(Core::System& system, std::unique_ptr<BootParameters> boot
+@@ -617,6 +649,7 @@ static void EmuThread(Core::System& system, std::unique_ptr<BootParameters> boot
      return;
    }
  
@@ -1043,7 +1126,7 @@ index fc614fd..bbe55e6 100644
    AudioCommon::PostInitSoundStream(system);
  
    // Set execution state to known values (CPU/FIFO/Audio Paused)
-@@ -636,6 +648,7 @@ static void EmuThread(Core::System& system, std::unique_ptr<BootParameters> boot
+@@ -636,6 +669,7 @@ static void EmuThread(Core::System& system, std::unique_ptr<BootParameters> boot
    {
      ASSERT(IsCPUThread());
      CPUThreadGuard guard(system);
@@ -1051,7 +1134,7 @@ index fc614fd..bbe55e6 100644
      if (!CBoot::BootUp(system, guard, std::move(boot)))
        return;
    }
-@@ -659,6 +672,7 @@ static void EmuThread(Core::System& system, std::unique_ptr<BootParameters> boot
+@@ -659,6 +693,7 @@ static void EmuThread(Core::System& system, std::unique_ptr<BootParameters> boot
        GetVideoEvents().after_present_event.Register(&Core::Callback_FramePresented);
  
    // Setup our core
@@ -1207,7 +1290,7 @@ index 51c3fff..0b31728 100644
 +  ps4_add_eboot(dolphin-nogui)
 +endif()
 diff --git a/Source/Core/DolphinNoGUI/MainNoGUI.cpp b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
-index 3bf40ea..4cd1220 100644
+index 3bf40ea..1459e7a 100644
 --- a/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 +++ b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 @@ -6,6 +6,7 @@
@@ -1231,7 +1314,7 @@ index 3bf40ea..4cd1220 100644
  #include "Core/Boot/Boot.h"
  #include "Core/BootManager.h"
  #include "Core/Core.h"
-@@ -31,6 +37,13 @@
+@@ -31,6 +37,14 @@
  
  static std::unique_ptr<Platform> s_platform;
  
@@ -1240,12 +1323,13 @@ index 3bf40ea..4cd1220 100644
 +extern "C" int ps4_uniform_upload_map;  // VideoBackends/OGL/ProgramShaderCache.cpp
 +extern "C" int ps4_vertex_upload_ring;  // VideoBackends/OGL/OGLStreamBuffer.cpp
 +extern "C" int ps4_show_fps;            // VideoCommon/Present.cpp
++extern "C" int ps4_cpu_thread_core, ps4_gpu_thread_core, ps4_thread_priority;  // Core/Core.cpp
 +#endif
 +
  static void signal_handler(int)
  {
    constexpr char message[] = "A signal was received. A second signal will force Dolphin to stop.\n";
-@@ -173,6 +186,10 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
+@@ -173,6 +187,10 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
    if (platform_name == "macos" || platform_name.empty())
      return Platform::CreateMacOSPlatform();
  #endif
@@ -1256,7 +1340,7 @@ index 3bf40ea..4cd1220 100644
  
    if (platform_name == "headless" || platform_name.empty())
      return Platform::CreateHeadlessPlatform();
-@@ -184,8 +201,17 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
+@@ -184,8 +202,17 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
  #define main app_main
  #endif
  
@@ -1275,7 +1359,7 @@ index 3bf40ea..4cd1220 100644
    const auto parser =
        CommandLineParse::CreateParser(CommandLineParse::ParserOptions::OmitGUIOptions);
    parser->add_option("-p", "--platform")
-@@ -207,6 +233,10 @@ int main(const int argc, char* argv[])
+@@ -207,6 +234,10 @@ int main(const int argc, char* argv[])
  #ifdef __APPLE__
                  ,
                  "macos"
@@ -1286,7 +1370,7 @@ index 3bf40ea..4cd1220 100644
  #endif
        });
  
-@@ -270,7 +300,79 @@ int main(const int argc, char* argv[])
+@@ -270,7 +301,84 @@ int main(const int argc, char* argv[])
  
    UICommon::SetUserDirectory(user_directory);
    UICommon::Init();
@@ -1341,6 +1425,11 @@ index 3bf40ea..4cd1220 100644
 +                    Platform::GetPS4Option("efb_access", "on") == "on");
 +    // vertex_upload=bufferdata: the old, slow per-draw vertex upload (a fallback for the ring).
 +    ps4_vertex_upload_ring = Platform::GetPS4Option("vertex_upload", "ring") != "bufferdata";
++    // cpu_thread_core / gpu_thread_core=<0..5> pin the emulated CPU and the video thread to a
++    // core each (-1 leaves them to the system); thread_priority=<256..767> for both (0: keep).
++    ps4_cpu_thread_core = std::atoi(Platform::GetPS4Option("cpu_thread_core", "2").c_str());
++    ps4_gpu_thread_core = std::atoi(Platform::GetPS4Option("gpu_thread_core", "3").c_str());
++    ps4_thread_priority = std::atoi(Platform::GetPS4Option("thread_priority", "0").c_str());
 +    // show_fps=off hides the FPS / speed counter in the top-left corner.
 +    ps4_show_fps = Platform::GetPS4Option("show_fps", "on") == "on";
 +    // uniform_upload=map: faster shader constant updates, but they render garbage in 3D scenes.
@@ -1366,7 +1455,7 @@ index 3bf40ea..4cd1220 100644
  
    Common::ScopeGuard ui_common_guard([] {
      UICommon::ShutdownControllers();
-@@ -284,6 +386,12 @@ int main(const int argc, char* argv[])
+@@ -284,6 +392,12 @@ int main(const int argc, char* argv[])
    }
  
    auto core_state_changed_hook = Core::AddOnStateChangedCallback([](const Core::State state) {
@@ -1379,7 +1468,7 @@ index 3bf40ea..4cd1220 100644
      if (state == Core::State::Uninitialized)
        s_platform->Stop();
    });
-@@ -303,6 +411,9 @@ int main(const int argc, char* argv[])
+@@ -303,6 +417,9 @@ int main(const int argc, char* argv[])
  
    DolphinAnalytics::Instance().ReportDolphinStart("nogui");
  
@@ -2260,7 +2349,7 @@ index ce1b7a5..941b744 100644
    g_backend_info.bSupportsPipelineCacheData = supports_glsl_cache;
  
 diff --git a/Source/Core/VideoBackends/OGL/OGLGfx.cpp b/Source/Core/VideoBackends/OGL/OGLGfx.cpp
-index ff5402b..c85c232 100644
+index ff5402b..02c8791 100644
 --- a/Source/Core/VideoBackends/OGL/OGLGfx.cpp
 +++ b/Source/Core/VideoBackends/OGL/OGLGfx.cpp
 @@ -2,6 +2,7 @@
@@ -2271,7 +2360,7 @@ index ff5402b..c85c232 100644
  
  #include "Common/GL/GLContext.h"
  #include "Common/GL/GLExtensions/GLExtensions.h"
-@@ -12,17 +13,27 @@
+@@ -12,17 +13,29 @@
  #include "VideoBackends/OGL/OGLPipeline.h"
  #include "VideoBackends/OGL/OGLShader.h"
  #include "VideoBackends/OGL/OGLTexture.h"
@@ -2289,7 +2378,9 @@ index ff5402b..c85c232 100644
  
  #include <algorithm>
 +#include <cstdio>
++#include <chrono>
 +#include <cstring>
++#include <functional>
  #include <string_view>
  
 +#ifdef __ORBIS__
@@ -2299,7 +2390,167 @@ index ff5402b..c85c232 100644
  namespace OGL
  {
  VideoConfig g_ogl_config;
-@@ -271,14 +282,376 @@ void OGLGfx::SetViewport(float x, float y, float width, float height, float near
+@@ -116,6 +129,148 @@ static void APIENTRY ClearDepthf(GLfloat depthval)
+   glClearDepth(depthval);
+ }
+ 
++#ifdef __ORBIS__
++// Port measurement: what does each way of updating a 4 KiB uniform block (the size of Dolphin's
++// vertex constants) cost on Piglet, when each update is followed by a draw that reads it, as in
++// a game frame? Runs once at startup (~1 s) and logs microseconds per update + draw.
++static GLuint PS4BenchProgram(const char* vs_source)
++{
++  static const char* const fs_source = "#version 300 es\nprecision mediump float;\n"
++                                       "out vec4 c;\nvoid main() { c = vec4(1.0); }\n";
++  const GLuint vs = glCreateShader(GL_VERTEX_SHADER);
++  glShaderSource(vs, 1, &vs_source, nullptr);
++  glCompileShader(vs);
++  const GLuint fs = glCreateShader(GL_FRAGMENT_SHADER);
++  glShaderSource(fs, 1, &fs_source, nullptr);
++  glCompileShader(fs);
++  const GLuint program = glCreateProgram();
++  glAttachShader(program, vs);
++  glAttachShader(program, fs);
++  glLinkProgram(program);
++  glDeleteShader(vs);
++  glDeleteShader(fs);
++  GLint linked = 0;
++  glGetProgramiv(program, GL_LINK_STATUS, &linked);
++  return linked ? program : 0;
++}
++
++static void PS4BenchmarkUniformUploads()
++{
++  constexpr int N = 200, RING = 256;
++  constexpr GLsizeiptr SIZE = 4112, VEC4S = 200;
++  // Points far outside the clip volume: the vertex shader runs and reads the block, nothing is
++  // rasterized.
++  const GLuint block_program = PS4BenchProgram(
++      "#version 300 es\nlayout(std140) uniform B { vec4 v[257]; };\n"
++      "void main() { gl_PointSize = 1.0; gl_Position = vec4(3.0 + v[gl_VertexID % 257].x, 3.0, "
++      "0.0, 1.0); }\n");
++  const GLuint plain_program = PS4BenchProgram(
++      "#version 300 es\nuniform vec4 u[200];\n"
++      "void main() { gl_PointSize = 1.0; gl_Position = vec4(3.0 + u[gl_VertexID % 200].x, 3.0, "
++      "0.0, 1.0); }\n");
++  if (!block_program || !plain_program)
++  {
++    ps4_boot_trace("uniform benchmark: programs failed to link");
++    return;
++  }
++  glUniformBlockBinding(block_program, glGetUniformBlockIndex(block_program, "B"), 6);
++  const GLint plain_location = glGetUniformLocation(plain_program, "u");
++
++  GLuint vao = 0;
++  glGenVertexArrays(1, &vao);
++  glBindVertexArray(vao);
++  GLuint ring[RING];
++  glGenBuffers(RING, ring);
++  for (GLuint buffer : ring)
++  {
++    glBindBuffer(GL_UNIFORM_BUFFER, buffer);
++    glBufferData(GL_UNIFORM_BUFFER, SIZE, nullptr, GL_DYNAMIC_DRAW);
++  }
++  static float data[SIZE / 4];
++  for (size_t i = 0; i < SIZE / 4; i++)
++    data[i] = static_cast<float>(i % 7) / 7.0f;
++
++  const auto map_upload = [&](GLuint buffer, GLbitfield flags) {
++    glBindBuffer(GL_UNIFORM_BUFFER, buffer);
++    if (void* mapped = glMapBufferRange(GL_UNIFORM_BUFFER, 0, SIZE, GL_MAP_WRITE_BIT | flags))
++    {
++      std::memcpy(mapped, data, SIZE);
++      glUnmapBuffer(GL_UNIFORM_BUFFER);
++    }
++  };
++  struct Method
++  {
++    const char* name;
++    std::function<void(int)> update;
++    bool plain;
++  };
++  const Method methods[] = {
++      {"draw only", [&](int) {}, false},
++      {"subdata ring", [&](int i) {
++         glBindBuffer(GL_UNIFORM_BUFFER, ring[i % RING]);
++         glBufferSubData(GL_UNIFORM_BUFFER, 0, SIZE, data);
++         glBindBufferBase(GL_UNIFORM_BUFFER, 6, ring[i % RING]);
++       }, false},
++      {"subdata same", [&](int) {
++         glBindBuffer(GL_UNIFORM_BUFFER, ring[0]);
++         glBufferSubData(GL_UNIFORM_BUFFER, 0, SIZE, data);
++         glBindBufferBase(GL_UNIFORM_BUFFER, 6, ring[0]);
++       }, false},
++      {"subdata 64B", [&](int) {
++         glBindBuffer(GL_UNIFORM_BUFFER, ring[0]);
++         glBufferSubData(GL_UNIFORM_BUFFER, 0, 64, data);
++         glBindBufferBase(GL_UNIFORM_BUFFER, 6, ring[0]);
++       }, false},
++      {"map unsync ring", [&](int i) {
++         map_upload(ring[i % RING], GL_MAP_UNSYNCHRONIZED_BIT);
++         glBindBufferBase(GL_UNIFORM_BUFFER, 6, ring[i % RING]);
++       }, false},
++      {"map sync ring", [&](int i) {
++         map_upload(ring[i % RING], 0);
++         glBindBufferBase(GL_UNIFORM_BUFFER, 6, ring[i % RING]);
++       }, false},
++      {"map orphan same", [&](int) {
++         map_upload(ring[0], GL_MAP_INVALIDATE_BUFFER_BIT);
++         glBindBufferBase(GL_UNIFORM_BUFFER, 6, ring[0]);
++       }, false},
++      {"bufferdata same", [&](int) {
++         glBindBuffer(GL_UNIFORM_BUFFER, ring[0]);
++         glBufferData(GL_UNIFORM_BUFFER, SIZE, data, GL_STREAM_DRAW);
++         glBindBufferBase(GL_UNIFORM_BUFFER, 6, ring[0]);
++       }, false},
++      {"glUniform4fv 3.2K", [&](int) { glUniform4fv(plain_location, VEC4S, data); }, true},
++  };
++  char line[512];
++  int len = snprintf(line, sizeof(line), "uniform benchmark (us per update + draw):");
++  for (const Method& method : methods)
++  {
++    glUseProgram(method.plain ? plain_program : block_program);
++    glFinish();
++    const auto start = std::chrono::steady_clock::now();
++    for (int i = 0; i < N; i++)
++    {
++      method.update(i);
++      glDrawArrays(GL_POINTS, 0, 1);
++    }
++    glFinish();
++    const double us =
++        std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - start)
++            .count() / N;
++    len += snprintf(line + len, sizeof(line) - len, " %s %.1f;", method.name, us);
++  }
++  ps4_boot_trace(line);
++
++  glBindBufferBase(GL_UNIFORM_BUFFER, 6, 0);
++  glBindBuffer(GL_UNIFORM_BUFFER, 0);
++  glDeleteBuffers(RING, ring);
++  glBindVertexArray(0);
++  glDeleteVertexArrays(1, &vao);
++  glUseProgram(0);
++  glDeleteProgram(block_program);
++  glDeleteProgram(plain_program);
++}
++#endif
++
+ OGLGfx::OGLGfx(std::unique_ptr<GLContext> main_gl_context, float backbuffer_scale)
+     : m_main_gl_context(std::move(main_gl_context)),
+       m_current_rasterization_state(RenderState::GetInvalidRasterizationState()),
+@@ -193,6 +348,10 @@ OGLGfx::OGLGfx(std::unique_ptr<GLContext> main_gl_context, float backbuffer_scal
+   if (g_backend_info.bSupportsPrimitiveRestart)
+     GLUtil::EnablePrimitiveRestart(m_main_gl_context.get());
+ 
++#ifdef __ORBIS__
++  PS4BenchmarkUniformUploads();
++#endif
++
+   UpdateActiveConfig();
+ }
+ 
+@@ -271,14 +430,376 @@ void OGLGfx::SetViewport(float x, float y, float width, float height, float near
    glDepthRangef(near_depth, far_depth);
  }
  
@@ -2676,7 +2927,7 @@ index ff5402b..c85c232 100644
    if (g_ogl_config.bSupportsGLBaseVertex)
    {
      glDrawElementsBaseVertex(static_cast<const OGLPipeline*>(m_current_pipeline)->GetGLPrimitive(),
-@@ -290,6 +663,28 @@ void OGLGfx::DrawIndexed(u32 base_index, u32 num_indices, u32 base_vertex)
+@@ -290,6 +811,28 @@ void OGLGfx::DrawIndexed(u32 base_index, u32 num_indices, u32 base_vertex)
      glDrawElements(static_cast<const OGLPipeline*>(m_current_pipeline)->GetGLPrimitive(),
                     num_indices, GL_UNSIGNED_SHORT, static_cast<u16*>(nullptr) + base_index);
    }
@@ -2705,7 +2956,7 @@ index ff5402b..c85c232 100644
  }
  
  void OGLGfx::DispatchComputeShader(const AbstractShader* shader, u32 groupsize_x, u32 groupsize_y,
-@@ -417,6 +812,7 @@ bool OGLGfx::BindBackbuffer(const ClearColor& clear_color)
+@@ -417,6 +960,7 @@ bool OGLGfx::BindBackbuffer(const ClearColor& clear_color)
  
  void OGLGfx::PresentBackbuffer()
  {
@@ -2713,7 +2964,7 @@ index ff5402b..c85c232 100644
    if (g_ogl_config.bSupportsDebug)
    {
      if (Common::Log::LogManager::GetInstance()->IsEnabled(Common::Log::LogType::HOST_GPU,
-@@ -618,6 +1014,7 @@ void OGLGfx::ApplyBlendingState(const BlendingState state)
+@@ -618,6 +1162,7 @@ void OGLGfx::ApplyBlendingState(const BlendingState state)
  
  void OGLGfx::SetPipeline(const AbstractPipeline* pipeline)
  {
@@ -2721,7 +2972,7 @@ index ff5402b..c85c232 100644
    if (m_current_pipeline == pipeline)
      return;
  
-@@ -733,3 +1130,133 @@ SurfaceInfo OGLGfx::GetSurfaceInfo() const
+@@ -733,3 +1278,133 @@ SurfaceInfo OGLGfx::GetSurfaceInfo() const
  }
  
  }  // namespace OGL

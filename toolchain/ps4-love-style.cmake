@@ -11,6 +11,10 @@ set(PS4_RUNTIME_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/../port/ps4_dlmalloc.c
     ${CMAKE_CURRENT_LIST_DIR}/../port/ps4_crashlog.cpp)
 
+# Generate code for the PS4's CPU (AMD Jaguar: SSE4.2, AVX, BMI1, F16C, MOVBE; no AVX2) rather
+# than baseline x86-64 (SSE2).
+add_compile_options(-march=btver2)
+
 # The toolchain's linker script only collects plain .init_array, so prioritized constructors
 # (.init_array.NNN - e.g. libc++'s iostream setup) end up in an orphan section the loader never
 # runs. Link with a copy that includes them, in priority order.
