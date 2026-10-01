@@ -2557,7 +2557,7 @@ index ce1b7a5..941b744 100644
    g_backend_info.bSupportsPipelineCacheData = supports_glsl_cache;
  
 diff --git a/Source/Core/VideoBackends/OGL/OGLGfx.cpp b/Source/Core/VideoBackends/OGL/OGLGfx.cpp
-index ff5402b..c6e1166 100644
+index ff5402b..3b81d71 100644
 --- a/Source/Core/VideoBackends/OGL/OGLGfx.cpp
 +++ b/Source/Core/VideoBackends/OGL/OGLGfx.cpp
 @@ -2,6 +2,7 @@
@@ -2860,7 +2860,7 @@ index ff5402b..c6e1166 100644
    UpdateActiveConfig();
  }
  
-@@ -271,14 +532,376 @@ void OGLGfx::SetViewport(float x, float y, float width, float height, float near
+@@ -271,14 +532,382 @@ void OGLGfx::SetViewport(float x, float y, float width, float height, float near
    glDepthRangef(near_depth, far_depth);
  }
  
@@ -3167,7 +3167,13 @@ index ff5402b..c6e1166 100644
 +  PS4_PROFILE(PS4_PROF_DRAW);
 +#ifdef __ORBIS__
 +  if (!g_ogl_config.bSupportsGLBaseVertex)
-+    PS4ApplyBaseVertex(m_current_pipeline, base_vertex);
++  {
++    // The indices start at GetPS4FirstIndex() (OGL VertexManager::ResetBuffer): the vertex
++    // attributes point that many vertices before base_vertex, at the batch's vertex origin.
++    const u32 first_index =
++        static_cast<const VertexManager*>(g_vertex_manager.get())->GetPS4FirstIndex();
++    PS4ApplyBaseVertex(m_current_pipeline, base_vertex - first_index);
++  }
 +  static int s_draw_number = 0;
 +  s_draw_number++;
 +  if (PS4ShouldSampleDraw(s_draw_number))
@@ -3237,7 +3243,7 @@ index ff5402b..c6e1166 100644
    if (g_ogl_config.bSupportsGLBaseVertex)
    {
      glDrawElementsBaseVertex(static_cast<const OGLPipeline*>(m_current_pipeline)->GetGLPrimitive(),
-@@ -290,6 +913,28 @@ void OGLGfx::DrawIndexed(u32 base_index, u32 num_indices, u32 base_vertex)
+@@ -290,6 +919,28 @@ void OGLGfx::DrawIndexed(u32 base_index, u32 num_indices, u32 base_vertex)
      glDrawElements(static_cast<const OGLPipeline*>(m_current_pipeline)->GetGLPrimitive(),
                     num_indices, GL_UNSIGNED_SHORT, static_cast<u16*>(nullptr) + base_index);
    }
@@ -3266,7 +3272,7 @@ index ff5402b..c6e1166 100644
  }
  
  void OGLGfx::DispatchComputeShader(const AbstractShader* shader, u32 groupsize_x, u32 groupsize_y,
-@@ -417,6 +1062,7 @@ bool OGLGfx::BindBackbuffer(const ClearColor& clear_color)
+@@ -417,6 +1068,7 @@ bool OGLGfx::BindBackbuffer(const ClearColor& clear_color)
  
  void OGLGfx::PresentBackbuffer()
  {
@@ -3274,7 +3280,7 @@ index ff5402b..c6e1166 100644
    if (g_ogl_config.bSupportsDebug)
    {
      if (Common::Log::LogManager::GetInstance()->IsEnabled(Common::Log::LogType::HOST_GPU,
-@@ -618,6 +1264,7 @@ void OGLGfx::ApplyBlendingState(const BlendingState state)
+@@ -618,6 +1270,7 @@ void OGLGfx::ApplyBlendingState(const BlendingState state)
  
  void OGLGfx::SetPipeline(const AbstractPipeline* pipeline)
  {
@@ -3282,7 +3288,7 @@ index ff5402b..c6e1166 100644
    if (m_current_pipeline == pipeline)
      return;
  
-@@ -733,3 +1380,133 @@ SurfaceInfo OGLGfx::GetSurfaceInfo() const
+@@ -733,3 +1386,133 @@ SurfaceInfo OGLGfx::GetSurfaceInfo() const
  }
  
  }  // namespace OGL
@@ -3788,7 +3794,7 @@ index 003a7ec..82a4ad7 100644
    GetOGLGfx()->RestoreFramebufferBinding();
  
 diff --git a/Source/Core/VideoBackends/OGL/OGLVertexManager.cpp b/Source/Core/VideoBackends/OGL/OGLVertexManager.cpp
-index c5382cf..d8460cc 100644
+index c5382cf..43ea5ba 100644
 --- a/Source/Core/VideoBackends/OGL/OGLVertexManager.cpp
 +++ b/Source/Core/VideoBackends/OGL/OGLVertexManager.cpp
 @@ -3,6 +3,9 @@
@@ -3801,7 +3807,18 @@ index c5382cf..d8460cc 100644
  #include <memory>
  
  #include "Common/Align.h"
-@@ -160,9 +163,16 @@ void VertexManager::ResetBuffer(u32 vertex_stride)
+@@ -19,6 +22,10 @@
+ #include "VideoCommon/VertexLoaderManager.h"
+ #include "VideoCommon/VideoConfig.h"
+ 
++#ifdef __ORBIS__
++extern "C" int ps4_vertex_upload_ring;  // OGLStreamBuffer.cpp
++#endif
++
+ namespace OGL
+ {
+ static void CheckBufferBinding()
+@@ -160,17 +167,45 @@ void VertexManager::ResetBuffer(u32 vertex_stride)
  {
    CheckBufferBinding();
  
@@ -3816,11 +3833,34 @@ index c5382cf..d8460cc 100644
 +  auto buffer = m_vertex_buffer->Map(map_size, vertex_stride);
    m_cur_buffer_pointer = m_base_buffer_pointer = buffer.first;
 -  m_end_buffer_pointer = buffer.first + MAXVBUFFERSIZE;
+-
 +  m_end_buffer_pointer = buffer.first + map_size;
- 
++
++  u32 first_index = 0;
++#ifdef __ORBIS__
++  // Piglet has no base vertex: rather than pointing the vertex attributes at every batch
++  // (several GL calls per draw), number the batch's indices from a vertex origin in the ring and
++  // move the origin (one re-point) only when the indices would no longer fit in 16 bits, the
++  // ring wrapped, or the vertex layout changed. See OGLGfx::DrawIndexed.
++  if (ps4_vertex_upload_ring && vertex_stride > 0)
++  {
++    const u32 offset = buffer.second;
++    const u32 needed = std::max<u32>(m_ps4_next_batch_vertices, 1) + 4;
++    if (vertex_stride != m_ps4_origin_stride || offset < m_ps4_origin ||
++        (offset - m_ps4_origin) % vertex_stride != 0 ||
++        (offset - m_ps4_origin) / vertex_stride + needed > 0xFFF0)
++    {
++      m_ps4_origin = offset;
++      m_ps4_origin_stride = vertex_stride;
++    }
++    first_index = (offset - m_ps4_origin) / vertex_stride;
++  }
++#endif
    buffer = m_index_buffer->Map(MAXIBUFFERSIZE * sizeof(u16));
-   m_index_generator.Start(reinterpret_cast<u16*>(buffer.first));
-@@ -171,6 +181,7 @@ void VertexManager::ResetBuffer(u32 vertex_stride)
+-  m_index_generator.Start(reinterpret_cast<u16*>(buffer.first));
++  m_index_generator.Start(reinterpret_cast<u16*>(buffer.first), first_index);
+ }
+ 
  void VertexManager::CommitBuffer(u32 num_vertices, u32 vertex_stride, u32 num_indices,
                                   u32* out_base_vertex, u32* out_base_index)
  {
@@ -3828,7 +3868,7 @@ index c5382cf..d8460cc 100644
    u32 vertex_data_size = num_vertices * vertex_stride;
    u32 index_data_size = num_indices * sizeof(u16);
  
-@@ -187,6 +198,7 @@ void VertexManager::CommitBuffer(u32 num_vertices, u32 vertex_stride, u32 num_in
+@@ -187,6 +222,7 @@ void VertexManager::CommitBuffer(u32 num_vertices, u32 vertex_stride, u32 num_in
  
  void VertexManager::UploadUniforms()
  {
@@ -3837,7 +3877,7 @@ index c5382cf..d8460cc 100644
  }
  }  // namespace OGL
 diff --git a/Source/Core/VideoBackends/OGL/OGLVertexManager.h b/Source/Core/VideoBackends/OGL/OGLVertexManager.h
-index 55a3ef1..67a093a 100644
+index 55a3ef1..457fed0 100644
 --- a/Source/Core/VideoBackends/OGL/OGLVertexManager.h
 +++ b/Source/Core/VideoBackends/OGL/OGLVertexManager.h
 @@ -20,6 +20,13 @@ public:
@@ -3854,6 +3894,27 @@ index 55a3ef1..67a093a 100644
    GLuint VAO;
  };
  
+@@ -42,6 +49,10 @@ public:
+ 
+   GLuint GetVertexBufferHandle() const;
+   GLuint GetIndexBufferHandle() const;
++#ifdef __ORBIS__
++  // First index of the batch just committed: its indices are relative to base_vertex - this.
++  u32 GetPS4FirstIndex() const { return m_index_generator.GetFirstIndex(); }
++#endif
+ 
+ protected:
+   void ResetBuffer(u32 vertex_stride) override;
+@@ -54,5 +65,9 @@ private:
+   std::unique_ptr<StreamBuffer> m_index_buffer;
+   std::unique_ptr<StreamBuffer> m_texel_buffer;
+   std::array<GLuint, NUM_TEXEL_BUFFER_FORMATS> m_texel_buffer_views{};
++#ifdef __ORBIS__
++  u32 m_ps4_origin = 0;         // byte offset of the vertex origin in the stream buffer
++  u32 m_ps4_origin_stride = 0;  // vertex stride the origin was chosen for
++#endif
+ };
+ }  // namespace OGL
 diff --git a/Source/Core/VideoBackends/OGL/ProgramShaderCache.cpp b/Source/Core/VideoBackends/OGL/ProgramShaderCache.cpp
 index 1dfd026..2b23830 100644
 --- a/Source/Core/VideoBackends/OGL/ProgramShaderCache.cpp
@@ -4335,6 +4396,74 @@ index 6277598..f1455dc 100644
    // The y coordinate here assumes upper-left origin, but the readback texture is lower-left in GL.
    if (g_backend_info.bUsesLowerLeftOrigin)
      y = EFB_HEIGHT - 1 - y;
+diff --git a/Source/Core/VideoCommon/IndexGenerator.cpp b/Source/Core/VideoCommon/IndexGenerator.cpp
+index 4decd2b..245d9ea 100644
+--- a/Source/Core/VideoCommon/IndexGenerator.cpp
++++ b/Source/Core/VideoCommon/IndexGenerator.cpp
+@@ -303,11 +303,12 @@ void IndexGenerator::Init()
+   }
+ }
+ 
+-void IndexGenerator::Start(u16* index_ptr)
++void IndexGenerator::Start(u16* index_ptr, u32 first_index)
+ {
+   m_index_buffer_current = index_ptr;
+   m_base_index_ptr = index_ptr;
+-  m_base_index = 0;
++  m_base_index = first_index;
++  m_first_index = first_index;
+ }
+ 
+ void IndexGenerator::AddIndices(OpcodeDecoder::Primitive primitive, u32 num_vertices)
+@@ -319,7 +320,15 @@ void IndexGenerator::AddIndices(OpcodeDecoder::Primitive primitive, u32 num_vert
+ 
+ void IndexGenerator::AddExternalIndices(const u16* indices, u32 num_indices, u32 num_vertices)
+ {
+-  std::memcpy(m_index_buffer_current, indices, sizeof(u16) * num_indices);
++  if (m_first_index == 0)
++  {
++    std::memcpy(m_index_buffer_current, indices, sizeof(u16) * num_indices);
++  }
++  else
++  {
++    for (u32 i = 0; i < num_indices; i++)
++      m_index_buffer_current[i] = static_cast<u16>(indices[i] + m_first_index);
++  }
+   m_index_buffer_current += num_indices;
+   m_base_index += num_vertices;
+ }
+diff --git a/Source/Core/VideoCommon/IndexGenerator.h b/Source/Core/VideoCommon/IndexGenerator.h
+index 3c57ea7..aa515f1 100644
+--- a/Source/Core/VideoCommon/IndexGenerator.h
++++ b/Source/Core/VideoCommon/IndexGenerator.h
+@@ -14,14 +14,17 @@ class IndexGenerator
+ {
+ public:
+   void Init();
+-  void Start(u16* index_ptr);
++  // first_index: number the batch's vertices from this value (PS4: indices relative to a vertex
++  // origin shared by several batches, see OGL VertexManager::ResetBuffer).
++  void Start(u16* index_ptr, u32 first_index = 0);
+ 
+   void AddIndices(OpcodeDecoder::Primitive primitive, u32 num_vertices);
+ 
+   void AddExternalIndices(const u16* indices, u32 num_indices, u32 num_vertices);
+ 
+   // returns numprimitives
+-  u32 GetNumVerts() const { return m_base_index; }
++  u32 GetNumVerts() const { return m_base_index - m_first_index; }
++  u32 GetFirstIndex() const { return m_first_index; }
+   u32 GetIndexLen() const { return static_cast<u32>(m_index_buffer_current - m_base_index_ptr); }
+   u32 GetRemainingIndices(OpcodeDecoder::Primitive primitive) const;
+ 
+@@ -29,6 +32,7 @@ private:
+   u16* m_index_buffer_current = nullptr;
+   u16* m_base_index_ptr = nullptr;
+   u32 m_base_index = 0;
++  u32 m_first_index = 0;
+ 
+   using PrimitiveFunction = u16* (*)(u16*, u32, u32);
+   Common::EnumMap<PrimitiveFunction, OpcodeDecoder::Primitive::GX_DRAW_POINTS> m_primitive_table{};
 diff --git a/Source/Core/VideoCommon/PS4Profile.h b/Source/Core/VideoCommon/PS4Profile.h
 new file mode 100644
 index 0000000..b776668
@@ -4618,7 +4747,7 @@ index 4e4567d..92d5dbb 100644
    //
    // - EFB to RAM:
 diff --git a/Source/Core/VideoCommon/VertexManagerBase.cpp b/Source/Core/VideoCommon/VertexManagerBase.cpp
-index 2bc6d58..d28410b 100644
+index 2bc6d58..c950467 100644
 --- a/Source/Core/VideoCommon/VertexManagerBase.cpp
 +++ b/Source/Core/VideoCommon/VertexManagerBase.cpp
 @@ -2,6 +2,13 @@
@@ -4635,7 +4764,21 @@ index 2bc6d58..d28410b 100644
  
  #include <array>
  #include <cmath>
-@@ -434,6 +441,7 @@ BitSet32 VertexManagerBase::UsedTextures() const
+@@ -192,7 +199,13 @@ DataReader VertexManagerBase::PrepareForAdditionalData(OpcodeDecoder::Primitive
+     }
+     else
+     {
++#ifdef __ORBIS__
++      m_ps4_next_batch_vertices = count;
++#endif
+       ResetBuffer(stride);
++#ifdef __ORBIS__
++      m_ps4_next_batch_vertices = 0;
++#endif
+     }
+ 
+     remaining_index_generator_indices = m_index_generator.GetRemainingIndices(primitive);
+@@ -434,6 +447,7 @@ BitSet32 VertexManagerBase::UsedTextures() const
  
  void VertexManagerBase::Flush()
  {
@@ -4644,7 +4787,7 @@ index 2bc6d58..d28410b 100644
      return;
  
 diff --git a/Source/Core/VideoCommon/VertexManagerBase.h b/Source/Core/VideoCommon/VertexManagerBase.h
-index 715dbee..77c8a53 100644
+index 715dbee..02c7e86 100644
 --- a/Source/Core/VideoCommon/VertexManagerBase.h
 +++ b/Source/Core/VideoCommon/VertexManagerBase.h
 @@ -96,10 +96,21 @@ public:
@@ -4669,3 +4812,14 @@ index 715dbee..77c8a53 100644
  
    VertexManagerBase();
    virtual ~VertexManagerBase();
+@@ -217,6 +228,10 @@ protected:
+   bool m_cull_all = false;
+ 
+   IndexGenerator m_index_generator;
++#ifdef __ORBIS__
++  // Vertices the batch being started must hold (0: unknown, e.g. utility draws).
++  u32 m_ps4_next_batch_vertices = 0;
++#endif
+   CPUCull m_cpu_cull;
+ 
+ private:
