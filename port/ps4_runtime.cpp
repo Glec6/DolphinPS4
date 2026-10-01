@@ -13,6 +13,7 @@
 //   libc lacks (and create-fself refuses unresolved imports).
 
 #include <pthread.h>
+#include <sched.h>
 #include <stdarg.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -45,6 +46,7 @@ void* mspace_memalign(mspace msp, size_t alignment, size_t bytes);
 
 // port/ps4_crashlog.cpp (weak: a program may link without it).
 __attribute__((weak)) void ps4_boot_trace(const char* stage);
+int ps4_heap_ok(void* msp);  // port/ps4_dlmalloc.c
 
 extern char __text_start[];  // OpenOrbis link.x: start of .text (ELF address 0)
 }
@@ -112,10 +114,30 @@ mspace createMspace(const char* pool, void* base, size_t size) {
     return msp;
 }
 
+// The PS4 kernel library allocates its own objects (pthread attributes, ...) at 0x200000000,
+// where a kernel-placed reservation of ours also lands; those allocations wiped the heap's
+// control block. Ask for an address well above that instead.
+void* reserveAwayFromKernel(size_t size) {
+    const uintptr_t hints[] = {0x1000000000ull, 0x800000000ull, 0x600000000ull};
+    for (uintptr_t hint : hints) {
+        void* address = reinterpret_cast<void*>(hint);
+        if (sceKernelReserveVirtualRange(&address, size, 0, PAGE) == 0) {
+            if (reinterpret_cast<uintptr_t>(address) >= 0x400000000ull)
+                return address;
+            heapLog("[dolphin] heap: reservation hint %p gave %p, trying another\n", reinterpret_cast<void*>(hint),
+                    address);
+        }
+    }
+    return nullptr;
+}
+
 mspace mapAndCreate(bool systemPool, size_t size) {
-    void* base = nullptr;
-    if (sceKernelReserveVirtualRange(&base, size, 0, PAGE) != 0)
+    // Reserve one extra page in front of the heap and leave it inaccessible: a stray write
+    // just before the heap's control block then faults where it happens (see crash.log).
+    void* guard = reserveAwayFromKernel(size + PAGE);
+    if (!guard)
         return nullptr;
+    void* base = static_cast<char*>(guard) + PAGE;
     int32_t ret = systemPool
                       ? sceKernelMapNamedSystemFlexibleMemory(&base, size, PROT_CPU_RW, MAP_FIXED_FLAG, "dolphin heap")
                       : sceKernelMapNamedFlexibleMemory(&base, size, PROT_CPU_RW, MAP_FIXED_FLAG, "dolphin heap");
@@ -142,6 +164,13 @@ mspace createHeap() {
     size_t available = 0;
     int32_t ret = sceKernelAvailableFlexibleMemorySize(&available);
     heapLog("[dolphin] heap: flexible memory available %zu MiB (0x%x)\n", available / MB, ret);
+    // Where does the kernel library put its own objects? (8 bytes reserved even if the
+    // headers' pthread_mutexattr_t is the 4-byte musl one.)
+    void* attr[2] = {nullptr, nullptr};
+    if (pthread_mutexattr_init(reinterpret_cast<pthread_mutexattr_t*>(attr)) == 0) {
+        heapLog("[dolphin] heap: kernel pthread objects live around %p\n", attr[0]);
+        pthread_mutexattr_destroy(reinterpret_cast<pthread_mutexattr_t*>(attr));
+    }
     // Preferred: the system flexible memory pool, leaving regular flexible memory to Piglet.
     const size_t systemSizes[] = {1024 * MB, 768 * MB, 512 * MB, 384 * MB, 256 * MB, 192 * MB, 128 * MB};
     for (size_t size : systemSizes) {
@@ -164,10 +193,16 @@ mspace createHeap() {
     return nullptr;
 }
 
+bool g_creatingHeap = false;
+
 inline mspace getHeap() {
-    // The first allocation happens in a static constructor, before any threads exist.
-    if (g_heap == nullptr)
+    // The first allocation happens in a static constructor, before any threads exist. While the
+    // heap is being created, nested allocations (if a kernel call allocates) just fail.
+    if (g_heap == nullptr && !g_creatingHeap) {
+        g_creatingHeap = true;
         g_heap = createHeap();
+        g_creatingHeap = false;
+    }
     return g_heap;
 }
 
@@ -181,6 +216,30 @@ bool ownsPointer(const void* p) {
 __attribute__((tls_model("initial-exec"))) thread_local const char* t_op = "?";
 __attribute__((tls_model("initial-exec"))) thread_local const void* t_caller = nullptr;
 int g_errors = 0;
+
+// Checks the heap's control block before every operation; the first time it is found
+// overwritten, logs when (operation number, current and previous caller) and what it now holds.
+unsigned long long g_ops = 0;
+const char* g_prevOp = "none";
+const void* g_prevCaller = nullptr;
+bool g_heapBroken = false;
+
+void checkHeap(const char* op, const void* caller) {
+    g_ops++;
+    if (g_heap && !g_heapBroken && !ps4_heap_ok(g_heap)) {
+        g_heapBroken = true;
+        heapLog("[dolphin] heap: CONTROL BLOCK OVERWRITTEN, noticed at operation #%llu (%s from elf 0x%llx); "
+                "previous operation %s from elf 0x%llx\n",
+                g_ops, op, elf(caller), g_prevOp, elf(g_prevCaller));
+        const auto* words = reinterpret_cast<const unsigned long long*>(g_heapBase);
+        for (int i = 0; i < 16; i += 4)
+            heapLog("[dolphin] heap:   +0x%02x: %016llx %016llx %016llx %016llx\n", i * 8, words[i], words[i + 1],
+                    words[i + 2], words[i + 3]);
+        logStack();
+    }
+    g_prevOp = op;
+    g_prevCaller = caller;
+}
 
 void reportFailure(const char* what, size_t size) {
     if (g_errors++ < 8) {
@@ -226,6 +285,7 @@ void ps4_heap_error(void* msp, void* chunk, int corruption) {
 void* __wrap_malloc(size_t size) {
     t_op = "malloc";
     t_caller = __builtin_return_address(0);
+    checkHeap(t_op, t_caller);
     void* p = mspace_malloc(getHeap(), size);
     if (!p)
         reportFailure("malloc", size);
@@ -237,6 +297,7 @@ void __wrap_free(void* ptr) {
         return;
     t_op = "free";
     t_caller = __builtin_return_address(0);
+    checkHeap(t_op, t_caller);
     if (!ownsPointer(ptr)) {
         if (g_errors++ < 8) {
             heapLog("[dolphin] heap: free(%p) of memory not from this heap, caller elf 0x%llx (ignored)\n", ptr,
@@ -251,6 +312,7 @@ void __wrap_free(void* ptr) {
 void* __wrap_calloc(size_t nelem, size_t size) {
     t_op = "calloc";
     t_caller = __builtin_return_address(0);
+    checkHeap(t_op, t_caller);
     void* p = mspace_calloc(getHeap(), nelem, size);
     if (!p)
         reportFailure("calloc", nelem * size);
@@ -260,6 +322,7 @@ void* __wrap_calloc(size_t nelem, size_t size) {
 void* __wrap_realloc(void* ptr, size_t size) {
     t_op = "realloc";
     t_caller = __builtin_return_address(0);
+    checkHeap(t_op, t_caller);
     if (ptr && !ownsPointer(ptr)) {
         heapLog("[dolphin] heap: realloc(%p) of memory not from this heap, caller elf 0x%llx\n", ptr,
                 elf(t_caller));
@@ -279,6 +342,7 @@ void* __wrap_realloc(void* ptr, size_t size) {
 void* __wrap_memalign(size_t alignment, size_t size) {
     t_op = "memalign";
     t_caller = __builtin_return_address(0);
+    checkHeap(t_op, t_caller);
     void* p = mspace_memalign(getHeap(), alignment, size);
     if (!p)
         reportFailure("memalign", size);
@@ -287,6 +351,25 @@ void* __wrap_memalign(size_t alignment, size_t size) {
 
 // posix_memalign and aligned_alloc in libc.a are built on __memalign.
 void* __wrap___memalign(size_t alignment, size_t size) { return __wrap_memalign(alignment, size); }
+
+// pthread_once for every caller (--wrap): the kernel's (FreeBSD) version treats pthread_once_t
+// as a 16-byte struct, but the OpenOrbis headers - and the prebuilt libc.a (newlocale,
+// call_once, ...) - use a 4-byte int, which it overflowed. This one only uses those 4 bytes:
+// 0 = not run (PTHREAD_ONCE_INIT), 1 = running, 2 = done.
+int __wrap_pthread_once(pthread_once_t* once, void (*init)(void)) {
+    auto* state = reinterpret_cast<int*>(once);
+    if (__atomic_load_n(state, __ATOMIC_ACQUIRE) == 2)
+        return 0;
+    int expected = 0;
+    if (__atomic_compare_exchange_n(state, &expected, 1, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+        init();
+        __atomic_store_n(state, 2, __ATOMIC_RELEASE);
+        return 0;
+    }
+    while (__atomic_load_n(state, __ATOMIC_ACQUIRE) != 2)
+        sched_yield();
+    return 0;
+}
 
 int __cxa_thread_atexit_impl(void (*dtor)(void*), void* obj, void* /*dso_symbol*/) {
     pthread_once(&g_threadDtorOnce, createThreadDtorKey);

@@ -27,3 +27,9 @@ void ps4_heap_error(void* mspace, void* chunk, int corruption);
 #define USAGE_ERROR_ACTION(m, p) ps4_heap_error((m), (p), 0)
 
 #include "third_party/dlmalloc/malloc.c"
+
+/* Integrity check for diagnostics: is the mspace's state still intact? */
+int ps4_heap_ok(void* msp) {
+  mstate ms = (mstate)msp;
+  return ok_magic(ms);
+}

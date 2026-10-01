@@ -389,6 +389,29 @@ static __inline void cpuid_count(unsigned int ax, unsigned int cx, unsigned int 
 #endif
 EOF
 
+# bits/alltypes.h: pthread types whose musl size is smaller than what the PS4 kernel's (FreeBSD
+# libthr) functions write. FreeBSD's attribute and spinlock types are pointers to objects the
+# kernel allocates; musl's are 4-byte structs, so pthread_mutexattr_init & co. overflowed by 4
+# bytes (verified on hardware: std::recursive_mutex's stack attr clobbered a saved register).
+# pthread_once_t stays 4 bytes because libc.a (newlocale, call_once) uses it compiled; the
+# runtime wraps pthread_once instead (port/ps4_runtime.cpp). Other pthread types are larger
+# than the kernel's pointer-sized ones and fine as they are.
+cat > "$OVERLAY/bits/alltypes.h" <<'EOF'
+/* DolphinPS4: FreeBSD-sized pthread attribute/spinlock types (the PS4 kernel implements them). */
+#ifndef _DOLPHINPS4_PTHREAD_TYPES
+#define _DOLPHINPS4_PTHREAD_TYPES
+typedef struct { void *__p; } pthread_mutexattr_t;
+#define __DEFINED_pthread_mutexattr_t
+typedef struct { void *__p; } pthread_condattr_t;
+#define __DEFINED_pthread_condattr_t
+typedef struct { void *__p; } pthread_barrierattr_t;
+#define __DEFINED_pthread_barrierattr_t
+typedef void *pthread_spinlock_t;
+#define __DEFINED_pthread_spinlock_t
+#endif
+#include_next <bits/alltypes.h>
+EOF
+
 # sys/ioctl.h: FreeBSD socket ioctls (OpenOrbis only has LINUX_FIONBIO).
 cat > "$OVERLAY/sys/ioctl.h" <<'EOF'
 /* DolphinPS4: FreeBSD additions on top of the OpenOrbis header. */
