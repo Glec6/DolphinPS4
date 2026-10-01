@@ -2047,7 +2047,7 @@ index 0000000..8b666df
 +}
 +}  // namespace GCAdapter
 diff --git a/Source/Core/VideoBackends/OGL/OGLGfx.cpp b/Source/Core/VideoBackends/OGL/OGLGfx.cpp
-index ff5402b..b91204a 100644
+index ff5402b..89c6d34 100644
 --- a/Source/Core/VideoBackends/OGL/OGLGfx.cpp
 +++ b/Source/Core/VideoBackends/OGL/OGLGfx.cpp
 @@ -12,17 +12,27 @@
@@ -2078,7 +2078,7 @@ index ff5402b..b91204a 100644
  namespace OGL
  {
  VideoConfig g_ogl_config;
-@@ -277,8 +287,344 @@ void OGLGfx::Draw(u32 base_vertex, u32 num_vertices)
+@@ -277,8 +287,346 @@ void OGLGfx::Draw(u32 base_vertex, u32 num_vertices)
                 num_vertices);
  }
  
@@ -2263,7 +2263,9 @@ index ff5402b..b91204a 100644
 +  for (int i = 0; i < count; i++)
 +  {
 +    char name[64] = {};
-+    glGetActiveUniformName(program, uindices[i], sizeof(name), nullptr, name);
++    GLint array_size = 0;
++    GLenum uniform_type = 0;
++    glGetActiveUniform(program, uindices[i], sizeof(name), nullptr, &array_size, &uniform_type, name);
 +    if (len > 300)
 +    {
 +      ps4_boot_trace(line);
@@ -2423,7 +2425,7 @@ index ff5402b..b91204a 100644
    if (g_ogl_config.bSupportsGLBaseVertex)
    {
      glDrawElementsBaseVertex(static_cast<const OGLPipeline*>(m_current_pipeline)->GetGLPrimitive(),
-@@ -290,6 +636,28 @@ void OGLGfx::DrawIndexed(u32 base_index, u32 num_indices, u32 base_vertex)
+@@ -290,6 +638,28 @@ void OGLGfx::DrawIndexed(u32 base_index, u32 num_indices, u32 base_vertex)
      glDrawElements(static_cast<const OGLPipeline*>(m_current_pipeline)->GetGLPrimitive(),
                     num_indices, GL_UNSIGNED_SHORT, static_cast<u16*>(nullptr) + base_index);
    }
@@ -2452,7 +2454,7 @@ index ff5402b..b91204a 100644
  }
  
  void OGLGfx::DispatchComputeShader(const AbstractShader* shader, u32 groupsize_x, u32 groupsize_y,
-@@ -733,3 +1101,65 @@ SurfaceInfo OGLGfx::GetSurfaceInfo() const
+@@ -733,3 +1103,65 @@ SurfaceInfo OGLGfx::GetSurfaceInfo() const
  }
  
  }  // namespace OGL
@@ -2615,7 +2617,7 @@ index 003a7ec..66d26a4 100644
    GetOGLGfx()->RestoreFramebufferBinding();
  
 diff --git a/Source/Core/VideoBackends/OGL/ProgramShaderCache.cpp b/Source/Core/VideoBackends/OGL/ProgramShaderCache.cpp
-index 1dfd026..9f56bd8 100644
+index 1dfd026..3b375e2 100644
 --- a/Source/Core/VideoBackends/OGL/ProgramShaderCache.cpp
 +++ b/Source/Core/VideoBackends/OGL/ProgramShaderCache.cpp
 @@ -37,6 +37,11 @@
@@ -2706,7 +2708,7 @@ index 1dfd026..9f56bd8 100644
 +    static int s_dumped_vs = 0, s_dumped_ps = 0;
 +    int* counter = type == GL_VERTEX_SHADER ? &s_dumped_vs :
 +                   type == GL_FRAGMENT_SHADER ? &s_dumped_ps : nullptr;
-+    if (counter && *counter < 6)
++    if (counter && *counter < 40)
 +    {
 +      char path[96];
 +      snprintf(path, sizeof(path), "/data/DolphinPS4/shader_%s_%d_id%u.glsl",
