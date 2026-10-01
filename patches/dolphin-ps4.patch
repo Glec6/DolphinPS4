@@ -1134,18 +1134,22 @@ index 51c3fff..0b31728 100644
 +  ps4_add_eboot(dolphin-nogui)
 +endif()
 diff --git a/Source/Core/DolphinNoGUI/MainNoGUI.cpp b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
-index 3bf40ea..2add5c7 100644
+index 3bf40ea..6f1bc7d 100644
 --- a/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 +++ b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
-@@ -15,6 +15,7 @@
+@@ -15,7 +15,11 @@
  #include <windows.h>
  #endif
  
++#include "Common/Config/Config.h"
 +#include "Common/Logging/LogManager.h"
  #include "Common/ScopeGuard.h"
++#include "Core/Config/GraphicsSettings.h"
++#include "Core/Config/MainSettings.h"
  #include "Core/Boot/Boot.h"
  #include "Core/BootManager.h"
-@@ -173,6 +174,10 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
+ #include "Core/Core.h"
+@@ -173,6 +177,10 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
    if (platform_name == "macos" || platform_name.empty())
      return Platform::CreateMacOSPlatform();
  #endif
@@ -1156,7 +1160,7 @@ index 3bf40ea..2add5c7 100644
  
    if (platform_name == "headless" || platform_name.empty())
      return Platform::CreateHeadlessPlatform();
-@@ -184,8 +189,17 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
+@@ -184,8 +192,17 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
  #define main app_main
  #endif
  
@@ -1175,7 +1179,7 @@ index 3bf40ea..2add5c7 100644
    const auto parser =
        CommandLineParse::CreateParser(CommandLineParse::ParserOptions::OmitGUIOptions);
    parser->add_option("-p", "--platform")
-@@ -207,6 +221,10 @@ int main(const int argc, char* argv[])
+@@ -207,6 +224,10 @@ int main(const int argc, char* argv[])
  #ifdef __APPLE__
                  ,
                  "macos"
@@ -1186,7 +1190,7 @@ index 3bf40ea..2add5c7 100644
  #endif
        });
  
-@@ -270,7 +288,22 @@ int main(const int argc, char* argv[])
+@@ -270,7 +291,33 @@ int main(const int argc, char* argv[])
  
    UICommon::SetUserDirectory(user_directory);
    UICommon::Init();
@@ -1201,6 +1205,17 @@ index 3bf40ea..2add5c7 100644
 +    for (int i = 0; i < static_cast<int>(Common::Log::LogType::NUMBER_OF_LOGS); i++)
 +      log_manager->SetEnable(static_cast<Common::Log::LogType>(i), true);
 +  }
++  // Straight into the game: no IPL, no on-screen messages or overlays, no background shader
++  // compiler threads (they need shared GL contexts, which Piglet can't create).
++  Config::SetBase(Config::MAIN_SKIP_IPL, true);
++  Config::SetBase(Config::MAIN_OSD_MESSAGES, false);
++  Config::SetBase(Config::MAIN_SHOW_ACTIVE_TITLE, false);
++  Config::SetBase(Config::GFX_SHOW_FPS, false);
++  Config::SetBase(Config::GFX_SHADER_COMPILER_THREADS, 0);
++  Config::SetBase(Config::GFX_SHADER_PRECOMPILER_THREADS, 0);
++  Config::SetBase(Config::GFX_WAIT_FOR_SHADERS_BEFORE_STARTING, false);
++  // The 64 GiB lazily committed JIT lookup table can't be mapped on PS4.
++  Config::SetBase(Config::MAIN_LARGE_ENTRY_POINTS_MAP, false);
 +#endif
    UICommon::InitControllers(wsi);
 +#ifdef __ORBIS__
@@ -1209,7 +1224,7 @@ index 3bf40ea..2add5c7 100644
  
    Common::ScopeGuard ui_common_guard([] {
      UICommon::ShutdownControllers();
-@@ -284,6 +317,12 @@ int main(const int argc, char* argv[])
+@@ -284,6 +331,12 @@ int main(const int argc, char* argv[])
    }
  
    auto core_state_changed_hook = Core::AddOnStateChangedCallback([](const Core::State state) {
@@ -1222,7 +1237,7 @@ index 3bf40ea..2add5c7 100644
      if (state == Core::State::Uninitialized)
        s_platform->Stop();
    });
-@@ -303,6 +342,9 @@ int main(const int argc, char* argv[])
+@@ -303,6 +356,9 @@ int main(const int argc, char* argv[])
  
    DolphinAnalytics::Instance().ReportDolphinStart("nogui");
  
