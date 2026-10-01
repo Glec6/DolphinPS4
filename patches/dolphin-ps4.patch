@@ -1242,6 +1242,114 @@ index a7919fb..8de7f4d 100644
    sigaction(SIGBUS, &old_sa_bus, nullptr);
  #endif
  }
+diff --git a/Source/Core/Core/PowerPC/Interpreter/Interpreter_LoadStore.cpp b/Source/Core/Core/PowerPC/Interpreter/Interpreter_LoadStore.cpp
+index 0359049..01ebebc 100644
+--- a/Source/Core/Core/PowerPC/Interpreter/Interpreter_LoadStore.cpp
++++ b/Source/Core/Core/PowerPC/Interpreter/Interpreter_LoadStore.cpp
+@@ -1132,6 +1132,10 @@ void Interpreter::stwx(Interpreter& interpreter, UGeckoInstruction inst)
+ 
+ void Interpreter::sync(Interpreter& interpreter, UGeckoInstruction inst)
+ {
++#ifdef __ORBIS__
++  if (interpreter.m_ppc_state.pagetable_update_pending)
++    interpreter.m_mmu.PageTableUpdated();
++#endif
+   // ignored
+ }
+ 
+diff --git a/Source/Core/Core/PowerPC/Interpreter/Interpreter_SystemRegisters.cpp b/Source/Core/Core/PowerPC/Interpreter/Interpreter_SystemRegisters.cpp
+index 8f30be8..0d6a0e4 100644
+--- a/Source/Core/Core/PowerPC/Interpreter/Interpreter_SystemRegisters.cpp
++++ b/Source/Core/Core/PowerPC/Interpreter/Interpreter_SystemRegisters.cpp
+@@ -614,6 +614,10 @@ void Interpreter::mcrf(Interpreter& interpreter, UGeckoInstruction inst)
+ 
+ void Interpreter::isync(Interpreter& interpreter, UGeckoInstruction inst)
+ {
++#ifdef __ORBIS__
++  if (interpreter.m_ppc_state.pagetable_update_pending)
++    interpreter.m_mmu.PageTableUpdated();
++#endif
+   // shouldn't do anything
+ }
+ 
+diff --git a/Source/Core/Core/PowerPC/Jit64/Jit.cpp b/Source/Core/Core/PowerPC/Jit64/Jit.cpp
+index 1248b1a..3c51971 100644
+--- a/Source/Core/Core/PowerPC/Jit64/Jit.cpp
++++ b/Source/Core/Core/PowerPC/Jit64/Jit.cpp
+@@ -430,6 +430,19 @@ void Jit64::DoNothing(UGeckoInstruction _inst)
+   // Yup, just don't do anything.
+ }
+ 
++#ifdef __ORBIS__
++// sync / isync / tlbsync: apply page table changes deferred by tlbie (MMU::InvalidateTLBEntry).
++void Jit64::PS4SyncPageTable(UGeckoInstruction inst)
++{
++  gpr.Flush();
++  fpr.Flush();
++  CMP(8, PPCSTATE(pagetable_update_pending), Imm8(0));
++  FixupBranch not_pending = J_CC(CC_E);
++  ABI_CallFunctionP(&PowerPC::MMU::PageTableUpdatedFromJit, &m_system.GetMMU());
++  SetJumpTarget(not_pending);
++}
++#endif
++
+ void Jit64::ImHere(Jit64& jit)
+ {
+   auto& ppc_state = jit.m_ppc_state;
+diff --git a/Source/Core/Core/PowerPC/Jit64/Jit.h b/Source/Core/Core/PowerPC/Jit64/Jit.h
+index da1be2d..ad041b0 100644
+--- a/Source/Core/Core/PowerPC/Jit64/Jit.h
++++ b/Source/Core/Core/PowerPC/Jit64/Jit.h
+@@ -167,6 +167,9 @@ public:
+   using Instruction = void (Jit64::*)(UGeckoInstruction instCode);
+   void FallBackToInterpreter(UGeckoInstruction _inst);
+   void DoNothing(UGeckoInstruction _inst);
++#ifdef __ORBIS__
++  void PS4SyncPageTable(UGeckoInstruction inst);
++#endif
+   void HLEFunction(u32 hook_index);
+ 
+   void DynaRunTable4(UGeckoInstruction inst);
+diff --git a/Source/Core/Core/PowerPC/Jit64/Jit64_Tables.cpp b/Source/Core/Core/PowerPC/Jit64/Jit64_Tables.cpp
+index be5458b..a507294 100644
+--- a/Source/Core/Core/PowerPC/Jit64/Jit64_Tables.cpp
++++ b/Source/Core/Core/PowerPC/Jit64/Jit64_Tables.cpp
+@@ -143,7 +143,11 @@ constexpr std::array<Jit64OpTemplate, 13> s_table19{{
+     {417, &Jit64::crXXX},   // crorc
+     {193, &Jit64::crXXX},   // crxor
+ 
++#ifdef __ORBIS__
++    {150, &Jit64::PS4SyncPageTable},  // isync
++#else
+     {150, &Jit64::DoNothing},  // isync
++#endif
+     {0, &Jit64::mcrf},         // mcrf
+ 
+     {50, &Jit64::rfi},  // rfi
+@@ -280,7 +284,11 @@ constexpr std::array<Jit64OpTemplate, 107> s_table31{{
+     {659, &Jit64::FallBackToInterpreter},  // mfsrin
+ 
+     {4, &Jit64::twX},                      // tw
++#ifdef __ORBIS__
++    {598, &Jit64::PS4SyncPageTable},              // sync
++#else
+     {598, &Jit64::DoNothing},              // sync
++#endif
+     {982, &Jit64::FallBackToInterpreter},  // icbi
+ 
+     // Unused instructions on GC
+@@ -288,7 +296,11 @@ constexpr std::array<Jit64OpTemplate, 107> s_table31{{
+     {438, &Jit64::FallBackToInterpreter},  // ecowx
+     {854, &Jit64::eieio},                  // eieio
+     {306, &Jit64::FallBackToInterpreter},  // tlbie
++#ifdef __ORBIS__
++    {566, &Jit64::PS4SyncPageTable},              // tlbsync
++#else
+     {566, &Jit64::DoNothing},              // tlbsync
++#endif
+ }};
+ 
+ constexpr std::array<Jit64OpTemplate, 9> s_table59{{
 diff --git a/Source/Core/Core/PowerPC/Jit64Common/FarCodeCache.h b/Source/Core/Core/PowerPC/Jit64Common/FarCodeCache.h
 index 08cfe3f..04ee875 100644
 --- a/Source/Core/Core/PowerPC/Jit64Common/FarCodeCache.h
@@ -1272,6 +1380,52 @@ index 39e16c7..bba4032 100644
 +#else
  constexpr size_t CODE_SIZE = 1024 * 1024 * 128;
 +#endif
+diff --git a/Source/Core/Core/PowerPC/MMU.cpp b/Source/Core/Core/PowerPC/MMU.cpp
+index 940e93c..39c95f2 100644
+--- a/Source/Core/Core/PowerPC/MMU.cpp
++++ b/Source/Core/Core/PowerPC/MMU.cpp
+@@ -25,6 +25,14 @@
+ 
+ #include "Core/PowerPC/MMU.h"
+ 
++#include "VideoCommon/PS4Profile.h"
++
++#ifdef __ORBIS__
++// ps4.ini pagetable_fastmem=deferred, set by DolphinNoGUI.
++extern "C" int ps4_pagetable_deferred;
++int ps4_pagetable_deferred = 0;
++#endif
++
+ #include <algorithm>
+ #include <bit>
+ #include <cstddef>
+@@ -1375,6 +1383,18 @@ void MMU::InvalidateTLBEntry(u32 address)
+   m_ppc_state.tlb[PowerPC::DATA_TLB_INDEX][entry_index].Invalidate();
+   m_ppc_state.tlb[PowerPC::INST_TLB_INDEX][entry_index].Invalidate();
+ 
++#ifdef __ORBIS__
++  PS4_PROFILE(PS4_PROF_TLBIE);
++  // PS4 (ps4.ini pagetable_fastmem=deferred): games issue tlbie in bursts, and each rescan of
++  // the page table is expensive here. The architecture only guarantees that a TLB invalidation
++  // has taken effect after a following sync, so rescan once at the next sync / isync / tlbsync
++  // (see Jit64::PS4SyncPageTable) instead of after every tlbie.
++  if (ps4_pagetable_deferred)
++  {
++    m_ppc_state.pagetable_update_pending = true;
++    return;
++  }
++#endif
+   if (m_ppc_state.msr.DR)
+     PageTableUpdated();
+   else
+@@ -1408,6 +1428,7 @@ void MMU::ReloadPageTable()
+ 
+ void MMU::PageTableUpdated()
+ {
++  PS4_PROFILE(PS4_PROF_PAGETABLE);
+   m_ppc_state.pagetable_update_pending = false;
+ 
+   if (!m_system.GetJitInterface().WantsPageTableMappings())
 diff --git a/Source/Core/DolphinNoGUI/CMakeLists.txt b/Source/Core/DolphinNoGUI/CMakeLists.txt
 index 51c3fff..0b31728 100644
 --- a/Source/Core/DolphinNoGUI/CMakeLists.txt
@@ -1300,7 +1454,7 @@ index 51c3fff..0b31728 100644
 +  ps4_add_eboot(dolphin-nogui)
 +endif()
 diff --git a/Source/Core/DolphinNoGUI/MainNoGUI.cpp b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
-index 3bf40ea..8069673 100644
+index 3bf40ea..b8e54c0 100644
 --- a/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 +++ b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 @@ -6,6 +6,7 @@
@@ -1325,7 +1479,7 @@ index 3bf40ea..8069673 100644
  #include "Core/Boot/Boot.h"
  #include "Core/BootManager.h"
  #include "Core/Core.h"
-@@ -31,6 +38,18 @@
+@@ -31,6 +38,19 @@
  
  static std::unique_ptr<Platform> s_platform;
  
@@ -1339,12 +1493,13 @@ index 3bf40ea..8069673 100644
 +extern "C" int ps4_uniform_merge_mode;  // VideoBackends/OGL/OGLGfx.cpp
 +extern "C" int ps4_audio_thread_core;   // AudioCommon/PS4AudioStream.cpp
 +extern "C" unsigned ps4_uniform_ring_count;  // VideoBackends/OGL/ProgramShaderCache.cpp
++extern "C" int ps4_pagetable_deferred;           // Core/PowerPC/MMU.cpp
 +#endif
 +
  static void signal_handler(int)
  {
    constexpr char message[] = "A signal was received. A second signal will force Dolphin to stop.\n";
-@@ -173,6 +192,10 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
+@@ -173,6 +193,10 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
    if (platform_name == "macos" || platform_name.empty())
      return Platform::CreateMacOSPlatform();
  #endif
@@ -1355,7 +1510,7 @@ index 3bf40ea..8069673 100644
  
    if (platform_name == "headless" || platform_name.empty())
      return Platform::CreateHeadlessPlatform();
-@@ -184,8 +207,17 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
+@@ -184,8 +208,17 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
  #define main app_main
  #endif
  
@@ -1374,7 +1529,7 @@ index 3bf40ea..8069673 100644
    const auto parser =
        CommandLineParse::CreateParser(CommandLineParse::ParserOptions::OmitGUIOptions);
    parser->add_option("-p", "--platform")
-@@ -207,6 +239,10 @@ int main(const int argc, char* argv[])
+@@ -207,6 +240,10 @@ int main(const int argc, char* argv[])
  #ifdef __APPLE__
                  ,
                  "macos"
@@ -1385,7 +1540,7 @@ index 3bf40ea..8069673 100644
  #endif
        });
  
-@@ -270,7 +306,116 @@ int main(const int argc, char* argv[])
+@@ -270,7 +307,120 @@ int main(const int argc, char* argv[])
  
    UICommon::SetUserDirectory(user_directory);
    UICommon::Init();
@@ -1449,8 +1604,12 @@ index 3bf40ea..8069673 100644
 +    // pagetable_fastmem=on: Dolphin's fast host mappings for games that use the page table.
 +    // Off on PS4: every tlbie then rescans the page table and remaps host memory with kernel
 +    // calls, which took a quarter of the CPU thread in Ultimate Spider-Man.
-+    Config::SetBase(Config::MAIN_PAGE_TABLE_FASTMEM,
-+                    Platform::GetPS4Option("pagetable_fastmem", "off") == "on");
++    // deferred: fast mappings, rescanned once per sync instead of per tlbie.
++    {
++      const std::string mode = Platform::GetPS4Option("pagetable_fastmem", "off");
++      Config::SetBase(Config::MAIN_PAGE_TABLE_FASTMEM, mode == "on" || mode == "deferred");
++      ps4_pagetable_deferred = mode == "deferred";
++    }
 +    // audio_buffer=<ms>: how much sound the mixer keeps queued. When emulation runs below full
 +    // speed it stretches the sound to fill the gaps; a larger buffer makes that smoother (Dolphin's
 +    // default is 80 ms).
@@ -1502,7 +1661,7 @@ index 3bf40ea..8069673 100644
  
    Common::ScopeGuard ui_common_guard([] {
      UICommon::ShutdownControllers();
-@@ -284,6 +429,12 @@ int main(const int argc, char* argv[])
+@@ -284,6 +434,12 @@ int main(const int argc, char* argv[])
    }
  
    auto core_state_changed_hook = Core::AddOnStateChangedCallback([](const Core::State state) {
@@ -1515,7 +1674,7 @@ index 3bf40ea..8069673 100644
      if (state == Core::State::Uninitialized)
        s_platform->Stop();
    });
-@@ -303,6 +454,9 @@ int main(const int argc, char* argv[])
+@@ -303,6 +459,9 @@ int main(const int argc, char* argv[])
  
    DolphinAnalytics::Instance().ReportDolphinStart("nogui");
  
@@ -1556,7 +1715,7 @@ index f4dc8a9..4e5ff67 100644
  
 diff --git a/Source/Core/DolphinNoGUI/PlatformPS4.cpp b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
 new file mode 100644
-index 0000000..8979ad9
+index 0000000..121da7e
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
 @@ -0,0 +1,410 @@
@@ -1687,7 +1846,7 @@ index 0000000..8979ad9
 +  static const char* const names[PS4_PROF_CATEGORY_COUNT] = {
 +      "flush", "vtx-upload", "uniforms", "draw", "pipeline", "tex-cache",
 +      "tex-upload", "compile", "link", "efb-copy", "efb-peek", "present",
-+      "gpu-fifo", "cpu-wait"};
++      "gpu-fifo", "cpu-wait", "tlbie", "pagetable"};
 +  static unsigned long long s_ticks[PS4_PROF_CATEGORY_COUNT], s_count[PS4_PROF_CATEGORY_COUNT];
 +  static unsigned long long s_tsc = 0;
 +  static auto s_time = std::chrono::steady_clock::now();
@@ -4178,10 +4337,10 @@ index 6277598..f1455dc 100644
      y = EFB_HEIGHT - 1 - y;
 diff --git a/Source/Core/VideoCommon/PS4Profile.h b/Source/Core/VideoCommon/PS4Profile.h
 new file mode 100644
-index 0000000..febfe0f
+index 0000000..b776668
 --- /dev/null
 +++ b/Source/Core/VideoCommon/PS4Profile.h
-@@ -0,0 +1,54 @@
+@@ -0,0 +1,56 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -4211,6 +4370,8 @@ index 0000000..febfe0f
 +  PS4_PROF_PRESENT,         // swap
 +  PS4_PROF_GPU_FIFO,        // video thread processing GX commands (includes the draws above)
 +  PS4_PROF_CPU_WAIT,        // emulated CPU thread waiting for the video thread (Sync GPU)
++  PS4_PROF_TLBIE,           // tlbie instructions (count only)
++  PS4_PROF_PAGETABLE,       // page table rescans for fastmem mappings (MMU::PageTableUpdated)
 +  PS4_PROF_CATEGORY_COUNT
 +};
 +
