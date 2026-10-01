@@ -94,10 +94,10 @@ index 04ad967..fe170aa 100644
    if(OPENSLES_FOUND)
 diff --git a/Source/Core/AudioCommon/PS4AudioStream.cpp b/Source/Core/AudioCommon/PS4AudioStream.cpp
 new file mode 100644
-index 0000000..078015a
+index 0000000..f71b74c
 --- /dev/null
 +++ b/Source/Core/AudioCommon/PS4AudioStream.cpp
-@@ -0,0 +1,77 @@
+@@ -0,0 +1,83 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -107,6 +107,9 @@ index 0000000..078015a
 +
 +#include "Common/Logging/Log.h"
 +#include "Common/Thread.h"
++
++extern "C" int ps4_audio_thread_core;
++int ps4_audio_thread_core = 4;
 +
 +namespace
 +{
@@ -163,6 +166,9 @@ index 0000000..078015a
 +void PS4AudioStream::OutputLoop()
 +{
 +  Common::SetCurrentThreadName("Audio thread - PS4");
++  // The emulation threads keep their cores busy: give the audio thread a core of its own and a
++  // higher priority so it never misses the hardware's deadline (ps4.ini audio_thread_core).
++  Common::PS4SetCurrentThreadCoreAndPriority(ps4_audio_thread_core, 400);
 +  size_t current = 0;
 +  while (m_running)
 +  {
@@ -177,10 +183,10 @@ index 0000000..078015a
 +}
 diff --git a/Source/Core/AudioCommon/PS4AudioStream.h b/Source/Core/AudioCommon/PS4AudioStream.h
 new file mode 100644
-index 0000000..799b0c2
+index 0000000..c4a90ff
 --- /dev/null
 +++ b/Source/Core/AudioCommon/PS4AudioStream.h
-@@ -0,0 +1,34 @@
+@@ -0,0 +1,36 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -205,7 +211,9 @@ index 0000000..799b0c2
 +  static bool IsValid() { return true; }
 +
 +private:
-+  static constexpr u32 FRAMES_PER_BUFFER = 256;  // sceAudioOut granularity
++  // sceAudioOut takes 256..2048 frames per call; 512 (10.7 ms at 48 kHz) leaves the audio
++  // thread more slack when the emulation threads keep the CPU busy.
++  static constexpr u32 FRAMES_PER_BUFFER = 512;
 +
 +  void OutputLoop();
 +
@@ -1292,7 +1300,7 @@ index 51c3fff..0b31728 100644
 +  ps4_add_eboot(dolphin-nogui)
 +endif()
 diff --git a/Source/Core/DolphinNoGUI/MainNoGUI.cpp b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
-index 3bf40ea..3854ec0 100644
+index 3bf40ea..58a6bb0 100644
 --- a/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 +++ b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 @@ -6,6 +6,7 @@
@@ -1317,7 +1325,7 @@ index 3bf40ea..3854ec0 100644
  #include "Core/Boot/Boot.h"
  #include "Core/BootManager.h"
  #include "Core/Core.h"
-@@ -31,6 +38,16 @@
+@@ -31,6 +38,17 @@
  
  static std::unique_ptr<Platform> s_platform;
  
@@ -1329,12 +1337,13 @@ index 3bf40ea..3854ec0 100644
 +extern "C" int ps4_cpu_thread_core, ps4_gpu_thread_core, ps4_thread_priority;  // Core/Core.cpp
 +extern "C" void ps4_sampler_start();  // DolphinPS4 port/ps4_sampler.cpp
 +extern "C" int ps4_uniform_merge_mode;  // VideoBackends/OGL/OGLGfx.cpp
++extern "C" int ps4_audio_thread_core;   // AudioCommon/PS4AudioStream.cpp
 +#endif
 +
  static void signal_handler(int)
  {
    constexpr char message[] = "A signal was received. A second signal will force Dolphin to stop.\n";
-@@ -173,6 +190,10 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
+@@ -173,6 +191,10 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
    if (platform_name == "macos" || platform_name.empty())
      return Platform::CreateMacOSPlatform();
  #endif
@@ -1345,7 +1354,7 @@ index 3bf40ea..3854ec0 100644
  
    if (platform_name == "headless" || platform_name.empty())
      return Platform::CreateHeadlessPlatform();
-@@ -184,8 +205,17 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
+@@ -184,8 +206,17 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
  #define main app_main
  #endif
  
@@ -1364,7 +1373,7 @@ index 3bf40ea..3854ec0 100644
    const auto parser =
        CommandLineParse::CreateParser(CommandLineParse::ParserOptions::OmitGUIOptions);
    parser->add_option("-p", "--platform")
-@@ -207,6 +237,10 @@ int main(const int argc, char* argv[])
+@@ -207,6 +238,10 @@ int main(const int argc, char* argv[])
  #ifdef __APPLE__
                  ,
                  "macos"
@@ -1375,7 +1384,7 @@ index 3bf40ea..3854ec0 100644
  #endif
        });
  
-@@ -270,7 +304,111 @@ int main(const int argc, char* argv[])
+@@ -270,7 +305,112 @@ int main(const int argc, char* argv[])
  
    UICommon::SetUserDirectory(user_directory);
    UICommon::Init();
@@ -1435,6 +1444,7 @@ index 3bf40ea..3854ec0 100644
 +    ps4_cpu_thread_core = std::atoi(Platform::GetPS4Option("cpu_thread_core", "2").c_str());
 +    ps4_gpu_thread_core = std::atoi(Platform::GetPS4Option("gpu_thread_core", "3").c_str());
 +    ps4_thread_priority = std::atoi(Platform::GetPS4Option("thread_priority", "0").c_str());
++    ps4_audio_thread_core = std::atoi(Platform::GetPS4Option("audio_thread_core", "4").c_str());
 +    // pagetable_fastmem=on: Dolphin's fast host mappings for games that use the page table.
 +    // Off on PS4: every tlbie then rescans the page table and remaps host memory with kernel
 +    // calls, which took a quarter of the CPU thread in Ultimate Spider-Man.
@@ -1487,7 +1497,7 @@ index 3bf40ea..3854ec0 100644
  
    Common::ScopeGuard ui_common_guard([] {
      UICommon::ShutdownControllers();
-@@ -284,6 +422,12 @@ int main(const int argc, char* argv[])
+@@ -284,6 +424,12 @@ int main(const int argc, char* argv[])
    }
  
    auto core_state_changed_hook = Core::AddOnStateChangedCallback([](const Core::State state) {
@@ -1500,7 +1510,7 @@ index 3bf40ea..3854ec0 100644
      if (state == Core::State::Uninitialized)
        s_platform->Stop();
    });
-@@ -303,6 +447,9 @@ int main(const int argc, char* argv[])
+@@ -303,6 +449,9 @@ int main(const int argc, char* argv[])
  
    DolphinAnalytics::Instance().ReportDolphinStart("nogui");
  
@@ -3608,7 +3618,7 @@ index 55a3ef1..67a093a 100644
  };
  
 diff --git a/Source/Core/VideoBackends/OGL/ProgramShaderCache.cpp b/Source/Core/VideoBackends/OGL/ProgramShaderCache.cpp
-index 1dfd026..0f042be 100644
+index 1dfd026..53064b5 100644
 --- a/Source/Core/VideoBackends/OGL/ProgramShaderCache.cpp
 +++ b/Source/Core/VideoBackends/OGL/ProgramShaderCache.cpp
 @@ -2,6 +2,7 @@
@@ -3671,7 +3681,7 @@ index 1dfd026..0f042be 100644
    for (int a = 0; a < 8; ++a)
    {
      // Still need to get sampler locations since we aren't binding them statically in the shaders
-@@ -221,12 +260,185 @@ u32 ProgramShaderCache::GetUniformBufferAlignment()
+@@ -221,12 +260,189 @@ u32 ProgramShaderCache::GetUniformBufferAlignment()
    return s_ubo_align;
  }
  
@@ -3749,13 +3759,17 @@ index 1dfd026..0f042be 100644
 +    // fences above already guarantee the GPU is done with this buffer. But gameplay scenes then
 +    // render with missing and stray geometry, with or without GL_MAP_INVALIDATE_RANGE_BIT (Piglet
 +    // seems to keep its own copy of uniform data), so it is opt-in: ps4.ini uniform_upload=map.
++    // Same flags and explicit flush as the vertex stream (MapAndSync), which renders correctly:
++    // without the explicit flush the GPU read stale constants (CPU writes not yet visible).
 +    void* mapped = nullptr;
 +    if (ps4_uniform_upload_map)
 +      mapped = glMapBufferRange(GL_UNIFORM_BUFFER, 0, size,
-+                                GL_MAP_WRITE_BIT | GL_MAP_UNSYNCHRONIZED_BIT);
++                                GL_MAP_WRITE_BIT | GL_MAP_FLUSH_EXPLICIT_BIT |
++                                    GL_MAP_UNSYNCHRONIZED_BIT);
 +    if (mapped)
 +    {
 +      std::memcpy(mapped, data, size);
++      glFlushMappedBufferRange(GL_UNIFORM_BUFFER, 0, size);
 +      glUnmapBuffer(GL_UNIFORM_BUFFER);
 +    }
 +    else
@@ -3857,7 +3871,7 @@ index 1dfd026..0f042be 100644
    if (pixel_shader_manager.dirty || vertex_shader_manager.dirty || geometry_shader_manager.dirty ||
        pixel_shader_manager.custom_constants_dirty)
    {
-@@ -280,6 +492,13 @@ void ProgramShaderCache::UploadConstants()
+@@ -280,6 +496,13 @@ void ProgramShaderCache::UploadConstants()
  
  void ProgramShaderCache::UploadConstants(const void* data, u32 data_size)
  {
@@ -3871,7 +3885,7 @@ index 1dfd026..0f042be 100644
    // allocate and copy
    const u32 alloc_size = Common::AlignUp(data_size, s_ubo_align);
    auto buffer = s_buffer->Map(alloc_size, s_ubo_align);
-@@ -328,8 +547,32 @@ bool ProgramShaderCache::CompileComputeShader(SHADER& shader, std::string_view c
+@@ -328,8 +551,32 @@ bool ProgramShaderCache::CompileComputeShader(SHADER& shader, std::string_view c
  
  GLuint ProgramShaderCache::CompileSingleShader(GLenum type, std::string_view code)
  {
@@ -3904,7 +3918,7 @@ index 1dfd026..0f042be 100644
    constexpr GLsizei num_strings = 2;
    const std::array<const char*, num_strings> src{
        s_glsl_header.data(),
-@@ -343,6 +586,27 @@ GLuint ProgramShaderCache::CompileSingleShader(GLenum type, std::string_view cod
+@@ -343,6 +590,27 @@ GLuint ProgramShaderCache::CompileSingleShader(GLenum type, std::string_view cod
    glShaderSource(result, num_strings, src.data(), src_sizes.data());
    glCompileShader(result);
  
@@ -3932,7 +3946,7 @@ index 1dfd026..0f042be 100644
    if (!CheckShaderCompileResult(result, type, code))
    {
      // Don't try to use this shader
-@@ -620,7 +884,10 @@ PipelineProgram* ProgramShaderCache::GetPipelineProgram(const GLVertexFormat* ve
+@@ -620,7 +888,10 @@ PipelineProgram* ProgramShaderCache::GetPipelineProgram(const GLVertexFormat* ve
  
      // Link program.
      prog->shader.SetProgramBindings(false);
@@ -3944,7 +3958,7 @@ index 1dfd026..0f042be 100644
  
      // Restore VAO binding after linking.
      if (!s_is_shared_context && vao != s_last_VAO)
-@@ -849,6 +1116,10 @@ void ProgramShaderCache::CreateHeader()
+@@ -849,6 +1120,10 @@ void ProgramShaderCache::CreateHeader()
        "#define int4 ivec4\n"
        "#define frac fract\n"
        "#define lerp mix\n"
