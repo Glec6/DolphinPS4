@@ -19,6 +19,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/mman.h>
 #include <sys/types.h>
 
 // Declared by hand: the toolchain headers give these the wrong (or no) prototypes.
@@ -26,6 +27,7 @@ extern "C" {
 int32_t sceKernelDebugOutText(int32_t channel, const char* fmt, ...);
 int32_t sceKernelAvailableFlexibleMemorySize(size_t* size);
 int32_t sceKernelReserveVirtualRange(void** addr, size_t len, int32_t flags, size_t alignment);
+int32_t sceKernelMunmap(void* addr, size_t len);
 int32_t sceKernelMapNamedFlexibleMemory(void** addr, size_t len, int32_t prot, int32_t flags, const char* name);
 int32_t sceKernelMapNamedSystemFlexibleMemory(void** addr, size_t len, int32_t prot, int32_t flags,
                                               const char* name);
@@ -354,6 +356,40 @@ void* __wrap_memalign(size_t alignment, size_t size) {
 
 // posix_memalign and aligned_alloc in libc.a are built on __memalign.
 void* __wrap___memalign(size_t alignment, size_t size) { return __wrap_memalign(alignment, size); }
+
+// Large anonymous mmaps (--wrap=mmap): Dolphin's JIT code buffers, DSP ARAM, FIFO, ... would
+// otherwise come out of the regular flexible memory pool (255 MiB), which Piglet (OpenGL ES)
+// needs for all GPU memory - it ran out of it entirely. Take them from the system flexible pool
+// (like the heap) instead; fall back to a normal mmap if that fails (e.g. for executable memory).
+void* __real_mmap(void* addr, size_t len, int prot, int flags, int fd, off_t offset);
+void* __wrap_mmap(void* addr, size_t len, int prot, int flags, int fd, off_t offset) {
+    const bool anonymous = fd == -1 && (flags & MAP_ANON) && !(flags & MAP_FIXED);
+    if (anonymous && len >= MB) {
+        const size_t size = (len + PAGE - 1) & ~(PAGE - 1);
+        void* base = reserveAwayFromKernel(size);
+        if (base) {
+            const int32_t ret = sceKernelMapNamedSystemFlexibleMemory(&base, size, prot & 0x7, MAP_FIXED_FLAG,
+                                                                      "dolphin mmap");
+            if (ret == 0) {
+                heapLog("[dolphin] mmap: %zu KiB prot %d from system flexible memory at %p, caller elf 0x%llx\n",
+                        size / 1024, prot, base, elf(__builtin_return_address(0)));
+                return base;
+            }
+            heapLog("[dolphin] mmap: %zu KiB prot %d not possible from system flexible memory (0x%x)\n",
+                    size / 1024, prot, ret);
+            sceKernelMunmap(base, size);
+        }
+    }
+    void* result = __real_mmap(addr, len, prot, flags, fd, offset);
+    if (anonymous && len >= MB) {
+        size_t available = 0;
+        sceKernelAvailableFlexibleMemorySize(&available);
+        heapLog("[dolphin] mmap: %zu KiB prot %d from regular flexible memory = %p, caller elf 0x%llx, "
+                "%zu MiB flexible left\n",
+                len / 1024, prot, result, elf(__builtin_return_address(0)), available / MB);
+    }
+    return result;
+}
 
 // pthread_once for every caller (--wrap): the kernel's (FreeBSD) version treats pthread_once_t
 // as a 16-byte struct, but the OpenOrbis headers - and the prebuilt libc.a (newlocale,

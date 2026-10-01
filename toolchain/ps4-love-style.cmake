@@ -38,6 +38,8 @@ endforeach ()
 # The kernel's pthread_once writes 16 bytes into the headers' 4-byte pthread_once_t
 # (port/ps4_runtime.cpp has a replacement).
 string(APPEND CMAKE_EXE_LINKER_FLAGS " --wrap=pthread_once")
+# Large anonymous mmaps go to the system flexible pool, keeping regular flexible memory for Piglet.
+string(APPEND CMAKE_EXE_LINKER_FLAGS " --wrap=mmap")
 
 # Program authority ID: the system Piglet (OpenGL ES) only gives a display to processes with a
 # system authority ID. This is RetroArch for PS4's value, as used by love-ps4.
