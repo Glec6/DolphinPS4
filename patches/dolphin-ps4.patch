@@ -1292,7 +1292,7 @@ index 51c3fff..0b31728 100644
 +  ps4_add_eboot(dolphin-nogui)
 +endif()
 diff --git a/Source/Core/DolphinNoGUI/MainNoGUI.cpp b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
-index 3bf40ea..5d6933a 100644
+index 3bf40ea..3854ec0 100644
 --- a/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 +++ b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 @@ -6,6 +6,7 @@
@@ -1375,7 +1375,7 @@ index 3bf40ea..5d6933a 100644
  #endif
        });
  
-@@ -270,7 +304,106 @@ int main(const int argc, char* argv[])
+@@ -270,7 +304,111 @@ int main(const int argc, char* argv[])
  
    UICommon::SetUserDirectory(user_directory);
    UICommon::Init();
@@ -1440,6 +1440,11 @@ index 3bf40ea..5d6933a 100644
 +    // calls, which took a quarter of the CPU thread in Ultimate Spider-Man.
 +    Config::SetBase(Config::MAIN_PAGE_TABLE_FASTMEM,
 +                    Platform::GetPS4Option("pagetable_fastmem", "off") == "on");
++    // audio_buffer=<ms>: how much sound the mixer keeps queued. When emulation runs below full
++    // speed it stretches the sound to fill the gaps; a larger buffer makes that smoother (Dolphin's
++    // default is 80 ms).
++    Config::SetBase(Config::MAIN_AUDIO_BUFFER_SIZE,
++                    std::atoi(Platform::GetPS4Option("audio_buffer", "150").c_str()));
 +    // accurate_fmadds=off: cheaper single-precision multiply-adds in the JIT (Dolphin's
 +    // AccurateFmadds setting; rarely matters for games).
 +    Config::SetBase(Config::MAIN_ACCURATE_FMADDS,
@@ -1482,7 +1487,7 @@ index 3bf40ea..5d6933a 100644
  
    Common::ScopeGuard ui_common_guard([] {
      UICommon::ShutdownControllers();
-@@ -284,6 +417,12 @@ int main(const int argc, char* argv[])
+@@ -284,6 +422,12 @@ int main(const int argc, char* argv[])
    }
  
    auto core_state_changed_hook = Core::AddOnStateChangedCallback([](const Core::State state) {
@@ -1495,7 +1500,7 @@ index 3bf40ea..5d6933a 100644
      if (state == Core::State::Uninitialized)
        s_platform->Stop();
    });
-@@ -303,6 +442,9 @@ int main(const int argc, char* argv[])
+@@ -303,6 +447,9 @@ int main(const int argc, char* argv[])
  
    DolphinAnalytics::Instance().ReportDolphinStart("nogui");
  
