@@ -1892,7 +1892,7 @@ index 1dfd026..ae96ff5 100644
    const std::array<const char*, num_strings> src{
        s_glsl_header.data(),
 diff --git a/Source/Core/VideoCommon/PostProcessing.cpp b/Source/Core/VideoCommon/PostProcessing.cpp
-index 92f7c1f..d077381 100644
+index 92f7c1f..3378a49 100644
 --- a/Source/Core/VideoCommon/PostProcessing.cpp
 +++ b/Source/Core/VideoCommon/PostProcessing.cpp
 @@ -703,7 +703,7 @@ std::string PostProcessing::GetHeader(bool user_post_process) const
@@ -1904,3 +1904,18 @@ index 92f7c1f..d077381 100644
  float4 SampleLayer(int layer) { return texture(samp0, float3(v_tex0.xy, float(layer))); }
  #define SampleOffset(offset) textureOffset(samp0, v_tex0, offset)
  
+@@ -966,7 +966,14 @@ bool PostProcessing::CompilePixelShader()
+   // Generate GLSL and compile the new shaders:
+ 
+   std::string default_pixel_shader_code;
++#ifdef __ORBIS__
++  // PS4: Piglet's shader compiler runs out of internal memory and crashes on this large shader
++  // (all the output resampling filters). It's optional: without it there is no resampling or
++  // color correction on output.
++  if (false)
++#else
+   if (LoadShaderFromFile(s_default_pixel_shader_name, "", default_pixel_shader_code))
++#endif
+   {
+     m_default_pixel_shader = g_gfx->CreateShaderFromSource(
+         ShaderStage::Pixel, GetHeader(false) + default_pixel_shader_code + GetFooter(), nullptr,
