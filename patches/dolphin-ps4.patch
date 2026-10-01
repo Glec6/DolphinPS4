@@ -3479,10 +3479,10 @@ index a76008f..f801e82 100644
  
  inline OGLGfx* GetOGLGfx()
 diff --git a/Source/Core/VideoBackends/OGL/OGLNativeVertexFormat.cpp b/Source/Core/VideoBackends/OGL/OGLNativeVertexFormat.cpp
-index 921ef61..bad85c2 100644
+index 921ef61..60cb807 100644
 --- a/Source/Core/VideoBackends/OGL/OGLNativeVertexFormat.cpp
 +++ b/Source/Core/VideoBackends/OGL/OGLNativeVertexFormat.cpp
-@@ -32,7 +32,8 @@ static inline GLuint VarToGL(ComponentFormat t)
+@@ -32,20 +32,60 @@ static inline GLuint VarToGL(ComponentFormat t)
    return lookup[t];
  }
  
@@ -3492,8 +3492,17 @@ index 921ef61..bad85c2 100644
  {
    if (!format.enable)
      return;
-@@ -40,12 +41,42 @@ static void SetPointer(ShaderAttrib attrib, u32 stride, const AttributeFormat& f
+ 
    glEnableVertexAttribArray(static_cast<GLuint>(attrib));
++#ifdef __ORBIS__
++  // Integer attributes (the position matrix index) as unnormalized floats, see VertexShaderGen.
++  if (format.integer)
++  {
++    glVertexAttribPointer(static_cast<GLuint>(attrib), format.components, VarToGL(format.type),
++                          GL_FALSE, stride, (u8*)nullptr + base_offset + format.offset);
++    return;
++  }
++#endif
    if (format.integer)
      glVertexAttribIPointer(static_cast<GLuint>(attrib), format.components, VarToGL(format.type),
 -                           stride, (u8*)nullptr + format.offset);
@@ -3537,7 +3546,7 @@ index 921ef61..bad85c2 100644
  GLVertexFormat::GLVertexFormat(const PortableVertexDeclaration& vtx_decl)
      : NativeVertexFormat(vtx_decl)
  {
-@@ -64,18 +95,7 @@ GLVertexFormat::GLVertexFormat(const PortableVertexDeclaration& vtx_decl)
+@@ -64,18 +104,7 @@ GLVertexFormat::GLVertexFormat(const PortableVertexDeclaration& vtx_decl)
    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, vm->GetIndexBufferHandle());
    glBindBuffer(GL_ARRAY_BUFFER, vm->GetVertexBufferHandle());
  
@@ -4897,3 +4906,24 @@ index 715dbee..02c7e86 100644
    CPUCull m_cpu_cull;
  
  private:
+diff --git a/Source/Core/VideoCommon/VertexShaderGen.cpp b/Source/Core/VideoCommon/VertexShaderGen.cpp
+index ac09506..66b49bf 100644
+--- a/Source/Core/VideoCommon/VertexShaderGen.cpp
++++ b/Source/Core/VideoCommon/VertexShaderGen.cpp
+@@ -414,7 +414,16 @@ ShaderCode GenerateVertexShaderCode(APIType api_type, const ShaderHostConfig& ho
+   {
+     out.Write("ATTRIBUTE_LOCATION({:s}) in float4 rawpos;\n", ShaderAttrib::Position);
+     if ((uid_data->components & VB_HAS_POSMTXIDX) != 0)
++    {
++#ifdef __ORBIS__
++      // PS4 Piglet: integer vertex attributes (glVertexAttribIPointer) come out wrong, which put
++      // every model using per-vertex matrices off screen (black screen in Sonic Adventure DX).
++      // The index is only read as int(posmtx.r): fetch it as a float (OGLNativeVertexFormat).
++      out.Write("ATTRIBUTE_LOCATION({:s}) in float4 posmtx;\n", ShaderAttrib::PositionMatrix);
++#else
+       out.Write("ATTRIBUTE_LOCATION({:s}) in uint4 posmtx;\n", ShaderAttrib::PositionMatrix);
++#endif
++    }
+     if ((uid_data->components & VB_HAS_NORMAL) != 0)
+       out.Write("ATTRIBUTE_LOCATION({:s}) in float3 rawnormal;\n", ShaderAttrib::Normal);
+     if ((uid_data->components & VB_HAS_TANGENT) != 0)
