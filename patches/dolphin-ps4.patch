@@ -2034,6 +2034,23 @@ index 92f7c1f..3378a49 100644
    {
      m_default_pixel_shader = g_gfx->CreateShaderFromSource(
          ShaderStage::Pixel, GetHeader(false) + default_pixel_shader_code + GetFooter(), nullptr,
+diff --git a/Source/Core/VideoCommon/Present.cpp b/Source/Core/VideoCommon/Present.cpp
+index 41d05f3..8ffedab 100644
+--- a/Source/Core/VideoCommon/Present.cpp
++++ b/Source/Core/VideoCommon/Present.cpp
+@@ -124,9 +124,12 @@ bool Presenter::Initialize()
+     if (!m_post_processor->Initialize(m_backbuffer_format))
+       return false;
+ 
++#ifndef __ORBIS__
++    // PS4: no on-screen UI (ImGui OSD/statistics); the game's image only.
+     m_onscreen_ui = std::make_unique<OnScreenUI>();
+     if (!m_onscreen_ui->Initialize(m_backbuffer_width, m_backbuffer_height, m_backbuffer_scale))
+       return false;
++#endif
+ 
+     // Draw a blank frame (and complete OnScreenUI initialization)
+     g_gfx->BindBackbuffer({{0.0f, 0.0f, 0.0f, 1.0f}});
 diff --git a/Source/Core/VideoCommon/VertexManagerBase.h b/Source/Core/VideoCommon/VertexManagerBase.h
 index 715dbee..a434471 100644
 --- a/Source/Core/VideoCommon/VertexManagerBase.h
