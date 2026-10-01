@@ -2047,10 +2047,14 @@ index 0000000..8b666df
 +}
 +}  // namespace GCAdapter
 diff --git a/Source/Core/VideoBackends/OGL/OGLGfx.cpp b/Source/Core/VideoBackends/OGL/OGLGfx.cpp
-index ff5402b..f56b925 100644
+index ff5402b..0c336f3 100644
 --- a/Source/Core/VideoBackends/OGL/OGLGfx.cpp
 +++ b/Source/Core/VideoBackends/OGL/OGLGfx.cpp
-@@ -15,14 +15,22 @@
+@@ -12,17 +12,27 @@
+ #include "VideoBackends/OGL/OGLPipeline.h"
+ #include "VideoBackends/OGL/OGLShader.h"
+ #include "VideoBackends/OGL/OGLTexture.h"
++#include "VideoBackends/OGL/OGLVertexManager.h"
  #include "VideoBackends/OGL/ProgramShaderCache.h"
  #include "VideoBackends/OGL/SamplerCache.h"
  
@@ -2064,6 +2068,7 @@ index ff5402b..f56b925 100644
  
  #include <algorithm>
 +#include <cstdio>
++#include <cstring>
  #include <string_view>
  
 +#ifdef __ORBIS__
@@ -2073,7 +2078,7 @@ index ff5402b..f56b925 100644
  namespace OGL
  {
  VideoConfig g_ogl_config;
-@@ -277,8 +285,109 @@ void OGLGfx::Draw(u32 base_vertex, u32 num_vertices)
+@@ -277,8 +287,188 @@ void OGLGfx::Draw(u32 base_vertex, u32 num_vertices)
                 num_vertices);
  }
  
@@ -2128,6 +2133,83 @@ index ff5402b..f56b925 100644
 +           c.pixelcentercorrection[3], c.viewport[0], c.viewport[1]);
 +  ps4_boot_trace(line);
 +}
++
++// Port diagnostics: what the draw reads its vertices from, as Piglet sees it.
++static void PS4LogVertexInput(int draw, u32 base_index, u32 num_indices)
++{
++  const auto* vm = static_cast<const OGL::VertexManager*>(g_vertex_manager.get());
++  GLint vao = 0, element = 0, array = 0, program = 0;
++  glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &vao);
++  glGetIntegerv(GL_ELEMENT_ARRAY_BUFFER_BINDING, &element);
++  glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &array);
++  glGetIntegerv(GL_CURRENT_PROGRAM, &program);
++
++  char line[400];
++  int len = snprintf(line, sizeof(line),
++                     "draw #%d: vao %d, element buffer %d (stream %u), array buffer %d (stream %u),"
++                     " attribs rawpos %d posmtx %d rawnormal %d rawcolor0 %d rawtex0 %d",
++                     draw, vao, element, vm->GetIndexBufferHandle(), array,
++                     vm->GetVertexBufferHandle(), glGetAttribLocation(program, "rawpos"),
++                     glGetAttribLocation(program, "posmtx"),
++                     glGetAttribLocation(program, "rawnormal"),
++                     glGetAttribLocation(program, "rawcolor0"),
++                     glGetAttribLocation(program, "rawtex0"));
++  ps4_boot_trace(line);
++
++  len = snprintf(line, sizeof(line), "draw #%d: enabled attribs:", draw);
++  for (GLuint i = 0; i < 16 && len < 340; i++)
++  {
++    GLint enabled = 0, size = 0, type = 0, normalized = 0, integer = 0, stride = 0, buffer = 0;
++    glGetVertexAttribiv(i, GL_VERTEX_ATTRIB_ARRAY_ENABLED, &enabled);
++    if (!enabled)
++      continue;
++    glGetVertexAttribiv(i, GL_VERTEX_ATTRIB_ARRAY_SIZE, &size);
++    glGetVertexAttribiv(i, GL_VERTEX_ATTRIB_ARRAY_TYPE, &type);
++    glGetVertexAttribiv(i, GL_VERTEX_ATTRIB_ARRAY_NORMALIZED, &normalized);
++    glGetVertexAttribiv(i, GL_VERTEX_ATTRIB_ARRAY_INTEGER, &integer);
++    glGetVertexAttribiv(i, GL_VERTEX_ATTRIB_ARRAY_STRIDE, &stride);
++    glGetVertexAttribiv(i, GL_VERTEX_ATTRIB_ARRAY_BUFFER_BINDING, &buffer);
++    void* pointer = nullptr;
++    glGetVertexAttribPointerv(i, GL_VERTEX_ATTRIB_ARRAY_POINTER, &pointer);
++    len += snprintf(line + len, sizeof(line) - len, " [%u: %dx0x%x%s%s stride %d +%zu buf %d]",
++                    i, size, type, normalized ? " norm" : "", integer ? " int" : "", stride,
++                    reinterpret_cast<size_t>(pointer), buffer);
++  }
++  ps4_boot_trace(line);
++
++  // What the GPU-side buffers actually hold.
++  if (element)
++  {
++    const u32 count = std::min(num_indices, 6u);
++    const auto* indices = static_cast<const u16*>(glMapBufferRange(
++        GL_ELEMENT_ARRAY_BUFFER, base_index * sizeof(u16), count * sizeof(u16), GL_MAP_READ_BIT));
++    len = snprintf(line, sizeof(line), "draw #%d: indices from %u:", draw, base_index);
++    for (u32 i = 0; indices && i < count; i++)
++      len += snprintf(line + len, sizeof(line) - len, " %u", indices[i]);
++    if (indices)
++      glUnmapBuffer(GL_ELEMENT_ARRAY_BUFFER);
++    else
++      len += snprintf(line + len, sizeof(line) - len, " (map failed, GL error 0x%x)", glGetError());
++    ps4_boot_trace(line);
++  }
++  if (array)
++  {
++    const auto* words = static_cast<const u32*>(
++        glMapBufferRange(GL_ARRAY_BUFFER, 0, 12 * sizeof(u32), GL_MAP_READ_BIT));
++    len = snprintf(line, sizeof(line), "draw #%d: vertex bytes:", draw);
++    for (u32 i = 0; words && i < 12; i++)
++    {
++      float f;
++      std::memcpy(&f, &words[i], sizeof(f));
++      len += snprintf(line + len, sizeof(line) - len, " %08x(%g)", words[i], f);
++    }
++    if (words)
++      glUnmapBuffer(GL_ARRAY_BUFFER);
++    else
++      len += snprintf(line + len, sizeof(line) - len, " (map failed, GL error 0x%x)", glGetError());
++    ps4_boot_trace(line);
++  }
++}
 +#endif
 +
  void OGLGfx::DrawIndexed(u32 base_index, u32 num_indices, u32 base_vertex)
@@ -2170,6 +2252,8 @@ index ff5402b..f56b925 100644
 +    }
 +    glDeleteQueries(1, &query);
 +    PS4LogDrawState(s_draw_number, primitive, num_indices, samples, samples_unrestricted);
++    if (s_sampled_draws <= 6)
++      PS4LogVertexInput(s_draw_number, base_index, num_indices);
 +    const GLenum error = glGetError();
 +    if (error != GL_NO_ERROR)
 +    {
@@ -2183,7 +2267,7 @@ index ff5402b..f56b925 100644
    if (g_ogl_config.bSupportsGLBaseVertex)
    {
      glDrawElementsBaseVertex(static_cast<const OGLPipeline*>(m_current_pipeline)->GetGLPrimitive(),
-@@ -290,6 +399,28 @@ void OGLGfx::DrawIndexed(u32 base_index, u32 num_indices, u32 base_vertex)
+@@ -290,6 +480,28 @@ void OGLGfx::DrawIndexed(u32 base_index, u32 num_indices, u32 base_vertex)
      glDrawElements(static_cast<const OGLPipeline*>(m_current_pipeline)->GetGLPrimitive(),
                     num_indices, GL_UNSIGNED_SHORT, static_cast<u16*>(nullptr) + base_index);
    }
@@ -2212,7 +2296,7 @@ index ff5402b..f56b925 100644
  }
  
  void OGLGfx::DispatchComputeShader(const AbstractShader* shader, u32 groupsize_x, u32 groupsize_y,
-@@ -733,3 +864,65 @@ SurfaceInfo OGLGfx::GetSurfaceInfo() const
+@@ -733,3 +945,65 @@ SurfaceInfo OGLGfx::GetSurfaceInfo() const
  }
  
  }  // namespace OGL
@@ -2279,10 +2363,22 @@ index ff5402b..f56b925 100644
 +}
 +#endif
 diff --git a/Source/Core/VideoBackends/OGL/OGLStreamBuffer.cpp b/Source/Core/VideoBackends/OGL/OGLStreamBuffer.cpp
-index 2eec584..69146a2 100644
+index 2eec584..c86c93a 100644
 --- a/Source/Core/VideoBackends/OGL/OGLStreamBuffer.cpp
 +++ b/Source/Core/VideoBackends/OGL/OGLStreamBuffer.cpp
-@@ -349,6 +349,12 @@ std::unique_ptr<StreamBuffer> StreamBuffer::Create(u32 type, u32 size)
+@@ -337,6 +337,11 @@ public:
+   std::pair<u8*, u32> Map(u32 size) override { return std::make_pair(m_pointer, 0); }
+   void Unmap(u32 used_size) override
+   {
++#ifdef __ORBIS__
++    // Don't rely on the target still holding this buffer: on Piglet nothing else keeps the
++    // generic bindings pointing at the stream buffers.
++    glBindBuffer(m_buffertype, m_buffer);
++#endif
+     glBufferData(m_buffertype, used_size, m_pointer, GL_STREAM_DRAW);
+   }
+ 
+@@ -349,6 +354,12 @@ std::unique_ptr<StreamBuffer> StreamBuffer::Create(u32 type, u32 size)
    // without basevertex support, only streaming methods whith uploads everything to zero works fine:
    if (!g_ogl_config.bSupportsGLBaseVertex)
    {
