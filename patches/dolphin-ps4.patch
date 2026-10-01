@@ -1858,7 +1858,7 @@ index 0000000..8b666df
 +}
 +}  // namespace GCAdapter
 diff --git a/Source/Core/VideoBackends/OGL/ProgramShaderCache.cpp b/Source/Core/VideoBackends/OGL/ProgramShaderCache.cpp
-index 1dfd026..ae96ff5 100644
+index 1dfd026..77b2e6e 100644
 --- a/Source/Core/VideoBackends/OGL/ProgramShaderCache.cpp
 +++ b/Source/Core/VideoBackends/OGL/ProgramShaderCache.cpp
 @@ -330,6 +330,29 @@ GLuint ProgramShaderCache::CompileSingleShader(GLenum type, std::string_view cod
@@ -1891,6 +1891,40 @@ index 1dfd026..ae96ff5 100644
    constexpr GLsizei num_strings = 2;
    const std::array<const char*, num_strings> src{
        s_glsl_header.data(),
+@@ -849,6 +872,10 @@ void ProgramShaderCache::CreateHeader()
+       "#define int4 ivec4\n"
+       "#define frac fract\n"
+       "#define lerp mix\n"
++#ifdef __ORBIS__
++      // PS4 Piglet's compiler reserves 'mat' (not a GLSL ES keyword): rename the identifier.
++      "#define mat ps4_mat\n"
++#endif
+ 
+       ,
+       GetGLSLVersionString(), v < Glsl140 ? "#extension GL_ARB_uniform_buffer_object : enable" : "",
+diff --git a/Source/Core/VideoCommon/PixelShaderGen.cpp b/Source/Core/VideoCommon/PixelShaderGen.cpp
+index 5ce120e..cc96d4a 100644
+--- a/Source/Core/VideoCommon/PixelShaderGen.cpp
++++ b/Source/Core/VideoCommon/PixelShaderGen.cpp
+@@ -2048,12 +2048,12 @@ static void WriteFragmentDefinitions(APIType api_type, const ShaderHostConfig& h
+   }
+   out.Write("\n");
+ 
+-  out.Write("\tDolphinLightData[8] lights_chan0_color;\n");
+-  out.Write("\tDolphinLightData[8] lights_chan0_alpha;\n");
+-  out.Write("\tDolphinLightData[8] lights_chan1_color;\n");
+-  out.Write("\tDolphinLightData[8] lights_chan1_alpha;\n");
+-  out.Write("\tfloat4[2] ambient_lighting;\n");
+-  out.Write("\tfloat4[2] base_material;\n");
++  out.Write("\tDolphinLightData lights_chan0_color[8];\n");
++  out.Write("\tDolphinLightData lights_chan0_alpha[8];\n");
++  out.Write("\tDolphinLightData lights_chan1_color[8];\n");
++  out.Write("\tDolphinLightData lights_chan1_alpha[8];\n");
++  out.Write("\tfloat4 ambient_lighting[2];\n");
++  out.Write("\tfloat4 base_material[2];\n");
+   out.Write("\tuint light_chan0_color_count;\n");
+   out.Write("\tuint light_chan0_alpha_count;\n");
+   out.Write("\tuint light_chan1_color_count;\n");
 diff --git a/Source/Core/VideoCommon/PostProcessing.cpp b/Source/Core/VideoCommon/PostProcessing.cpp
 index 92f7c1f..3378a49 100644
 --- a/Source/Core/VideoCommon/PostProcessing.cpp
@@ -1919,3 +1953,27 @@ index 92f7c1f..3378a49 100644
    {
      m_default_pixel_shader = g_gfx->CreateShaderFromSource(
          ShaderStage::Pixel, GetHeader(false) + default_pixel_shader_code + GetFooter(), nullptr,
+diff --git a/Source/Core/VideoCommon/VertexManagerBase.h b/Source/Core/VideoCommon/VertexManagerBase.h
+index 715dbee..a434471 100644
+--- a/Source/Core/VideoCommon/VertexManagerBase.h
++++ b/Source/Core/VideoCommon/VertexManagerBase.h
+@@ -96,10 +96,19 @@ public:
+ 
+   // Streaming buffer sizes.
+   // Texel buffer will fit the maximum size of an encoded GX texture. 1024x1024, RGBA8 = 4MB.
++#ifdef __ORBIS__
++  // PS4 Piglet has little GPU memory (it couldn't allocate the sizes below): the smallest sizes
++  // that still fit one maximum-size draw.
++  static constexpr u32 VERTEX_STREAM_BUFFER_SIZE = MAXVBUFFERSIZE;
++  static constexpr u32 INDEX_STREAM_BUFFER_SIZE = 4 * 1024 * 1024;
++  static constexpr u32 UNIFORM_STREAM_BUFFER_SIZE = 8 * 1024 * 1024;
++  static constexpr u32 TEXEL_STREAM_BUFFER_SIZE = 4 * 1024 * 1024;
++#else
+   static constexpr u32 VERTEX_STREAM_BUFFER_SIZE = 48 * 1024 * 1024;
+   static constexpr u32 INDEX_STREAM_BUFFER_SIZE = 8 * 1024 * 1024;
+   static constexpr u32 UNIFORM_STREAM_BUFFER_SIZE = 64 * 1024 * 1024;
+   static constexpr u32 TEXEL_STREAM_BUFFER_SIZE = 16 * 1024 * 1024;
++#endif
+ 
+   VertexManagerBase();
+   virtual ~VertexManagerBase();
