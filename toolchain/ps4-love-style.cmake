@@ -4,9 +4,12 @@
 #   cmake -DCMAKE_TOOLCHAIN_FILE=/opt/pacbrew/ps4/openorbis/cmake/ps4.cmake ...
 #   include(<this file>)
 #
-# Provides ps4_add_eboot(<target>) and PS4_RUNTIME_SOURCES (heap + thread-exit fixes).
+# Provides ps4_add_eboot(<target>) and PS4_RUNTIME_SOURCES (heap + thread-exit fixes, crash log).
 
-set(PS4_RUNTIME_SOURCES ${CMAKE_CURRENT_LIST_DIR}/../port/ps4_runtime.cpp)
+set(PS4_RUNTIME_SOURCES
+    ${CMAKE_CURRENT_LIST_DIR}/../port/ps4_runtime.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/../port/ps4_dlmalloc.c
+    ${CMAKE_CURRENT_LIST_DIR}/../port/ps4_crashlog.cpp)
 
 # The toolchain's linker script only collects plain .init_array, so prioritized constructors
 # (.init_array.NNN - e.g. libc++'s iostream setup) end up in an orphan section the loader never

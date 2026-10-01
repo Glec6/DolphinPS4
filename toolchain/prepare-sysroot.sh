@@ -56,9 +56,42 @@ awk '
     { skipping = 0; print }
 ' "$OPENORBIS/include/time.h" > "$OVERLAY/time.h"
 
-# unistd.h: no override. The hardware probe showed sysconf() follows musl
-# numbering (sysconf(30) == 16384 page size), so the OpenOrbis header is right.
-rm -f "$OVERLAY/unistd.h"
+# unistd.h: sysconf() numbering depends on which library provides it. PSChrome links it from
+# a place that follows musl numbering; with love-ps4's link order (-lkernel first) it is the
+# kernel's and follows FreeBSD numbering: the DolphinPS4 probe measured sysconf(47) = 16384
+# (page size) and sysconf(58) = 8 (CPUs online), while the musl constants give -1 and 200112
+# (so std::thread::hardware_concurrency() returned 200112). Use FreeBSD values.
+cat > "$OVERLAY/unistd.h" <<'EOF'
+/* DolphinPS4: FreeBSD sysconf() names; sysconf is the PS4 kernel's (FreeBSD numbering). */
+#include_next <unistd.h>
+#ifndef _DOLPHINPS4_UNISTD_H
+#define _DOLPHINPS4_UNISTD_H
+#undef _SC_ARG_MAX
+#define _SC_ARG_MAX 1
+#undef _SC_CHILD_MAX
+#define _SC_CHILD_MAX 2
+#undef _SC_CLK_TCK
+#define _SC_CLK_TCK 3
+#undef _SC_NGROUPS_MAX
+#define _SC_NGROUPS_MAX 4
+#undef _SC_OPEN_MAX
+#define _SC_OPEN_MAX 5
+#undef _SC_PAGESIZE
+#define _SC_PAGESIZE 47
+#undef _SC_PAGE_SIZE
+#define _SC_PAGE_SIZE _SC_PAGESIZE
+#undef _SC_NPROCESSORS_CONF
+#define _SC_NPROCESSORS_CONF 57
+#undef _SC_NPROCESSORS_ONLN
+#define _SC_NPROCESSORS_ONLN 58
+#undef _SC_GETGR_R_SIZE_MAX
+#define _SC_GETGR_R_SIZE_MAX 70
+#undef _SC_GETPW_R_SIZE_MAX
+#define _SC_GETPW_R_SIZE_MAX 71
+#undef _SC_PHYS_PAGES
+#define _SC_PHYS_PAGES 121
+#endif
+EOF
 
 # sys/mman.h: FreeBSD flags. Linux-only flags (MAP_NORESERVE, MAP_POPULATE,
 # mremap, ...) are deliberately absent so portable code skips them.

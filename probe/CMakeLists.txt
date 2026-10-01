@@ -1,6 +1,6 @@
 # Configure with PacBrew's toolchain file (love-ps4 setup, see scripts/build-probe.sh).
 cmake_minimum_required(VERSION 3.13)
-project(dolphinps4_probe CXX)
+project(dolphinps4_probe C CXX)
 
 set(PROBE_CXX_STANDARD 20 CACHE STRING "C++ standard (23 needs the modern toolchain)")
 set(CMAKE_CXX_STANDARD ${PROBE_CXX_STANDARD})
