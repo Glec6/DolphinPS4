@@ -2047,10 +2047,19 @@ index 0000000..8b666df
 +}
 +}  // namespace GCAdapter
 diff --git a/Source/Core/VideoBackends/OGL/OGLGfx.cpp b/Source/Core/VideoBackends/OGL/OGLGfx.cpp
-index ff5402b..2b4c1ca 100644
+index ff5402b..f56b925 100644
 --- a/Source/Core/VideoBackends/OGL/OGLGfx.cpp
 +++ b/Source/Core/VideoBackends/OGL/OGLGfx.cpp
-@@ -21,8 +21,13 @@
+@@ -15,14 +15,22 @@
+ #include "VideoBackends/OGL/ProgramShaderCache.h"
+ #include "VideoBackends/OGL/SamplerCache.h"
+ 
++#include "Core/System.h"
++
+ #include "VideoCommon/AsyncShaderCompiler.h"
++#include "VideoCommon/VertexShaderManager.h"
+ #include "VideoCommon/DriverDetails.h"
+ #include "VideoCommon/Present.h"
  #include "VideoCommon/VideoConfig.h"
  
  #include <algorithm>
@@ -2064,7 +2073,117 @@ index ff5402b..2b4c1ca 100644
  namespace OGL
  {
  VideoConfig g_ogl_config;
-@@ -290,6 +295,28 @@ void OGLGfx::DrawIndexed(u32 base_index, u32 num_indices, u32 base_vertex)
+@@ -277,8 +285,109 @@ void OGLGfx::Draw(u32 base_vertex, u32 num_vertices)
+                num_vertices);
+ }
+ 
++#ifdef __ORBIS__
++// Port diagnostics: for a sample of game draws, count the pixels Piglet lets through and log the
++// state that decides it. If none pass, the draw is repeated with depth test, scissor and culling
++// off to see which of them is discarding everything.
++static int s_sampled_draws = 0;
++static bool PS4ShouldSampleDraw(int draw)
++{
++  return s_sampled_draws < 24 && (draw >= 300 && draw % 50 == 0);
++}
++
++static void PS4LogDrawState(int draw, GLenum primitive, u32 num_indices, GLuint samples,
++                            GLuint samples_unrestricted)
++{
++  GLint viewport[4] = {}, scissor[4] = {}, program = 0, fbo = 0, depth_func = 0;
++  GLboolean color_mask[4] = {}, depth_mask = 0;
++  GLfloat depth_range[2] = {};
++  glGetIntegerv(GL_VIEWPORT, viewport);
++  glGetIntegerv(GL_SCISSOR_BOX, scissor);
++  glGetIntegerv(GL_CURRENT_PROGRAM, &program);
++  glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &fbo);
++  glGetIntegerv(GL_DEPTH_FUNC, &depth_func);
++  glGetBooleanv(GL_COLOR_WRITEMASK, color_mask);
++  glGetBooleanv(GL_DEPTH_WRITEMASK, &depth_mask);
++  glGetFloatv(GL_DEPTH_RANGE, depth_range);
++
++  char line[400];
++  snprintf(line, sizeof(line),
++           "draw #%d: prim 0x%x, %u idx, samples %u (no depth/scissor/cull: %u), prog %d, fbo %d, "
++           "vp %d,%d %dx%d, scissor %s %d,%d %dx%d, depth %s func 0x%x mask %d range %.3f-%.3f, "
++           "cull %s, blend %s, colormask %d%d%d%d",
++           draw, primitive, num_indices, samples, samples_unrestricted, program, fbo, viewport[0],
++           viewport[1], viewport[2], viewport[3], glIsEnabled(GL_SCISSOR_TEST) ? "on" : "off",
++           scissor[0], scissor[1], scissor[2], scissor[3],
++           glIsEnabled(GL_DEPTH_TEST) ? "on" : "off", depth_func, depth_mask, depth_range[0],
++           depth_range[1], glIsEnabled(GL_CULL_FACE) ? "on" : "off",
++           glIsEnabled(GL_BLEND) ? "on" : "off", color_mask[0], color_mask[1], color_mask[2],
++           color_mask[3]);
++  ps4_boot_trace(line);
++
++  const auto& c = Core::System::GetInstance().GetVertexShaderManager().constants;
++  snprintf(line, sizeof(line),
++           "draw #%d: projection %g %g %g %g / %g %g %g %g / %g %g %g %g / %g %g %g %g, "
++           "pixelcentre %g %g %g %g, viewport %g %g",
++           draw, c.projection[0][0], c.projection[0][1], c.projection[0][2], c.projection[0][3],
++           c.projection[1][0], c.projection[1][1], c.projection[1][2], c.projection[1][3],
++           c.projection[2][0], c.projection[2][1], c.projection[2][2], c.projection[2][3],
++           c.projection[3][0], c.projection[3][1], c.projection[3][2], c.projection[3][3],
++           c.pixelcentercorrection[0], c.pixelcentercorrection[1], c.pixelcentercorrection[2],
++           c.pixelcentercorrection[3], c.viewport[0], c.viewport[1]);
++  ps4_boot_trace(line);
++}
++#endif
++
+ void OGLGfx::DrawIndexed(u32 base_index, u32 num_indices, u32 base_vertex)
+ {
++#ifdef __ORBIS__
++  static int s_draw_number = 0;
++  s_draw_number++;
++  if (PS4ShouldSampleDraw(s_draw_number))
++  {
++    s_sampled_draws++;
++    const GLenum primitive = static_cast<const OGLPipeline*>(m_current_pipeline)->GetGLPrimitive();
++    const void* indices = static_cast<u16*>(nullptr) + base_index;
++    while (glGetError() != GL_NO_ERROR)
++    {
++    }
++    GLuint query = 0, samples = 0, samples_unrestricted = 0;
++    glGenQueries(1, &query);
++    glBeginQuery(GL_ANY_SAMPLES_PASSED, query);
++    glDrawElements(primitive, num_indices, GL_UNSIGNED_SHORT, indices);
++    glEndQuery(GL_ANY_SAMPLES_PASSED);
++    glGetQueryObjectuiv(query, GL_QUERY_RESULT, &samples);
++    if (!samples)
++    {
++      const GLboolean depth = glIsEnabled(GL_DEPTH_TEST);
++      const GLboolean scissor = glIsEnabled(GL_SCISSOR_TEST);
++      const GLboolean cull = glIsEnabled(GL_CULL_FACE);
++      glDisable(GL_DEPTH_TEST);
++      glDisable(GL_SCISSOR_TEST);
++      glDisable(GL_CULL_FACE);
++      glBeginQuery(GL_ANY_SAMPLES_PASSED, query);
++      glDrawElements(primitive, num_indices, GL_UNSIGNED_SHORT, indices);
++      glEndQuery(GL_ANY_SAMPLES_PASSED);
++      glGetQueryObjectuiv(query, GL_QUERY_RESULT, &samples_unrestricted);
++      if (depth)
++        glEnable(GL_DEPTH_TEST);
++      if (scissor)
++        glEnable(GL_SCISSOR_TEST);
++      if (cull)
++        glEnable(GL_CULL_FACE);
++    }
++    glDeleteQueries(1, &query);
++    PS4LogDrawState(s_draw_number, primitive, num_indices, samples, samples_unrestricted);
++    const GLenum error = glGetError();
++    if (error != GL_NO_ERROR)
++    {
++      char line[64];
++      snprintf(line, sizeof(line), "draw #%d: GL error 0x%x in sampled draw", s_draw_number, error);
++      ps4_boot_trace(line);
++    }
++    return;
++  }
++#endif
+   if (g_ogl_config.bSupportsGLBaseVertex)
+   {
+     glDrawElementsBaseVertex(static_cast<const OGLPipeline*>(m_current_pipeline)->GetGLPrimitive(),
+@@ -290,6 +399,28 @@ void OGLGfx::DrawIndexed(u32 base_index, u32 num_indices, u32 base_vertex)
      glDrawElements(static_cast<const OGLPipeline*>(m_current_pipeline)->GetGLPrimitive(),
                     num_indices, GL_UNSIGNED_SHORT, static_cast<u16*>(nullptr) + base_index);
    }
@@ -2083,7 +2202,7 @@ index ff5402b..2b4c1ca 100644
 +             num_indices, base_index, base_vertex);
 +    ps4_boot_trace(line);
 +  }
-+  if (s_draws == 1 || s_draws == 100 || s_draws == 10000)
++  if (s_draws == 1 || s_draws == 100 || s_draws == 1000 || s_draws == 10000 || s_draws == 100000)
 +  {
 +    char line[64];
 +    snprintf(line, sizeof(line), "draw #%d done, %d with GL errors", s_draws, s_errors);
@@ -2093,7 +2212,7 @@ index ff5402b..2b4c1ca 100644
  }
  
  void OGLGfx::DispatchComputeShader(const AbstractShader* shader, u32 groupsize_x, u32 groupsize_y,
-@@ -733,3 +760,65 @@ SurfaceInfo OGLGfx::GetSurfaceInfo() const
+@@ -733,3 +864,65 @@ SurfaceInfo OGLGfx::GetSurfaceInfo() const
  }
  
  }  // namespace OGL
@@ -2388,7 +2507,7 @@ index 92f7c1f..3378a49 100644
      m_default_pixel_shader = g_gfx->CreateShaderFromSource(
          ShaderStage::Pixel, GetHeader(false) + default_pixel_shader_code + GetFooter(), nullptr,
 diff --git a/Source/Core/VideoCommon/Present.cpp b/Source/Core/VideoCommon/Present.cpp
-index 41d05f3..e9662f3 100644
+index 41d05f3..7614d71 100644
 --- a/Source/Core/VideoCommon/Present.cpp
 +++ b/Source/Core/VideoCommon/Present.cpp
 @@ -124,9 +124,12 @@ bool Presenter::Initialize()
@@ -2464,7 +2583,7 @@ index 41d05f3..e9662f3 100644
 +    // Port diagnostics: where does the picture turn black? Game frame (EFB), its copy (XFB),
 +    // and the screen after the copy was drawn.
 +    static u64 s_probes = 0;
-+    if (s_probes++ % 300 == 30)
++    if (s_probes++ % 60 == 30 && s_probes < 1000)
 +    {
 +      ps4_probe_center_pixel("EFB", g_framebuffer_manager->GetEFBColorTexture());
 +      ps4_probe_center_pixel("XFB", m_xfb_entry->texture.get());
