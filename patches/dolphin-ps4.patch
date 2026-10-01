@@ -2195,6 +2195,47 @@ index 0000000..8b666df
 +  return 0.0;
 +}
 +}  // namespace GCAdapter
+diff --git a/Source/Core/VideoBackends/OGL/OGLConfig.cpp b/Source/Core/VideoBackends/OGL/OGLConfig.cpp
+index ce1b7a5..941b744 100644
+--- a/Source/Core/VideoBackends/OGL/OGLConfig.cpp
++++ b/Source/Core/VideoBackends/OGL/OGLConfig.cpp
+@@ -22,6 +22,11 @@
+ #include "VideoCommon/OnScreenDisplay.h"
+ #include "VideoCommon/VideoConfig.h"
+ 
++#ifdef __ORBIS__
++#include <cstdio>
++extern "C" void ps4_boot_trace(const char* stage);  // DolphinPS4 port/ps4_crashlog.cpp
++#endif
++
+ namespace OGL
+ {
+ void InitDriverInfo()
+@@ -318,6 +323,12 @@ bool PopulateConfig(GLContext* m_main_gl_context)
+ 
+   g_ogl_config.bIsES = m_main_gl_context->IsGLES();
+   supports_glsl_cache = GLExtensions::Supports("GL_ARB_get_program_binary");
++#ifdef __ORBIS__
++  // Program binaries are core in GLES 3.0 (no extension string on Piglet). Caching them spares
++  // Piglet's compiler, which takes ~0.3 s per shader, on every boot.
++  if (g_ogl_config.bIsES && glGetProgramBinary && glProgramBinary)
++    supports_glsl_cache = true;
++#endif
+   g_ogl_config.bSupportsGLPinnedMemory = GLExtensions::Supports("GL_AMD_pinned_memory");
+   g_ogl_config.bSupportsGLSync = GLExtensions::Supports("GL_ARB_sync");
+   g_ogl_config.bSupportsGLBaseVertex = GLExtensions::Supports("GL_ARB_draw_elements_base_vertex") ||
+@@ -696,6 +707,11 @@ bool PopulateConfig(GLContext* m_main_gl_context)
+     GLint num_formats = 0;
+     glGetIntegerv(GL_NUM_PROGRAM_BINARY_FORMATS, &num_formats);
+     supports_glsl_cache = num_formats > 0;
++#ifdef __ORBIS__
++    char line[96];
++    snprintf(line, sizeof(line), "GL program binaries: %d formats", num_formats);
++    ps4_boot_trace(line);
++#endif
+   }
+   g_backend_info.bSupportsPipelineCacheData = supports_glsl_cache;
+ 
 diff --git a/Source/Core/VideoBackends/OGL/OGLGfx.cpp b/Source/Core/VideoBackends/OGL/OGLGfx.cpp
 index ff5402b..3c716c2 100644
 --- a/Source/Core/VideoBackends/OGL/OGLGfx.cpp
@@ -2939,18 +2980,39 @@ index 003a7ec..121bd8e 100644
    GetOGLGfx()->RestoreFramebufferBinding();
  
 diff --git a/Source/Core/VideoBackends/OGL/OGLVertexManager.cpp b/Source/Core/VideoBackends/OGL/OGLVertexManager.cpp
-index c5382cf..b73f769 100644
+index c5382cf..d8460cc 100644
 --- a/Source/Core/VideoBackends/OGL/OGLVertexManager.cpp
 +++ b/Source/Core/VideoBackends/OGL/OGLVertexManager.cpp
-@@ -2,6 +2,7 @@
- // SPDX-License-Identifier: GPL-2.0-or-later
+@@ -3,6 +3,9 @@
  
  #include "VideoBackends/OGL/OGLVertexManager.h"
-+#include "VideoCommon/PS4Profile.h"
  
++#include <algorithm>
++#include "VideoCommon/PS4Profile.h"
++
  #include <memory>
  
-@@ -171,6 +172,7 @@ void VertexManager::ResetBuffer(u32 vertex_stride)
+ #include "Common/Align.h"
+@@ -160,9 +163,16 @@ void VertexManager::ResetBuffer(u32 vertex_stride)
+ {
+   CheckBufferBinding();
+ 
+-  auto buffer = m_vertex_buffer->Map(MAXVBUFFERSIZE, vertex_stride);
++#ifdef __ORBIS__
++  // Map a window of the ring, not a whole maximum-size draw (as large as the ring itself);
++  // VertexManagerBase flushes the batch when the window is full.
++  constexpr u32 map_size = std::min(MAXVBUFFERSIZE, VERTEX_MAP_WINDOW);
++#else
++  constexpr u32 map_size = MAXVBUFFERSIZE;
++#endif
++  auto buffer = m_vertex_buffer->Map(map_size, vertex_stride);
+   m_cur_buffer_pointer = m_base_buffer_pointer = buffer.first;
+-  m_end_buffer_pointer = buffer.first + MAXVBUFFERSIZE;
++  m_end_buffer_pointer = buffer.first + map_size;
+ 
+   buffer = m_index_buffer->Map(MAXIBUFFERSIZE * sizeof(u16));
+   m_index_generator.Start(reinterpret_cast<u16*>(buffer.first));
+@@ -171,6 +181,7 @@ void VertexManager::ResetBuffer(u32 vertex_stride)
  void VertexManager::CommitBuffer(u32 num_vertices, u32 vertex_stride, u32 num_indices,
                                   u32* out_base_vertex, u32* out_base_index)
  {
@@ -2958,7 +3020,7 @@ index c5382cf..b73f769 100644
    u32 vertex_data_size = num_vertices * vertex_stride;
    u32 index_data_size = num_indices * sizeof(u16);
  
-@@ -187,6 +189,7 @@ void VertexManager::CommitBuffer(u32 num_vertices, u32 vertex_stride, u32 num_in
+@@ -187,6 +198,7 @@ void VertexManager::CommitBuffer(u32 num_vertices, u32 vertex_stride, u32 num_in
  
  void VertexManager::UploadUniforms()
  {
@@ -3568,17 +3630,19 @@ index 2bc6d58..7877e71 100644
      return;
  
 diff --git a/Source/Core/VideoCommon/VertexManagerBase.h b/Source/Core/VideoCommon/VertexManagerBase.h
-index 715dbee..a434471 100644
+index 715dbee..77c8a53 100644
 --- a/Source/Core/VideoCommon/VertexManagerBase.h
 +++ b/Source/Core/VideoCommon/VertexManagerBase.h
-@@ -96,10 +96,19 @@ public:
+@@ -96,10 +96,21 @@ public:
  
    // Streaming buffer sizes.
    // Texel buffer will fit the maximum size of an encoded GX texture. 1024x1024, RGBA8 = 4MB.
 +#ifdef __ORBIS__
-+  // PS4 Piglet has little GPU memory (it couldn't allocate the sizes below): the smallest sizes
-+  // that still fit one maximum-size draw.
-+  static constexpr u32 VERTEX_STREAM_BUFFER_SIZE = MAXVBUFFERSIZE;
++  // PS4 Piglet has little GPU memory (it couldn't allocate the sizes below). The vertex stream
++  // is a ring that each batch maps a window of (VERTEX_MAP_WINDOW, see OGL ResetBuffer): it
++  // must hold several windows, or every batch wraps around and overwrites vertices in flight.
++  static constexpr u32 VERTEX_MAP_WINDOW = 3 * 1024 * 1024;
++  static constexpr u32 VERTEX_STREAM_BUFFER_SIZE = 8 * VERTEX_MAP_WINDOW;
 +  static constexpr u32 INDEX_STREAM_BUFFER_SIZE = 4 * 1024 * 1024;
 +  static constexpr u32 UNIFORM_STREAM_BUFFER_SIZE = 8 * 1024 * 1024;
 +  static constexpr u32 TEXEL_STREAM_BUFFER_SIZE = 4 * 1024 * 1024;
