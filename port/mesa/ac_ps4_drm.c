@@ -22,6 +22,7 @@
 #include "util/vma.h"
 
 #include <errno.h>
+#include <pthread.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -139,6 +140,7 @@ struct ac_drm_device {
 
    /* GPU end-of-pipe interrupts (sceGnmAddEqEvent): fence waits sleep on this queue. */
    int (*add_eq_event)(void *eq, uint64_t id, void *udata);
+   int gnm_module;
    void *eop_queue;
 
    /* Statistics for the app's monitor (ac_ps4_get_stats). */
@@ -506,7 +508,160 @@ ps4_load_gnm(ac_drm_device *dev)
       ps4_log("radv/ps4: libSceGnmDriver symbols missing\n");
       return false;
    }
+   dev->gnm_module = module;
    return true;
+}
+
+/* ---------------------------------------------------------------------------------------------
+ * GPU fault capture. A GPU page/protection fault kills the app without a signal. Hooks found by
+ * disassembling the system modules:
+ *  - libkernel's libSceCoredump: sceCoredumpRegisterCoredumpHandler(handler, stack, arg) starts
+ *    a thread that blocks in mdbg_service(0x14) until the kernel begins a core dump of this
+ *    process, then calls `handler` - i.e. it runs on exactly that kill.
+ *    sceCoredumpGetStopInfoCpu(buf, 16) / sceCoredumpGetStopInfoGpu(buf, 8) say why.
+ *  - libSceGnmDriver maps 512 KiB of system memory named "SceGnmGpuInfo" and registers it with
+ *    the kernel (sceKernelSetProcessProperty "Sce.Debug:Gnm"); the GPU driver records GPU state
+ *    there (+0 valid, +0x90 protection fault timestamp, ...). Its pointer is GnmDriver data
+ *    +0x10508 (firmware 12.00: sceGnmIsCoredumpValid at +0x690 reads it).
+ *  - sceKernelAddGpuExceptionEvent(eq, udata): kevent filter -20 on GPU exceptions.
+ * Everything is written to /data/DolphinPS4/gpu-fault.txt, with the recent submissions and every
+ * live buffer, so a fault address can be mapped to its buffer.
+ */
+int sceKernelGetModuleList(int *handles, size_t num, size_t *actual);
+static const uint8_t *ps4_gpu_info;
+static int (*ps4_stop_info_cpu)(void *, size_t);
+static int (*ps4_stop_info_gpu)(void *, size_t);
+static ac_drm_device *ps4_fault_dev;
+
+static void
+ps4_dump_state(FILE *f, ac_drm_device *dev)
+{
+   uint64_t cpu[2] = {0}, gpu = 0;
+   const int rc = ps4_stop_info_cpu ? ps4_stop_info_cpu(cpu, sizeof(cpu)) : -1;
+   const int rg = ps4_stop_info_gpu ? ps4_stop_info_gpu(&gpu, sizeof(gpu)) : -1;
+   fprintf(f, "stop info cpu %#x: %#llx %#llx; gpu %#x: %#llx\n", rc, (unsigned long long)cpu[0],
+           (unsigned long long)cpu[1], rg, (unsigned long long)gpu);
+   if (dev) {
+      fprintf(f, "GPU completed %llu, submitted %llu\n", (unsigned long long)ps4_completed(dev),
+              (unsigned long long)dev->last_seq);
+      for (unsigned n = 0; n < ARRAY_SIZE(dev->recent); n++) {
+         const unsigned r = (dev->last_seq + 1 + n) % ARRAY_SIZE(dev->recent);
+         if (!dev->recent[r].seq)
+            continue;
+         fprintf(f, "submission %llu:", (unsigned long long)dev->recent[r].seq);
+         for (unsigned i = 0; i < dev->recent[r].num_ibs; i++)
+            fprintf(f, " %#llx+%u", (unsigned long long)dev->recent[r].va[i], dev->recent[r].bytes[i]);
+         fprintf(f, "\n");
+      }
+      fprintf(f, "live buffers:\n");
+      for (unsigned h = 1; h < dev->num_bos; h++) {
+         const struct amdgpu_bo *b = dev->bos[h];
+         if (b && b->last_va)
+            fprintf(f, "  bo %u va %#llx..%#llx phys %#llx heap %#x flags %#llx%s%s\n", b->handle,
+                    (unsigned long long)b->last_va, (unsigned long long)(b->last_va + b->size),
+                    (unsigned long long)b->phys, b->heap, (unsigned long long)b->flags,
+                    b->gpu_ro ? " gpu-read-only" : "", b->cpu ? "" : " (unmapped)");
+      }
+   }
+   if (ps4_gpu_info) {
+      fprintf(f, "SceGnmGpuInfo %p (non-zero 32-byte lines):\n", (const void *)ps4_gpu_info);
+      unsigned lines = 0;
+      for (unsigned off = 0; off < 0x80000 && lines < 3000; off += 32) {
+         const uint32_t *w = (const uint32_t *)(ps4_gpu_info + off);
+         if (!(w[0] | w[1] | w[2] | w[3] | w[4] | w[5] | w[6] | w[7]))
+            continue;
+         fprintf(f, "  +%#07x: %08x %08x %08x %08x %08x %08x %08x %08x\n", off, w[0], w[1], w[2],
+                 w[3], w[4], w[5], w[6], w[7]);
+         lines++;
+      }
+   }
+}
+
+static int
+ps4_coredump_handler(void *arg)
+{
+   (void)arg;
+   FILE *f = fopen("/data/DolphinPS4/gpu-fault.txt", "w");
+   if (f) {
+      fprintf(f, "==== core dump handler (the system is killing the app)\n");
+      ps4_dump_state(f, ps4_fault_dev);
+      fclose(f);
+   }
+   return 0;
+}
+
+static void *
+ps4_gpu_exception_thread(void *eq)
+{
+   for (;;) {
+      uint64_t ev[4][4];
+      int n = 0;
+      if (sceKernelWaitEqueue(eq, ev, 4, &n, NULL) || n <= 0)
+         continue;
+      FILE *f = fopen("/data/DolphinPS4/gpu-fault.txt", "a");
+      for (int i = 0; i < n; i++) {
+         ps4_log("radv/ps4: GPU EXCEPTION event: ident %#llx filter/flags/fflags %#llx data %#llx "
+                 "udata %#llx\n", (unsigned long long)ev[i][0], (unsigned long long)ev[i][1],
+                 (unsigned long long)ev[i][2], (unsigned long long)ev[i][3]);
+         if (f)
+            fprintf(f, "==== GPU exception event: ident %#llx filter/flags/fflags %#llx data %#llx\n",
+                    (unsigned long long)ev[i][0], (unsigned long long)ev[i][1],
+                    (unsigned long long)ev[i][2]);
+      }
+      if (f) {
+         ps4_dump_state(f, ps4_fault_dev);
+         fclose(f);
+      }
+   }
+   return NULL;
+}
+
+/* A libkernel export not in the link stubs: look it up in every loaded module. */
+static void *
+ps4_find_symbol(const char *name)
+{
+   int handles[256];
+   size_t count = 0;
+   if (sceKernelGetModuleList(handles, ARRAY_SIZE(handles), &count))
+      return NULL;
+   for (size_t i = 0; i < count && i < ARRAY_SIZE(handles); i++) {
+      void *p = NULL;
+      if (!sceKernelDlsym(handles[i], name, &p) && p)
+         return p;
+   }
+   return NULL;
+}
+
+static void
+ps4_install_fault_capture(ac_drm_device *dev, int gnm_module)
+{
+   ps4_fault_dev = dev;
+   void *valid = NULL;
+   if (!sceKernelDlsym(gnm_module, "sceGnmIsCoredumpValid", &valid) && valid) {
+      const uint8_t *const *slot = (const uint8_t *const *)((uintptr_t)valid - 0x690 + 0x10508);
+      struct ps4_vq_info vq;
+      memset(&vq, 0, sizeof(vq));
+      if (!sceKernelVirtualQuery(slot, 0, &vq, sizeof(vq)) && *slot &&
+          !sceKernelVirtualQuery(*slot, 0, &vq, sizeof(vq)) && !strncmp(vq.name, "SceGnmGpuInfo", 13))
+         ps4_gpu_info = *slot;
+      ps4_log("radv/ps4: SceGnmGpuInfo area %p ('%.32s')\n", (const void *)ps4_gpu_info, vq.name);
+   }
+   ps4_stop_info_cpu = ps4_find_symbol("sceCoredumpGetStopInfoCpu");
+   ps4_stop_info_gpu = ps4_find_symbol("sceCoredumpGetStopInfoGpu");
+   int (*reg)(int (*)(void *), size_t, void *) = ps4_find_symbol("sceCoredumpRegisterCoredumpHandler");
+   const int rr = reg ? reg(ps4_coredump_handler, 0x10000, NULL) : -1;
+   int (*add_exc)(void *, void *) = ps4_find_symbol("sceKernelAddGpuExceptionEvent");
+   void *eq = NULL;
+   int re = -1;
+   if (add_exc && !sceKernelCreateEqueue(&eq, "radv gpu exception")) {
+      re = add_exc(eq, NULL);
+      if (!re) {
+         pthread_t t;
+         pthread_create(&t, NULL, ps4_gpu_exception_thread, eq);
+      }
+   }
+   ps4_log("radv/ps4: fault capture: core dump handler %#x, GPU exception event %#x, stop info %s/%s\n",
+           rr, re, ps4_stop_info_cpu ? "cpu" : "-", ps4_stop_info_gpu ? "gpu" : "-");
 }
 
 static void *
@@ -649,6 +804,9 @@ ac_drm_device_initialize(int fd, bool is_virtio, uint32_t *major_version, uint32
    *minor_version = 61;
    *out = dev;
    ps4_last_device = dev;
+   if (!ps4_fault_dev)
+      ps4_install_fault_capture(dev, dev->gnm_module);
+   ps4_fault_dev = dev; /* the last device created is the one in use */
    ps4_log("radv/ps4: device initialized\n");
    return 0;
 
@@ -1678,8 +1836,12 @@ ac_drm_cs_submit_raw2(ac_drm_device *dev, uint32_t ctx_id, uint32_t bo_list_hand
          break;
       }
    }
-   /* Commands that would write where they mustn't: report and disable them. */
-   if (num_ibs) {
+   /* Commands that would write where they mustn't: report and disable them (RADV_PS4_SCAN=1;
+    * it found nothing in the boss-intro crash and costs CPU time). */
+   static int scan = -1;
+   if (scan < 0)
+      scan = getenv("RADV_PS4_SCAN") != NULL;
+   if (num_ibs && scan) {
       simple_mtx_lock(&dev->lock);
       for (unsigned i = 0; i < num_ibs; i++)
          ps4_scan_writes(dev, dcb[i], dcb_sizes[i] / 4, dev->last_seq + 1, 0);
