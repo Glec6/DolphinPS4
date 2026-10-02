@@ -5317,7 +5317,7 @@ index 17334db..0d1a712 100644
  
    WindowSystemInfo m_wsi;
 diff --git a/Source/Core/VideoBackends/Vulkan/VulkanContext.cpp b/Source/Core/VideoBackends/Vulkan/VulkanContext.cpp
-index d388300..de289e4 100644
+index d388300..a69781a 100644
 --- a/Source/Core/VideoBackends/Vulkan/VulkanContext.cpp
 +++ b/Source/Core/VideoBackends/Vulkan/VulkanContext.cpp
 @@ -344,7 +344,9 @@ bool VulkanContext::SelectInstanceExtensions(std::vector<const char*>* extension
@@ -5340,7 +5340,22 @@ index d388300..de289e4 100644
    {
      AddExtension(VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME, false);
    }
-@@ -600,8 +602,10 @@ std::unique_ptr<VulkanContext> VulkanContext::Create(VkInstance instance, VkPhys
+@@ -497,6 +499,14 @@ void VulkanContext::PopulateBackendInfoFeatures(BackendInfo* backend_info, VkPhy
+     backend_info->bSupportsGSInstancing = VK_FALSE;
+   }
+ 
++#ifdef __ORBIS__
++  // PS4 (RADV on GNM): the first geometry shader draw (lines/points, e.g. SADX's Chaos 0 intro)
++  // made the GPU write past RADV's ES->GS ring into the next buffer and the system killed the
++  // app. Without geometry shaders Dolphin expands lines and points in the vertex shader instead.
++  backend_info->bSupportsGeometryShaders = VK_FALSE;
++  backend_info->bSupportsGSInstancing = VK_FALSE;
++#endif
++
+   // Depth clamping implies shaderClipDistance and depthClamp
+   backend_info->bSupportsDepthClamp = info.depthClamp && info.shaderClipDistance;
+ 
+@@ -600,8 +610,10 @@ std::unique_ptr<VulkanContext> VulkanContext::Create(VkInstance instance, VkPhys
        !context->CreateAllocator(vk_api_version))
    {
      // Since we are destroying the instance, we're also responsible for destroying the surface.
@@ -5351,7 +5366,7 @@ index d388300..de289e4 100644
  
      return nullptr;
    }
-@@ -716,7 +720,17 @@ bool VulkanContext::CreateDevice(VkSurfaceKHR surface, bool enable_validation_la
+@@ -716,7 +728,17 @@ bool VulkanContext::CreateDevice(VkSurfaceKHR surface, bool enable_validation_la
        }
      }
  
@@ -5369,7 +5384,7 @@ index d388300..de289e4 100644
      {
        VkBool32 present_supported;
        VkResult res =
-@@ -785,7 +799,11 @@ bool VulkanContext::CreateDevice(VkSurfaceKHR surface, bool enable_validation_la
+@@ -785,7 +807,11 @@ bool VulkanContext::CreateDevice(VkSurfaceKHR surface, bool enable_validation_la
    }
    device_info.pQueueCreateInfos = queue_infos.data();
  
