@@ -508,7 +508,10 @@ ps4_va_op(ac_drm_device *dev, uint32_t bo_handle, uint64_t offset, uint64_t size
           * again after the buffer, so that prefetches past the end hit valid memory. The PS4
           * can't map direct memory twice (EBUSY). Inside the buffer's own (16 KiB rounded)
           * mapping it's already backed; past it, back it with a page of its own. */
-         if (addr >= cpu && addr + exact_size <= cpu + b->size)
+         /* Starting inside the buffer's mapping: the pad page RADV wants (4 KiB) is covered;
+          * the length has been rounded to the 16 KiB system page by then (getpagesize). */
+         (void)exact_size;
+         if (addr >= cpu && addr < cpu + b->size)
             return 0;
          if (addr != cpu + b->size || size != PS4_PAGE || b->pad_phys >= 0) {
             ps4_log("radv/ps4: unsupported alias mapping of bo %u at %#llx (+%#llx, %#llx bytes)\n",
