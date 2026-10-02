@@ -14,15 +14,23 @@ OUT="$PS4_BUILD_ROOT/out"
 HOST="ftp://${PS4_HOST:-192.168.0.90}:${PS4_FTP_PORT:-2121}"
 
 rm -rf "$build"
-ps4_cmake -S "$HERE/../probe-gnm" -B "$build" -G "Unix Makefiles" \
-    -DCMAKE_TOOLCHAIN_FILE="$HERE/../toolchain/ps4-love-modern.cmake" \
-    -DPS4_MALLOC_REPLACE=OFF -DPS4_PAID=0x3800000000000035 >/dev/null
+if [ "${GNM_PROBE_PLAIN:-1}" = 1 ]; then
+    # Exactly like the OpenOrbis samples: PacBrew's toolchain file, stock crt1.o and libc.
+    ps4_cmake -S "$HERE/../probe-gnm" -B "$build" -G "Unix Makefiles" \
+        -DCMAKE_TOOLCHAIN_FILE="$OPENORBIS/cmake/ps4.cmake" -DGNM_PROBE_PLAIN=ON >/dev/null
+    eboot="$build/eboot.bin"
+else
+    ps4_cmake -S "$HERE/../probe-gnm" -B "$build" -G "Unix Makefiles" \
+        -DCMAKE_TOOLCHAIN_FILE="$HERE/../toolchain/ps4-love-modern.cmake" -DGNM_PROBE_PLAIN=OFF \
+        -DPS4_MALLOC_REPLACE=OFF -DPS4_PAID=0x3800000000000035 >/dev/null
+    eboot="$build/gnm_probe_eboot/eboot.bin"
+fi
 make -C "$build" -j"${JOBS:-4}" 2>&1 | grep -E "error|check-oelf|Error" || true
-[ -f "$build/gnm_probe_eboot/eboot.bin" ] || { echo "gnm probe: build failed" >&2; exit 1; }
+[ -f "$eboot" ] || { echo "gnm probe: build failed" >&2; exit 1; }
 
 stage="$build/stage"
 mkdir -p "$stage/sce_sys"
-cp "$build/gnm_probe_eboot/eboot.bin" "$stage/"
+cp "$eboot" "$stage/"
 cp "$HERE/../sce_sys/icon0.png" "$stage/sce_sys/"
 pkg="$(SFO_STYLE=plain "$HERE/make-pkg.sh" "$stage" DLPH00004 "Dolphin GNM Probe" \
     "${PROBE_VERSION:-01.00}" DOLPHINGNMPROBE "$OUT" | tail -1)"
