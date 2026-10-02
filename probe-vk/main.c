@@ -119,6 +119,23 @@ int main(void) {
                                  .pApplicationInfo = &app};
     CHECK(vkCreateInstance(&info, NULL, &instance));
   }
+  {
+    // RADV's WSI got NULL for vkGetPhysicalDeviceProperties2 from this lookup (02.08/02.09).
+    extern PFN_vkVoidFunction vk_instance_get_proc_addr_unchecked(const void* instance,
+                                                                  const char* name);
+    extern PFN_vkVoidFunction vk_physical_device_dispatch_table_get(const void* table,
+                                                                    const char* name);
+    extern void* vk_physical_device_trampolines[];
+    static const char* const names[] = {
+        "vkGetPhysicalDeviceProperties2", "vkGetPhysicalDeviceProperties2KHR",
+        "vkGetPhysicalDeviceMemoryProperties", "vkGetPhysicalDeviceQueueFamilyProperties",
+        "vkGetPhysicalDeviceExternalSemaphoreProperties", "vkGetPhysicalDeviceProperties",
+        "vkGetPhysicalDeviceFeatures2"};
+    for (unsigned i = 0; i < sizeof(names) / sizeof(names[0]); i++)
+      Log("lookup %s: unchecked %p, trampolines %p\n", names[i],
+          (void*)vk_instance_get_proc_addr_unchecked(instance, names[i]),
+          (void*)vk_physical_device_dispatch_table_get(vk_physical_device_trampolines, names[i]));
+  }
   LOAD(instance, vkEnumeratePhysicalDevices);
   LOAD(instance, vkGetPhysicalDeviceProperties);
   LOAD(instance, vkGetPhysicalDeviceQueueFamilyProperties);
