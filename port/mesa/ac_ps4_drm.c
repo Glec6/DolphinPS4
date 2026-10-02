@@ -151,6 +151,22 @@ ps4_log(const char *fmt, ...)
       write(fd, line, strlen(line));
 }
 
+#undef fprintf
+int
+ac_ps4_fprintf(FILE *f, const char *fmt, ...)
+{
+   char line[512];
+   va_list args;
+   va_start(args, fmt);
+   int n = vsnprintf(line, sizeof(line), fmt, args);
+   va_end(args);
+   if (f == stderr || f == stdout)
+      ps4_log("%s", line);
+   else
+      fputs(line, f);
+   return n;
+}
+
 /* ---------------------------------------------------------------------------------------------
  * Fences
  */

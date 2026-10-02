@@ -69,6 +69,9 @@ int main(void) {
   g_log = open("/data/DolphinPS4/vk-probe.log", O_WRONLY | O_CREAT | O_TRUNC, 0666);
   RedirectStderr();
   setenv("RADV_DEBUG", "startup", 1);
+  setenv("MESA_LOG_FILE", "/data/DolphinPS4/mesa.log", 1);
+  setenv("MESA_DEBUG", "1", 1);
+  fprintf(stderr, "stderr works\n");
   Log("Vulkan probe start\n");
   // System modules used by the runtime (see probe-gnm): load before any call into them.
   sceSysmoduleLoadModuleInternal(0x80000010);  // SystemService

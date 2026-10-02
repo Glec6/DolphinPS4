@@ -15,6 +15,24 @@ index 7d4dca7..2a78cf3 100644
  with_c11_threads = false
  if cc.has_function('thrd_create', prefix: '#include <threads.h>')
    if with_platform_android
+diff --git a/src/amd/common/ac_linux_drm.h b/src/amd/common/ac_linux_drm.h
+index 9ea563c..a5f0005 100644
+--- a/src/amd/common/ac_linux_drm.h
++++ b/src/amd/common/ac_linux_drm.h
+@@ -317,6 +317,13 @@ typedef struct amdgpu_va *amdgpu_va_handle;
+ 
+ #endif /* !defined(_WIN32) */
+ 
++#if defined(__PS4__) && !defined(__cplusplus)
++/* The PS4 app has no console: route the amd winsys/gpu-info diagnostics to a log file. */
++#include <stdio.h>
++int ac_ps4_fprintf(FILE *f, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
++#define fprintf ac_ps4_fprintf
++#endif
++
+ #ifdef __cplusplus
+ extern "C" {
+ #endif
 diff --git a/src/amd/common/meson.build b/src/amd/common/meson.build
 index e26f6f8..7d7a4f2 100644
 --- a/src/amd/common/meson.build
