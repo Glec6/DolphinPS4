@@ -728,10 +728,10 @@ index 1a3093c..24cbe83 100644
    void* m_reserved_region = nullptr;
 diff --git a/Source/Core/Common/MemArenaPS4.cpp b/Source/Core/Common/MemArenaPS4.cpp
 new file mode 100644
-index 0000000..ddb352f
+index 0000000..8d1e0e0
 --- /dev/null
 +++ b/Source/Core/Common/MemArenaPS4.cpp
-@@ -0,0 +1,228 @@
+@@ -0,0 +1,246 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -867,8 +867,22 @@ index 0000000..ddb352f
 +  }
 +}
 +
++// Port measurement: how much libkernel internal memory (the pool whose exhaustion crashes the
++// app) do fastmem mappings cost? Counted by DolphinNoGUI's monitor.
++extern "C" int sceKernelInternalMemoryGetAvailableSize(size_t* size);
++extern "C" long long ps4_map_count, ps4_unmap_count, ps4_map_internal_bytes;
++long long ps4_map_count = 0, ps4_unmap_count = 0, ps4_map_internal_bytes = 0;
++static long long PS4InternalFree()
++{
++  size_t size = 0;
++  sceKernelInternalMemoryGetAvailableSize(&size);
++  return static_cast<long long>(size);
++}
++
 +void* MemArena::MapInMemoryRegion(s64 offset, size_t size, void* base, bool writeable)
 +{
++  const long long ps4_free_before = PS4InternalFree();
++  ps4_map_count++;
 +  void* address = base;
 +  const int32_t result =
 +      sceKernelMapDirectMemory(&address, AlignUp(size, PS4_PAGE_SIZE), Protection(writeable),
@@ -879,6 +893,7 @@ index 0000000..ddb352f
 +                   static_cast<u32>(result));
 +    return nullptr;
 +  }
++  ps4_map_internal_bytes += ps4_free_before - PS4InternalFree();
 +  return address;
 +}
 +
@@ -893,6 +908,8 @@ index 0000000..ddb352f
 +
 +void MemArena::UnmapFromMemoryRegion(void* view, size_t size)
 +{
++  const long long ps4_free_before = PS4InternalFree();
++  ps4_unmap_count++;
 +  const size_t aligned_size = AlignUp(size, PS4_PAGE_SIZE);
 +  sceKernelMunmap(view, aligned_size);
 +  // Reserve the hole again so nothing else gets mapped inside the fastmem region.
@@ -904,6 +921,7 @@ index 0000000..ddb352f
 +    NOTICE_LOG_FMT(MEMMAP, "re-reserving {} after unmapping failed: {:#x}", view,
 +                   static_cast<u32>(result));
 +  }
++  ps4_map_internal_bytes += ps4_free_before - PS4InternalFree();
 +}
 +
 +size_t MemArena::GetPageSize() const
@@ -1730,10 +1748,10 @@ index f4dc8a9..4e5ff67 100644
  
 diff --git a/Source/Core/DolphinNoGUI/PlatformPS4.cpp b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
 new file mode 100644
-index 0000000..b9bc451
+index 0000000..a6db222
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
-@@ -0,0 +1,413 @@
+@@ -0,0 +1,417 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -1768,6 +1786,8 @@ index 0000000..b9bc451
 +#include "Core/Core.h"
 +#include "VideoCommon/PerformanceMetrics.h"
 +#include "VideoCommon/PS4Profile.h"
++
++extern "C" long long ps4_map_count, ps4_unmap_count, ps4_map_internal_bytes;  // MemArenaPS4
 +#include "Core/System.h"
 +
 +extern "C" int sceSystemServiceLoadExec(const char* path, char* const argv[]);
@@ -1921,19 +1941,21 @@ index 0000000..b9bc451
 +      const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(
 +                               std::chrono::steady_clock::now() - start)
 +                               .count();
-+      char line[400];
++      char line[480];
 +      // speed: emulated time per real time; max speed: what the CPU thread could reach if it
 +      // never waited (below 100% means the emulated CPU itself is the bottleneck).
 +      snprintf(line, sizeof(line),
 +               "monitor: %lld s, speed %.0f%% (max %.0f%%), %.1f FPS, %.1f VPS, %zu MiB flexible "
 +               "free, CPU core %d, %llu fastmem faults, GL shaders %d programs %d textures %d "
-+               "(created %d, reused %d) fbos created %d, internal memory %llu KiB free",
++               "(created %d, reused %d) fbos created %d, internal memory %llu KiB free, maps %lld "
++               "unmaps %lld costing %lld KiB",
 +               static_cast<long long>(seconds), perf.GetSpeed() * 100.0,
 +               perf.GetMaxSpeed() * 100.0, perf.GetFPS(), perf.GetVPS(),
 +               flexible / (1024 * 1024), static_cast<int>(Config::Get(Config::MAIN_CPU_CORE)),
 +               ps4_fault_count, ps4_gl_shaders, ps4_gl_programs, ps4_gl_textures,
 +               ps4_gl_texture_creations, ps4_gl_texture_reuses, ps4_gl_fbo_creations,
-+               ps4_internal_memory_free() / 1024);
++               ps4_internal_memory_free() / 1024, ps4_map_count, ps4_unmap_count,
++               ps4_map_internal_bytes / 1024);
 +      BootTrace(line);
 +      LogProfile();
 +    }
@@ -2226,7 +2248,7 @@ index 8f7f4ba..34feb8e 100644
  {
 diff --git a/Source/Core/InputCommon/ControllerInterface/PS4Pad/PS4Pad.cpp b/Source/Core/InputCommon/ControllerInterface/PS4Pad/PS4Pad.cpp
 new file mode 100644
-index 0000000..334626a
+index 0000000..2ae5384
 --- /dev/null
 +++ b/Source/Core/InputCommon/ControllerInterface/PS4Pad/PS4Pad.cpp
 @@ -0,0 +1,218 @@
@@ -2332,15 +2354,15 @@ index 0000000..334626a
 +
 +    AddInput(new Axis("L2",              m_state.analogButtons.l2, true, false));
 +    AddInput(new Axis("R2",              m_state.analogButtons.r2, true, false));
-+    // Stick Y grows downwards.
++    // Stick Y grows downwards (0 = up): "Y-" (up) is the lower half of the value range.
 +    AddInput(new Axis("Left X-",         m_state.leftStick.x, false, true));
 +    AddInput(new Axis("Left X+",         m_state.leftStick.x, false, false));
-+    AddInput(new Axis("Left Y-",         m_state.leftStick.y, false, false));
-+    AddInput(new Axis("Left Y+",         m_state.leftStick.y, false, true));
++    AddInput(new Axis("Left Y-",         m_state.leftStick.y, false, true));
++    AddInput(new Axis("Left Y+",         m_state.leftStick.y, false, false));
 +    AddInput(new Axis("Right X-",        m_state.rightStick.x, false, true));
 +    AddInput(new Axis("Right X+",        m_state.rightStick.x, false, false));
-+    AddInput(new Axis("Right Y-",        m_state.rightStick.y, false, false));
-+    AddInput(new Axis("Right Y+",        m_state.rightStick.y, false, true));
++    AddInput(new Axis("Right Y-",        m_state.rightStick.y, false, true));
++    AddInput(new Axis("Right Y+",        m_state.rightStick.y, false, false));
 +
 +    AddOutput(new Motor("Motor L",       *this, true));
 +    AddOutput(new Motor("Motor R",       *this, false));
