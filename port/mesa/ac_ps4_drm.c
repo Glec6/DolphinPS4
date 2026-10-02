@@ -50,11 +50,13 @@ int sceKernelDebugOutText(int channel, const char *text);
 #define PS4_WC_GARLIC 3
 #define PS4_PAGE 0x4000ull /* direct memory and mapping granularity */
 
-/* GPU virtual address windows (inside the process address space, below the GPU's 40-bit VM). */
-#define PS4_VA_START 0x1000000000ull /* 64 GiB */
-#define PS4_VA_SIZE 0x0400000000ull  /* 16 GiB */
-#define PS4_VA32_START 0x2000000000ull /* address32_hi = 0x20 */
+/* GPU virtual address windows: ranges of the process address space reserved at startup (the
+ * kernel picks free ones - fixed addresses collided with the app heap), below the GPU's 40-bit
+ * VM limit. The 32-bit window is 4 GiB aligned: address32_hi is its upper half. */
+#define PS4_VA_SIZE 0x0400000000ull /* 16 GiB */
 #define PS4_VA32_SIZE 0x0100000000ull
+#define PS4_VA_HINT 0x4000000000ull /* search from 256 GiB */
+#define PS4_GPU_VA_LIMIT 0x10000000000ull
 
 /* Liverpool GB_TILE_MODE0..31 and GB_MACROTILE_MODE0..15, rebuilt from shadPS4's per-mode
  * attributes (8 pipes P8_32x32_16x16, 16 banks), and GB_ADDR_CONFIG: 8 pipes, 256 B pipe
@@ -108,6 +110,7 @@ struct ac_drm_device {
    int (*submit_done)(void);
 
    struct util_vma_heap va_heap, va32_heap;
+   uint64_t va_start, va32_start;
 
    struct amdgpu_bo **bos;
    unsigned num_bos;
@@ -205,6 +208,19 @@ ps4_map_new(size_t size, int type, int prot, off_t *phys_out)
    return addr;
 }
 
+/* Reserves a free range of the address space (kernel's choice, `align` aligned). */
+static uint64_t
+ps4_reserve_window(uint64_t size, uint64_t align)
+{
+   void *a = (void *)(uintptr_t)PS4_VA_HINT;
+   int r = sceKernelReserveVirtualRange(&a, size, 0, align);
+   if (r || !a || (uint64_t)(uintptr_t)a + size > PS4_GPU_VA_LIMIT) {
+      ps4_log("radv/ps4: reserving %#llx bytes failed (%#x, %p)\n", (unsigned long long)size, r, a);
+      return 0;
+   }
+   return (uint64_t)(uintptr_t)a;
+}
+
 static bool
 ps4_reserve(uint64_t addr, uint64_t size)
 {
@@ -227,12 +243,14 @@ ac_drm_device_initialize(int fd, bool is_virtio, uint32_t *major_version, uint32
 
    if (!ps4_load_gnm(dev))
       goto fail;
-   if (!ps4_reserve(PS4_VA_START, PS4_VA_SIZE) || !ps4_reserve(PS4_VA32_START, PS4_VA32_SIZE)) {
-      ps4_log("radv/ps4: reserving the GPU address windows failed\n");
+   dev->va_start = ps4_reserve_window(PS4_VA_SIZE, 0x200000);
+   dev->va32_start = ps4_reserve_window(PS4_VA32_SIZE, PS4_VA32_SIZE);
+   if (!dev->va_start || !dev->va32_start)
       goto fail;
-   }
-   util_vma_heap_init(&dev->va_heap, PS4_VA_START, PS4_VA_SIZE);
-   util_vma_heap_init(&dev->va32_heap, PS4_VA32_START, PS4_VA32_SIZE);
+   ps4_log("radv/ps4: GPU address windows %#llx (16 GiB), %#llx (32-bit)\n",
+           (unsigned long long)dev->va_start, (unsigned long long)dev->va32_start);
+   util_vma_heap_init(&dev->va_heap, dev->va_start, PS4_VA_SIZE);
+   util_vma_heap_init(&dev->va32_heap, dev->va32_start, PS4_VA32_SIZE);
 
    uint8_t *page = ps4_map_new(PS4_PAGE * 4, PS4_WB_ONION, PS4_PROT_CPU_RW | PS4_PROT_GPU_RW, NULL);
    if (!page)
@@ -540,8 +558,8 @@ int
 ac_drm_va_range_query(ac_drm_device *dev, enum amdgpu_gpu_va_range type, uint64_t *start,
                       uint64_t *end)
 {
-   *start = PS4_VA_START;
-   *end = PS4_VA_START + PS4_VA_SIZE;
+   *start = dev->va_start;
+   *end = dev->va_start + PS4_VA_SIZE;
    return 0;
 }
 
@@ -1137,7 +1155,7 @@ ac_drm_query_gpu_info(ac_drm_device *dev, struct amdgpu_gpu_info *info)
 }
 
 static void
-ps4_dev_info(struct drm_amdgpu_info_device *d)
+ps4_dev_info(ac_drm_device *dev, struct drm_amdgpu_info_device *d)
 {
    memset(d, 0, sizeof(*d));
    d->device_id = 0x9920;
@@ -1155,8 +1173,8 @@ ps4_dev_info(struct drm_amdgpu_info_device *d)
    d->num_rb_pipes = 8;
    d->num_hw_gfx_contexts = 8;
    d->ids_flags = AMDGPU_IDS_FLAGS_FUSION;
-   d->virtual_address_offset = PS4_VA_START;
-   d->virtual_address_max = PS4_VA_START + PS4_VA_SIZE;
+   d->virtual_address_offset = dev->va_start;
+   d->virtual_address_max = dev->va_start + PS4_VA_SIZE;
    d->virtual_address_alignment = PS4_PAGE;
    d->pte_fragment_size = PS4_PAGE;
    d->gart_page_size = 4096;
@@ -1178,7 +1196,7 @@ ac_drm_query_info(ac_drm_device *dev, unsigned info_id, unsigned size, void *val
    switch (info_id) {
    case AMDGPU_INFO_DEV_INFO: {
       struct drm_amdgpu_info_device d;
-      ps4_dev_info(&d);
+      ps4_dev_info(dev, &d);
       memcpy(value, &d, MIN2(size, sizeof(d)));
       return 0;
    }
@@ -1328,7 +1346,7 @@ ac_drm_query_sw_info(ac_drm_device *dev, enum amdgpu_sw_info info, void *value)
 {
    if (info != amdgpu_sw_info_address32_hi)
       return -EINVAL;
-   *(uint32_t *)value = PS4_VA32_START >> 32;
+   *(uint32_t *)value = dev->va32_start >> 32;
    return 0;
 }
 
