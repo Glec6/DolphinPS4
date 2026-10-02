@@ -48,6 +48,15 @@ int sceKernelDebugOutText(int channel, const char *text);
 int sceKernelCreateEqueue(void **eq, const char *name);
 int sceKernelWaitEqueue(void *eq, void *events, int num, int *out, unsigned *timeout_us);
 
+struct ps4_vq_info {
+   void *start, *end;
+   off_t offset;
+   int protection, memory_type;
+   unsigned is_flexible : 1, is_direct : 1, is_stack : 1, is_pooled : 1, is_committed : 1;
+   char name[32];
+};
+int sceKernelVirtualQuery(const void *addr, int flags, struct ps4_vq_info *info, size_t size);
+
 #define PS4_PROT_CPU_RW 0x03
 #define PS4_PROT_GPU_RW 0x30
 #define PS4_MAP_FIXED 0x10
@@ -500,6 +509,38 @@ ps4_reserve(uint64_t addr, uint64_t size)
    return sceKernelReserveVirtualRange(&a, size, PS4_MAP_FIXED, 0) == 0 && a == (void *)(uintptr_t)addr;
 }
 
+/* Something other than our reservation inside [addr, addr + size) of a GPU VA window? (Then a
+ * MAP_FIXED would silently replace someone else's memory, and their writes would land in ours.)
+ * Logs the first few, returns true if found. */
+static unsigned ps4_foreign_logged;
+static bool ps4_vq_ok;
+static bool
+ps4_check_va_free(uint64_t addr, uint64_t size, const char *what)
+{
+   if (!ps4_vq_ok)
+      return false;
+   struct ps4_vq_info info;
+   memset(&info, 0, sizeof(info));
+   /* flags 1 = find next: the first mapping at or after addr */
+   if (sceKernelVirtualQuery((void *)(uintptr_t)addr, 1, &info, sizeof(info)))
+      return false;
+   const uint64_t start = (uintptr_t)info.start, end = (uintptr_t)info.end;
+   if (start >= addr + size || end <= addr)
+      return false;
+   if (!info.is_direct && !info.is_flexible && !info.is_committed && !info.is_stack)
+      return false; /* a reservation */
+   if (ps4_foreign_logged < 32) {
+      ps4_foreign_logged++;
+      ps4_log("radv/ps4: %s %#llx+%#llx: address range already holds a mapping [%#llx, %#llx) "
+              "offset %#llx prot %#x type %d direct %u flexible %u stack %u committed %u '%.32s'\n",
+              what, (unsigned long long)addr, (unsigned long long)size, (unsigned long long)start,
+              (unsigned long long)end, (unsigned long long)info.offset, info.protection,
+              info.memory_type, info.is_direct, info.is_flexible, info.is_stack, info.is_committed,
+              info.name);
+   }
+   return true;
+}
+
 static struct util_sync_provider *ps4_sync_provider_init(ac_drm_device *dev);
 static ac_drm_device *ps4_last_device;
 
@@ -532,9 +573,24 @@ ac_drm_device_initialize(int fd, bool is_virtio, uint32_t *major_version, uint32
    util_vma_heap_init(&dev->va_heap, dev->va_start, PS4_VA_SIZE);
    util_vma_heap_init(&dev->va32_heap, dev->va32_start, PS4_VA32_SIZE);
 
-   uint8_t *page = ps4_map_new(PS4_PAGE * 4, PS4_WB_ONION, PS4_PROT_CPU_RW | PS4_PROT_GPU_RW, NULL);
+   off_t page_phys = -1;
+   uint8_t *page =
+      ps4_map_new(PS4_PAGE * 4, PS4_WB_ONION, PS4_PROT_CPU_RW | PS4_PROT_GPU_RW, &page_phys);
    if (!page)
       goto fail;
+   {
+      /* sceKernelVirtualQuery's struct is declared by hand: only trust it if it describes this
+       * known mapping correctly. */
+      struct ps4_vq_info vq;
+      memset(&vq, 0, sizeof(vq));
+      const int r = sceKernelVirtualQuery(page + 64, 0, &vq, sizeof(vq));
+      ps4_vq_ok = r == 0 && vq.start == page && vq.end == page + PS4_PAGE * 4 && vq.is_direct &&
+                  vq.offset == page_phys;
+      ps4_log("radv/ps4: virtual query check %s (%#x: [%p, %p) offset %#llx direct %u, expected "
+              "[%p, +%#llx) offset %#llx)\n", ps4_vq_ok ? "ok" : "FAILED - mapping checks off", r,
+              vq.start, vq.end, (unsigned long long)vq.offset, vq.is_direct, page,
+              (unsigned long long)(PS4_PAGE * 4), (unsigned long long)page_phys);
+   }
    memset(page, 0, PS4_PAGE * 4);
    dev->fence = (volatile uint64_t *)page;
    if (dev->add_eq_event) {
@@ -661,7 +717,13 @@ ac_drm_bo_free(ac_drm_device *dev, ac_drm_bo bo)
       return 0;
    if (b->cpu_owned)
       sceKernelMunmap(b->cpu, b->size);
-   sceKernelReleaseDirectMemory(b->phys, b->size);
+   const int rr = sceKernelReleaseDirectMemory(b->phys, b->size);
+   if (rr) {
+      static unsigned logged;
+      if (logged++ < 16)
+         ps4_log("radv/ps4: releasing bo %u (phys %#llx, %#llx bytes) failed (%#x)\n", b->handle,
+                 (unsigned long long)b->phys, (unsigned long long)b->size, rr);
+   }
    __atomic_sub_fetch(&dev->bo_bytes, b->size, __ATOMIC_RELAXED);
    __atomic_sub_fetch(&dev->bo_count, 1, __ATOMIC_RELAXED);
    if (b->pad_phys >= 0)
@@ -802,6 +864,7 @@ ps4_va_op(ac_drm_device *dev, uint32_t bo_handle, uint64_t offset, uint64_t size
          b->pad_phys = pad;
          return 0;
       }
+      ps4_check_va_free(addr, size, "map");
       int r = sceKernelMapDirectMemory(&a, size, PS4_PROT_CPU_RW | PS4_PROT_GPU_RW, PS4_MAP_FIXED,
                                        b->phys + offset, PS4_PAGE);
       if (r || a != (void *)(uintptr_t)addr) {
@@ -825,8 +888,19 @@ ps4_va_op(ac_drm_device *dev, uint32_t bo_handle, uint64_t offset, uint64_t size
       if (b && b->cpu == (void *)(uintptr_t)addr && !b->cpu_owned)
          b->cpu = NULL;
       ps4_record(dev, 'U', b, addr, size);
-      /* Put the reservation back so the window stays ours. */
-      return ps4_reserve(addr, size) ? 0 : -EINVAL;
+      /* Unmap explicitly, then put the reservation back so the window stays ours. (Reserving
+       * over a live mapping isn't guaranteed to replace it; a mapping left behind would vanish
+       * when its direct memory is released, leaving a hole the kernel hands to other mappings
+       * - which a later buffer at this address would then silently overwrite.) */
+      const int ru = sceKernelMunmap((void *)(uintptr_t)addr, size);
+      if (!ps4_reserve(addr, size)) {
+         static unsigned logged;
+         if (logged++ < 16)
+            ps4_log("radv/ps4: unmap of bo %u at %#llx (%#llx bytes): munmap %#x, re-reserving "
+                    "failed\n", bo_handle, (unsigned long long)addr, (unsigned long long)size, ru);
+         return -EINVAL;
+      }
+      return 0;
    }
    default:
       ps4_log("radv/ps4: va op %u unsupported\n", ops);
@@ -984,6 +1058,68 @@ static void ps4_add_point(struct ps4_syncobj *s, uint64_t point, uint64_t seq);
 
 /* EVENT_WRITE_EOP: flush and invalidate CB/DB and the texture caches, then write a 64-bit value
  * at end of pipe. */
+/* Before submitting: does every IB of the chain still start with a packet header, and does every
+ * chain link point into a live buffer? (A GPU hang showed a chained IB full of vertex-like float
+ * data.) Follows only the chain link in each IB's last 4 dwords - a few reads per IB. On failure,
+ * appends what it found to ib-corrupt.txt; returns false. */
+static unsigned ps4_corrupt_reports;
+static bool
+ps4_check_ib_chain(ac_drm_device *dev, const uint32_t *ib, unsigned num_dw, uint64_t seq)
+{
+   for (unsigned link = 0; link < 256 && num_dw; link++) {
+      const char *problem = NULL;
+      if (ib[0] >> 30 != 3 && ib[0] >> 30 != 2)
+         problem = "does not start with a packet header";
+      const uint32_t *tail = ib + num_dw - 4;
+      uint64_t next = 0;
+      unsigned next_dw = 0;
+      if (!problem && num_dw >= 4 && tail[0] == 0xC0023F00 && (tail[3] & (1u << 20))) {
+         next = tail[1] | ((uint64_t)(tail[2] & 0xffff) << 32);
+         next_dw = tail[3] & 0xfffff;
+         struct ac_addr_info info;
+         ps4_ib_addr(dev, next, &info);
+         struct ps4_vq_info vq;
+         memset(&vq, 0, sizeof(vq));
+         if (!info.valid)
+            problem = "chains to an address outside the GPU windows";
+         else if (ps4_vq_ok &&
+                  (sceKernelVirtualQuery((void *)(uintptr_t)next, 0, &vq, sizeof(vq)) ||
+                   !vq.is_direct || (uintptr_t)vq.end < next + next_dw * 4ull))
+            problem = "chains to memory that isn't mapped";
+      }
+      if (problem) {
+         if (ps4_corrupt_reports++ < 4) {
+            ps4_log("radv/ps4: submission %llu: IB %p (%u dwords) %s (first dword %#x) - see "
+                    "ib-corrupt.txt\n", (unsigned long long)seq, (void *)ib, num_dw, problem, ib[0]);
+            FILE *f = fopen("/data/DolphinPS4/ib-corrupt.txt", "a");
+            if (f) {
+               fprintf(f, "==== submission %llu, chain link %u: IB %p, %u dwords, %s\n",
+                       (unsigned long long)seq, link, (void *)ib, num_dw, problem);
+               fprintf(f, "  first dwords: %08x %08x %08x %08x %08x %08x %08x %08x\n", ib[0], ib[1],
+                       ib[2], ib[3], ib[4], ib[5], ib[6], ib[7]);
+               ps4_describe_va(dev, f, (uintptr_t)ib);
+               if (next)
+                  ps4_describe_va(dev, f, next);
+               struct ps4_vq_info vq;
+               memset(&vq, 0, sizeof(vq));
+               if (!sceKernelVirtualQuery(ib, 0, &vq, sizeof(vq)))
+                  fprintf(f, "  kernel: [%p, %p) offset %#llx prot %#x type %d direct %u flexible %u "
+                             "'%.32s'\n", vq.start, vq.end, (unsigned long long)vq.offset,
+                          vq.protection, vq.memory_type, vq.is_direct, vq.is_flexible, vq.name);
+               ps4_check_overlaps(dev, f);
+               fclose(f);
+            }
+         }
+         return false;
+      }
+      if (!next)
+         return true;
+      ib = (const uint32_t *)(uintptr_t)next;
+      num_dw = next_dw;
+   }
+   return true;
+}
+
 static uint32_t *
 ps4_emit_eop(uint32_t *cs, uint64_t addr, uint64_t value, bool interrupt)
 {
@@ -1061,15 +1197,26 @@ ac_drm_cs_submit_raw2(ac_drm_device *dev, uint32_t ctx_id, uint32_t bo_list_hand
    if (!num_ibs)
       return -EINVAL;
 
-   simple_mtx_lock(&dev->lock);
-   const uint64_t seq = ++dev->last_seq;
+   /* A corrupted command buffer would hang the GPU (or fault it, and the system kills the app):
+    * drop its work - the fences still signal - and report it once. */
+   for (unsigned i = 0; i < num_ibs; i++) {
+      if (!ps4_check_ib_chain(dev, dcb[i], dcb_sizes[i] / 4, dev->last_seq + 1)) {
+         num_ibs = 0;
+         break;
+      }
+   }
 
-   /* The fence IB slot for this sequence number must be free (its previous user finished). */
-   if (seq > FENCE_IB_COUNT) {
+   simple_mtx_lock(&dev->lock);
+   /* The fence IB slot for the next sequence number must be free (its previous user finished).
+    * Waited for before taking the number, so submissions reach the GPU in sequence order (the
+    * completed counter must never get ahead of work that hasn't been submitted yet). */
+   while (dev->last_seq + 1 > FENCE_IB_COUNT &&
+          ps4_completed(dev) < dev->last_seq + 1 - FENCE_IB_COUNT) {
       simple_mtx_unlock(&dev->lock);
-      ps4_wait_seq(dev, seq - FENCE_IB_COUNT, INT64_MAX);
+      ps4_wait_seq(dev, dev->last_seq + 1 - FENCE_IB_COUNT, INT64_MAX);
       simple_mtx_lock(&dev->lock);
    }
+   const uint64_t seq = ++dev->last_seq;
    uint32_t *fence_ib = dev->fence_ibs + (seq % FENCE_IB_COUNT) * FENCE_IB_DW;
    uint32_t *cs = fence_ib;
    if (user_fence_addr)
