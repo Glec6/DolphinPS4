@@ -5253,10 +5253,10 @@ index d388300..de289e4 100644
  
    // convert std::string list to a char pointer list which we can feed in
 diff --git a/Source/Core/VideoBackends/Vulkan/VulkanLoader.cpp b/Source/Core/VideoBackends/Vulkan/VulkanLoader.cpp
-index a761a81..cbd3ce8 100644
+index a761a81..3416e1f 100644
 --- a/Source/Core/VideoBackends/Vulkan/VulkanLoader.cpp
 +++ b/Source/Core/VideoBackends/Vulkan/VulkanLoader.cpp
-@@ -41,6 +41,12 @@ static void ResetVulkanLibraryFunctionPointers()
+@@ -41,6 +41,15 @@ static void ResetVulkanLibraryFunctionPointers()
  
  static Common::DynamicLibrary s_vulkan_module;
  
@@ -5264,19 +5264,24 @@ index a761a81..cbd3ce8 100644
 +// PS4: Mesa's RADV is linked into the executable (no Vulkan loader); this is its ICD entry point.
 +extern "C" VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vk_icdGetInstanceProcAddr(VkInstance instance,
 +                                                                              const char* name);
++// Not available from vk_icdGetInstanceProcAddr without an instance; RADV uses Mesa.s common one.
++extern "C" VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vk_common_GetDeviceProcAddr(VkDevice device,
++                                                                           const char* name);
 +#endif
 +
  static bool OpenVulkanLibrary(bool force_system_library)
  {
  #if defined(__APPLE__)
-@@ -94,6 +100,23 @@ static bool OpenVulkanLibrary(bool force_system_library)
+@@ -94,6 +103,25 @@ static bool OpenVulkanLibrary(bool force_system_library)
  
  bool LoadVulkanLibrary(bool force_system_library)
  {
 +#ifdef __ORBIS__
 +  bool missing = false;
++  vkGetDeviceProcAddr = vk_common_GetDeviceProcAddr;
 +#define VULKAN_MODULE_ENTRY_POINT(name, required)                                                  \
-+  name = reinterpret_cast<PFN_##name>(vk_icdGetInstanceProcAddr(VK_NULL_HANDLE, #name));          \
++  if (!name)                                                                                       \
++    name = reinterpret_cast<PFN_##name>(vk_icdGetInstanceProcAddr(VK_NULL_HANDLE, #name));        \
 +  if (!name && required)                                                                           \
 +  {                                                                                                \
 +    ERROR_LOG_FMT(VIDEO, "Vulkan: RADV lacks required module function {}", #name);                 \
