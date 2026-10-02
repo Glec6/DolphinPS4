@@ -268,7 +268,10 @@ ac_drm_device_initialize(int fd, bool is_virtio, uint32_t *major_version, uint32
    if (!ps4_load_gnm(dev))
       goto fail;
    dev->va_start = ps4_reserve_window(PS4_VA_SIZE, 0x200000);
-   dev->va32_start = ps4_reserve_window(PS4_VA32_SIZE, PS4_VA32_SIZE);
+   /* The kernel rejects a 4 GiB alignment (EINVAL): reserve twice the size and use the 4 GiB
+    * aligned half inside it (the rest stays reserved, unused). */
+   const uint64_t va32_range = ps4_reserve_window(PS4_VA32_SIZE * 2, 0x200000);
+   dev->va32_start = va32_range ? align64(va32_range, PS4_VA32_SIZE) : 0;
    if (!dev->va_start || !dev->va32_start)
       goto fail;
    ps4_log("radv/ps4: GPU address windows %#llx (16 GiB), %#llx (32-bit)\n",
