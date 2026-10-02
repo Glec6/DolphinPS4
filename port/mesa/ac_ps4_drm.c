@@ -254,6 +254,10 @@ ps4_reserve(uint64_t addr, uint64_t size)
 
 static struct util_sync_provider *ps4_sync_provider_init(ac_drm_device *dev);
 
+/* Logs the first memory operations (bring-up). */
+static unsigned ps4_verbose_left = 64;
+#define PS4_VERBOSE(...) do { if (ps4_verbose_left) { ps4_verbose_left--; ps4_log(__VA_ARGS__); } } while (0)
+
 int
 ac_drm_device_initialize(int fd, bool is_virtio, uint32_t *major_version, uint32_t *minor_version,
                          ac_drm_device **out)
@@ -374,6 +378,9 @@ ac_drm_bo_alloc(ac_drm_device *dev, struct amdgpu_bo_alloc_request *req, ac_drm_
    simple_mtx_unlock(&dev->lock);
 
    out->abo = bo;
+   PS4_VERBOSE("radv/ps4: bo %u: %llu bytes, heap %#x, flags %#llx, align %#llx, phys %#llx\n",
+               bo->handle, (unsigned long long)bo->size, bo->heap, (unsigned long long)bo->flags,
+               (unsigned long long)align, (unsigned long long)bo->phys);
    return 0;
 }
 
@@ -426,8 +433,10 @@ ac_drm_bo_cpu_map(ac_drm_device *dev, ac_drm_bo bo, void **cpu)
    if (!b->cpu) {
       void *addr = NULL;
       if (sceKernelMapDirectMemory(&addr, b->size, PS4_PROT_CPU_RW | PS4_PROT_GPU_RW, 0, b->phys,
-                                   PS4_PAGE))
+                                   PS4_PAGE)) {
+         ps4_log("radv/ps4: cpu map of bo %u failed\n", b->handle);
          return -ENOMEM;
+      }
       b->cpu = addr;
       b->cpu_owned = true;
    }
@@ -474,14 +483,19 @@ ps4_va_op(ac_drm_device *dev, uint32_t bo_handle, uint64_t offset, uint64_t size
           uint64_t flags, uint32_t ops)
 {
    size = align64(size, PS4_PAGE);
-   if (flags & AMDGPU_VM_PAGE_PRT)
+   if (flags & AMDGPU_VM_PAGE_PRT) {
+      ps4_log("radv/ps4: sparse (PRT) mapping requested - unsupported\n");
       return -ENOSYS; /* no sparse residency */
+   }
 
    switch (ops) {
    case AMDGPU_VA_OP_MAP: {
       struct amdgpu_bo *b = ps4_bo(dev, bo_handle);
-      if (!b || offset + size > b->size)
+      if (!b || offset + size > b->size) {
+         ps4_log("radv/ps4: map of bo %u (+%#llx, %#llx bytes) out of range\n", bo_handle,
+                 (unsigned long long)offset, (unsigned long long)size);
          return -EINVAL;
+      }
       void *a = (void *)(uintptr_t)addr;
       int r = sceKernelMapDirectMemory(&a, size, PS4_PROT_CPU_RW | PS4_PROT_GPU_RW, PS4_MAP_FIXED,
                                        b->phys + offset, PS4_PAGE);
@@ -493,6 +507,8 @@ ps4_va_op(ac_drm_device *dev, uint32_t bo_handle, uint64_t offset, uint64_t size
       }
       if (offset == 0 && !b->cpu)
          b->cpu = a;
+      PS4_VERBOSE("radv/ps4: map bo %u +%#llx at %#llx (%#llx bytes)\n", b->handle,
+                  (unsigned long long)offset, (unsigned long long)addr, (unsigned long long)size);
       return 0;
    }
    case AMDGPU_VA_OP_UNMAP:
@@ -504,6 +520,7 @@ ps4_va_op(ac_drm_device *dev, uint32_t bo_handle, uint64_t offset, uint64_t size
       return ps4_reserve(addr, size) ? 0 : -EINVAL;
    }
    default:
+      ps4_log("radv/ps4: va op %u unsupported\n", ops);
       return -ENOSYS;
    }
 }
@@ -557,8 +574,14 @@ ac_drm_va_range_alloc(ac_drm_device *dev, enum amdgpu_gpu_va_range va_range_type
       addr = util_vma_heap_alloc(heap, size, align);
    }
    simple_mtx_unlock(&ps4_va_lock);
-   if (!addr)
+   if (!addr) {
+      ps4_log("radv/ps4: va_range_alloc(%#llx, align %#llx, required %#llx, flags %#llx) failed\n",
+              (unsigned long long)size, (unsigned long long)align,
+              (unsigned long long)va_base_required, (unsigned long long)flags);
       return -ENOMEM;
+   }
+   PS4_VERBOSE("radv/ps4: va %#llx + %#llx (flags %#llx)\n", (unsigned long long)addr,
+               (unsigned long long)size, (unsigned long long)flags);
 
    struct amdgpu_va *va = malloc(sizeof(*va));
    va->heap = heap;
