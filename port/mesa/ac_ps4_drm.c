@@ -203,6 +203,71 @@ ps4_ib_addr(void *data, uint64_t addr, struct ac_addr_info *info)
    }
 }
 
+
+/* Execution check for the hang report: walks the PM4 stream (following IB chains) and, for
+ * every WRITE_DATA to memory and every EVENT_WRITE_EOP, tells whether the value is in memory -
+ * i.e. whether the GPU got past it. With RADV_DEBUG=hang RADV writes an increasing trace id
+ * after each draw, so the last "done" write marks where the GPU stopped. */
+static unsigned ps4_walk_lines;
+
+static void
+ps4_walk_ib(ac_drm_device *dev, FILE *f, const uint32_t *ib, unsigned num_dw, int depth)
+{
+   struct ac_addr_info info;
+   for (unsigned i = 0; i < num_dw && ps4_walk_lines < 4000;) {
+      const uint32_t h = ib[i];
+      const unsigned type = h >> 30;
+      if (type == 2) {
+         i++;
+         continue;
+      }
+      if (type != 3) {
+         fprintf(f, "%*s%p: non-type-3 header %#x, stop\n", depth * 2, "", (void *)&ib[i], h);
+         return;
+      }
+      const unsigned op = (h >> 8) & 0xff;
+      const unsigned body = ((h >> 16) & 0x3fff) + 1;
+      const uint32_t *b = &ib[i + 1];
+      if ((op == 0x3f || op == 0x33) && body >= 3) { /* INDIRECT_BUFFER(_CONST) */
+         const uint64_t va = b[0] | ((uint64_t)(b[1] & 0xffff) << 32);
+         const unsigned size = b[2] & 0xfffff;
+         const bool chain = b[2] & (1u << 20);
+         ps4_ib_addr(dev, va, &info);
+         fprintf(f, "%*s%p: INDIRECT_BUFFER %#llx, %u dwords%s%s\n", depth * 2, "", (void *)&ib[i],
+                 (unsigned long long)va, size, chain ? " (chain)" : "", info.valid ? "" : " INVALID");
+         ps4_walk_lines++;
+         if (info.valid && depth < 4)
+            ps4_walk_ib(dev, f, info.cpu_addr, size, chain ? depth : depth + 1);
+         if (chain)
+            return;
+      } else if (op == 0x37 && body >= 4) { /* WRITE_DATA */
+         const unsigned dst_sel = (b[0] >> 8) & 0xf;
+         if (dst_sel == 5 || dst_sel == 2 || dst_sel == 1) {
+            const uint64_t va = b[1] | ((uint64_t)b[2] << 32);
+            ps4_ib_addr(dev, va, &info);
+            const uint32_t now = info.valid ? *(volatile uint32_t *)info.cpu_addr : 0xdeadbeef;
+            fprintf(f, "%*s%p: WRITE_DATA %#llx <- %#x, memory %#x %s\n", depth * 2, "",
+                    (void *)&ib[i], (unsigned long long)va, b[3], now,
+                    now == b[3] ? "done" : "NOT DONE");
+            ps4_walk_lines++;
+         }
+      } else if (op == 0x47 && body >= 5) { /* EVENT_WRITE_EOP */
+         const uint64_t va = b[1] | ((uint64_t)(b[2] & 0xffff) << 32);
+         ps4_ib_addr(dev, va, &info);
+         const uint32_t now = info.valid ? *(volatile uint32_t *)info.cpu_addr : 0xdeadbeef;
+         fprintf(f, "%*s%p: EVENT_WRITE_EOP %#llx <- %#x, memory %#x %s\n", depth * 2, "",
+                 (void *)&ib[i], (unsigned long long)va, b[3], now,
+                 now == b[3] ? "done" : "NOT DONE");
+         ps4_walk_lines++;
+      } else if (op == 0x2d || op == 0x27 || op == 0x15 || op == 0x16) { /* draws, dispatch */
+         fprintf(f, "%*s%p: %s\n", depth * 2, "", (void *)&ib[i],
+                 op == 0x2d ? "DRAW_INDEX_AUTO" : op == 0x27 ? "DRAW_INDEX_2" : "DISPATCH");
+         ps4_walk_lines++;
+      }
+      i += 1 + body;
+   }
+}
+
 /* Writes the command buffers of the first submission the GPU hasn't finished, decoded by Mesa's
  * IB parser, to /data/DolphinPS4/gpu-hang.txt (once). */
 static void
@@ -225,6 +290,13 @@ ps4_report_hang(ac_drm_device *dev, uint64_t waited_seq)
    for (unsigned r = 0; r < ARRAY_SIZE(dev->recent); r++) {
       if (dev->recent[r].seq != completed + 1)
          continue;
+      fprintf(f, "==== execution check (memory writes the GPU did / didn't do) ====\n");
+      for (unsigned i = 0; i < dev->recent[r].num_ibs; i++) {
+         fprintf(f, "-- IB %u\n", i);
+         ps4_walk_ib(dev, f, (const uint32_t *)(uintptr_t)dev->recent[r].va[i],
+                     dev->recent[r].bytes[i] / 4, 0);
+      }
+      fprintf(f, "\n==== decoded command buffers ====\n");
       for (unsigned i = 0; i < dev->recent[r].num_ibs; i++) {
          char name[64];
          snprintf(name, sizeof(name), "submission %llu IB %u (%#llx, %u dwords)",
@@ -766,6 +838,9 @@ ac_drm_cs_query_fence_status(ac_drm_device *dev, uint32_t ctx_id, uint32_t ip_ty
                     ? (int64_t)timeout_ns
                     : os_time_get_absolute_timeout(timeout_ns);
    *expired = ps4_wait_seq(dev, fence_seq_no, abs);
+   /* RADV_DEBUG=hang checks each submission with a 1 s wait: report before it gives up. */
+   if (!*expired && timeout_ns >= 500000000ull)
+      ps4_report_hang(dev, fence_seq_no);
    return 0;
 }
 
