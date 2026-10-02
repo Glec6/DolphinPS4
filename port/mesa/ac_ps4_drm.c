@@ -1445,3 +1445,15 @@ drmGetFormatModifierName(uint64_t modifier)
 {
    return NULL;
 }
+
+/* Trace points in RADV's startup (PS4_TRACE in the patched Mesa sources). */
+void
+ac_ps4_trace(const char *fmt, ...)
+{
+   char line[256];
+   va_list args;
+   va_start(args, fmt);
+   vsnprintf(line, sizeof(line), fmt, args);
+   va_end(args);
+   ps4_log("%s", line);
+}
