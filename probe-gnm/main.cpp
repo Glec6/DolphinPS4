@@ -9,6 +9,7 @@
 // PM4 formats: AMD CIK (GCN 1.1) as used by Mesa's radeonsi; GNM signatures: shadPS4.
 
 #include <fcntl.h>
+#include <initializer_list>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdint.h>
@@ -21,6 +22,8 @@
 #include <orbis/VideoOut.h>
 #include <orbis/libkernel.h>
 
+extern "C" int sceSystemServiceLoadExec(const char* path, char* const argv[]);
+
 namespace {
 
 // libSceGnmDriver (signatures from shadPS4's gnmdriver.h), resolved with sceKernelDlsym.
@@ -30,6 +33,14 @@ int32_t (*sceGnmSubmitAndFlipCommandBuffers)(uint32_t count, void* dcb_gpu_addrs
                                              uint32_t buf_idx, uint32_t flip_mode,
                                              int64_t flip_arg);
 int32_t (*sceGnmSubmitDone)(void);
+// Fixed-size command writers (sizes in dwords, from the disassembly: InitDefaultHardwareState350
+// needs >= 0x100, SetVsShader 0x1d, SetPsShader350 0x28, DrawIndexAuto exactly 7).
+int32_t (*sceGnmDrawInitDefaultHardwareState350)(uint32_t* cmd, uint32_t size);
+int32_t (*sceGnmSetEmbeddedVsShader)(uint32_t* cmd, uint32_t size, uint32_t id,
+                                     uint32_t modifier);
+int32_t (*sceGnmSetEmbeddedPsShader)(uint32_t* cmd, uint32_t size, uint32_t id);
+int32_t (*sceGnmDrawIndexAuto)(uint32_t* cmd, uint32_t size, uint32_t index_count,
+                               uint32_t flags);
 
 int g_log = -1;
 
@@ -89,14 +100,26 @@ int32_t LoadGnmDriver() {
 }
 
 bool ResolveGnm(int32_t gnm) {
-    const int32_t a = sceKernelDlsym(gnm, "sceGnmSubmitAndFlipCommandBuffers",
-                                     reinterpret_cast<void**>(&sceGnmSubmitAndFlipCommandBuffers));
-    const int32_t b =
-        sceKernelDlsym(gnm, "sceGnmSubmitDone", reinterpret_cast<void**>(&sceGnmSubmitDone));
-    Log("dlsym SubmitAndFlip = %#x (%p), SubmitDone = %#x (%p)\n", a,
-        reinterpret_cast<void*>(sceGnmSubmitAndFlipCommandBuffers), b,
-        reinterpret_cast<void*>(sceGnmSubmitDone));
-    return a == 0 && b == 0 && sceGnmSubmitAndFlipCommandBuffers && sceGnmSubmitDone;
+    const struct {
+        const char* name;
+        void** address;
+    } symbols[] = {
+        {"sceGnmSubmitAndFlipCommandBuffers",
+         reinterpret_cast<void**>(&sceGnmSubmitAndFlipCommandBuffers)},
+        {"sceGnmSubmitDone", reinterpret_cast<void**>(&sceGnmSubmitDone)},
+        {"sceGnmDrawInitDefaultHardwareState350",
+         reinterpret_cast<void**>(&sceGnmDrawInitDefaultHardwareState350)},
+        {"sceGnmSetEmbeddedVsShader", reinterpret_cast<void**>(&sceGnmSetEmbeddedVsShader)},
+        {"sceGnmSetEmbeddedPsShader", reinterpret_cast<void**>(&sceGnmSetEmbeddedPsShader)},
+        {"sceGnmDrawIndexAuto", reinterpret_cast<void**>(&sceGnmDrawIndexAuto)},
+    };
+    bool ok = true;
+    for (const auto& s : symbols) {
+        const int32_t r = sceKernelDlsym(gnm, s.name, s.address);
+        Log("dlsym %s = %#x (%p)\n", s.name, r, *s.address);
+        ok = ok && r == 0 && *s.address;
+    }
+    return ok;
 }
 
 constexpr uint32_t kWidth = 1920, kHeight = 1080;
@@ -130,7 +153,8 @@ void* AllocGpuMemory(size_t size, const char* what) {
 constexpr uint32_t Pm4(uint32_t opcode, uint32_t body_dwords) {
     return (3u << 30) | ((body_dwords - 1) << 16) | (opcode << 8);
 }
-constexpr uint32_t kOpNop = 0x10, kOpDmaData = 0x50;
+constexpr uint32_t kOpNop = 0x10, kOpNumInstances = 0x2F, kOpEventWrite = 0x46,
+                   kOpDmaData = 0x50, kOpSetContextReg = 0x69, kOpSetUconfigReg = 0x79;
 
 struct CommandBuffer {
     uint32_t* base;
@@ -157,6 +181,25 @@ struct CommandBuffer {
             *cur++ = chunk;  // BYTE_COUNT [20:0]
             addr += chunk;
         }
+    }
+    // Consecutive context registers starting at `reg` (dword offset from 0x28000 / 4 = 0xA000).
+    void ContextRegs(uint32_t reg, std::initializer_list<uint32_t> values) {
+        *cur++ = Pm4(kOpSetContextReg, 1 + static_cast<uint32_t>(values.size()));
+        *cur++ = reg;
+        for (uint32_t v : values)
+            *cur++ = v;
+    }
+    void UconfigReg(uint32_t reg, uint32_t value) {
+        *cur++ = Pm4(kOpSetUconfigReg, 2);
+        *cur++ = reg;
+        *cur++ = value;
+    }
+    // Runs one of Gnm's fixed-size command writers and advances by `dwords`.
+    template <typename F>
+    void Gnm(const char* what, uint32_t dwords, F&& write) {
+        const int32_t r = write(cur, dwords);
+        Log("  %s = %#x\n", what, r);
+        cur += dwords;
     }
     // Gnm's prepareFlip: sceGnmSubmitAndFlipCommandBuffers requires the last 64 dwords of the
     // last DCB to be a NOP (0xC03E1000) with a label (0x68750777 = plain flip), which it rewrites
@@ -311,7 +354,87 @@ int main() {
             static_cast<uint32_t*>(frames[0])[0]);
     }
 
+    // Step 4: a real draw. Framebuffer 1 is filled dark red, then Gnm's embedded full-screen VS
+    // and embedded PS 1 draw a rect list into it, scissored to the centre box. Register numbers:
+    // AMD CIK (Mesa sid.h), dword offsets from the context register base.
+    {
+        CommandBuffer cb{cmd_memory, cmd_memory};
+        Log("step 4 (draw): building\n");
+        cb.Fill(frames[1], 0xFF000080, kFrameBytes);
+        cb.Gnm("InitDefaultHardwareState350", 0x100, [](uint32_t* c, uint32_t n) {
+            return sceGnmDrawInitDefaultHardwareState350(c, n);
+        });
+
+        // Colour target 0: the linear framebuffer (8_8_8_8 UNORM, tile mode 8 = linear aligned).
+        const uintptr_t target = reinterpret_cast<uintptr_t>(frames[1]);
+        const uint32_t pitch_tiles = kWidth / 8 - 1, slice_tiles = kWidth * kHeight / 64 - 1;
+        cb.ContextRegs(0x318, {static_cast<uint32_t>(target >> 8),   // CB_COLOR0_BASE
+                               pitch_tiles,                          // CB_COLOR0_PITCH
+                               slice_tiles,                          // CB_COLOR0_SLICE
+                               0,                                    // CB_COLOR0_VIEW
+                               0xAu << 2,                            // CB_COLOR0_INFO
+                               8u | (8u << 5),                       // CB_COLOR0_ATTRIB
+                               0,                                    // (DCC, unused on CIK)
+                               0,                                    // CB_COLOR0_CMASK
+                               0,                                    // CB_COLOR0_CMASK_SLICE
+                               static_cast<uint32_t>(target >> 8),   // CB_COLOR0_FMASK
+                               slice_tiles});                        // CB_COLOR0_FMASK_SLICE
+        cb.ContextRegs(0x8E, {0xF});                                 // CB_TARGET_MASK
+        cb.ContextRegs(0x202, {(1u << 4) | (0xCCu << 16)});          // CB_COLOR_CONTROL normal, copy
+        cb.ContextRegs(0x1E0, {0});                                  // CB_BLEND0_CONTROL off
+
+        // No depth/stencil.
+        cb.ContextRegs(0x000, {0});                                  // DB_RENDER_CONTROL
+        cb.ContextRegs(0x010, {0, 0});                               // DB_Z_INFO, DB_STENCIL_INFO
+        cb.ContextRegs(0x200, {0});                                  // DB_DEPTH_CONTROL
+
+        // Scissors and viewport: full screen, generic scissor = centre box.
+        const uint32_t full = kWidth | (kHeight << 16);
+        cb.ContextRegs(0x00C, {0, full});                            // PA_SC_SCREEN_SCISSOR_TL/BR
+        cb.ContextRegs(0x080, {0, 0x80000000, full, 0xFFFF});        // WINDOW_OFFSET, WINDOW_SCISSOR, CLIPRECT_RULE
+        cb.ContextRegs(0x090, {0x80000000 | (kWidth / 4) | ((kHeight / 4) << 16),
+                               (kWidth * 3 / 4) | ((kHeight * 3 / 4) << 16)});  // GENERIC_SCISSOR
+        cb.ContextRegs(0x094, {0x80000000, full});                   // PA_SC_VPORT_SCISSOR_0
+        const auto f = [](float v) {
+            uint32_t u;
+            memcpy(&u, &v, 4);
+            return u;
+        };
+        cb.ContextRegs(0x0B4, {f(0.0f), f(1.0f)});                   // PA_SC_VPORT_ZMIN/ZMAX_0
+        cb.ContextRegs(0x10F, {f(kWidth / 2.0f), f(kWidth / 2.0f), f(-(kHeight / 2.0f)),
+                               f(kHeight / 2.0f), f(0.5f), f(0.5f)});  // PA_CL_VPORT_*
+        cb.ContextRegs(0x204, {1u << 16});                           // PA_CL_CLIP_CNTL clip off
+        cb.ContextRegs(0x205, {0});                                  // PA_SU_SC_MODE_CNTL no cull
+        cb.ContextRegs(0x206, {0x43F});                              // PA_CL_VTE_CNTL
+        cb.ContextRegs(0x2F8, {0});                                  // PA_SC_AA_CONFIG
+        cb.ContextRegs(0x30E, {0xFFFFFFFF, 0xFFFFFFFF});             // PA_SC_AA_MASK
+
+        cb.Gnm("SetEmbeddedVsShader(0)", 0x1D, [](uint32_t* c, uint32_t n) {
+            return sceGnmSetEmbeddedVsShader(c, n, 0, 0);
+        });
+        cb.Gnm("SetEmbeddedPsShader(1)", 0x28, [](uint32_t* c, uint32_t n) {
+            return sceGnmSetEmbeddedPsShader(c, n, 1);
+        });
+        cb.UconfigReg(0x242, 0x11);                                  // VGT_PRIMITIVE_TYPE rect list
+        *cb.cur++ = Pm4(kOpNumInstances, 1);
+        *cb.cur++ = 1;
+        cb.Gnm("DrawIndexAuto(3)", 7, [](uint32_t* c, uint32_t n) {
+            return sceGnmDrawIndexAuto(c, n, 3, 0);
+        });
+        *cb.cur++ = Pm4(kOpEventWrite, 1);
+        *cb.cur++ = 0x16;                                            // CACHE_FLUSH_AND_INV_EVENT
+
+        SubmitAndFlip(cb, video, 1, "step 4 (draw)");
+        Wait(6);
+        const uint32_t* pixels = static_cast<uint32_t*>(frames[1]);
+        Log("step 4: corner pixel %#x (expect 0xff000080), centre pixel %#x (drawn if different)\n",
+            pixels[0], pixels[(kHeight / 2) * kWidth + kWidth / 2]);
+    }
+
     Log("GNM probe done\n");
     close(g_log);
+    sceVideoOutClose(video);
+    // Returning from main shows as a crash (v01.07); exit like Dolphin does.
+    sceSystemServiceLoadExec("exit", nullptr);
     return 0;
 }
