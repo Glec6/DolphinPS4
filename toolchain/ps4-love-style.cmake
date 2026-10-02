@@ -16,6 +16,23 @@ set(PS4_RUNTIME_SOURCES
 # than baseline x86-64 (SSE2).
 add_compile_options(-march=btver2)
 
+# System libc heap: system modules (Piglet: program links, shader compiles, command buffers)
+# allocate from it, and OpenOrbis' crt1.o leaves its size at the ~12.7 MiB default, which
+# Dolphin exhausts within minutes. Link a copy of crt1.o declaring an explicit sceLibcHeapSize.
+set(PS4_LIBC_HEAP_MIB 64 CACHE STRING "System libc heap size (MiB) declared in crt1.o")
+set(PS4_CRT1 ${CMAKE_BINARY_DIR}/ps4-crt1-heap${PS4_LIBC_HEAP_MIB}.o)
+execute_process(
+  COMMAND sh ${CMAKE_CURRENT_LIST_DIR}/patch-crt1.sh ${OPENORBIS}/lib/crt1.o ${PS4_CRT1}
+          ${PS4_LIBC_HEAP_MIB}
+  RESULT_VARIABLE _ps4_crt1_result)
+if(NOT _ps4_crt1_result EQUAL 0)
+  message(FATAL_ERROR "patch-crt1.sh failed: ${_ps4_crt1_result}")
+endif()
+foreach(_lang C CXX)
+  string(REPLACE "${OPENORBIS}/lib/crt1.o" "${PS4_CRT1}" CMAKE_${_lang}_LINK_EXECUTABLE
+                 "${CMAKE_${_lang}_LINK_EXECUTABLE}")
+endforeach()
+
 # The toolchain's linker script only collects plain .init_array, so prioritized constructors
 # (.init_array.NNN - e.g. libc++'s iostream setup) end up in an orphan section the loader never
 # runs. Link with a copy that includes them, in priority order.
