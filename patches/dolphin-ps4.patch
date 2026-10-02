@@ -1482,7 +1482,7 @@ index 51c3fff..8e91ab7 100644
 +  ps4_add_eboot(dolphin-nogui)
 +endif()
 diff --git a/Source/Core/DolphinNoGUI/MainNoGUI.cpp b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
-index 3bf40ea..73a6950 100644
+index 3bf40ea..fe81793 100644
 --- a/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 +++ b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 @@ -5,7 +5,9 @@
@@ -1571,7 +1571,7 @@ index 3bf40ea..73a6950 100644
  #endif
        });
  
-@@ -270,7 +309,135 @@ int main(const int argc, char* argv[])
+@@ -270,7 +309,143 @@ int main(const int argc, char* argv[])
  
    UICommon::SetUserDirectory(user_directory);
    UICommon::Init();
@@ -1603,6 +1603,14 @@ index 3bf40ea..73a6950 100644
 +    // video=opengl: Piglet (OpenGL ES, needs the RetroArch identity).
 +    const std::string video = Platform::GetPS4Option("video", "vulkan");
 +    Config::SetBase(Config::MAIN_GFX_BACKEND, video == "opengl" ? "OGL" : "Vulkan");
++    // radv_debug=<RADV_DEBUG flags>, e.g. hang,noumr,syncshaders: RADV's GPU hang reports go to
++    // $HOME/radv_dumps_* (here /data/DolphinPS4).
++    const std::string radv_debug = Platform::GetPS4Option("radv_debug", "");
++    if (!radv_debug.empty())
++    {
++      setenv("RADV_DEBUG", radv_debug.c_str(), 1);
++      setenv("HOME", "/data/DolphinPS4", 1);
++    }
 +    const std::string core = Platform::GetPS4Option("cpu_core", "jit");
 +    Config::SetBase(Config::MAIN_CPU_CORE, core == "interpreter"       ? PowerPC::CPUCore::Interpreter :
 +                                           core == "cachedinterpreter" ? PowerPC::CPUCore::CachedInterpreter :
@@ -1707,7 +1715,7 @@ index 3bf40ea..73a6950 100644
  
    Common::ScopeGuard ui_common_guard([] {
      UICommon::ShutdownControllers();
-@@ -284,6 +451,12 @@ int main(const int argc, char* argv[])
+@@ -284,6 +459,12 @@ int main(const int argc, char* argv[])
    }
  
    auto core_state_changed_hook = Core::AddOnStateChangedCallback([](const Core::State state) {
@@ -1720,7 +1728,7 @@ index 3bf40ea..73a6950 100644
      if (state == Core::State::Uninitialized)
        s_platform->Stop();
    });
-@@ -303,6 +476,9 @@ int main(const int argc, char* argv[])
+@@ -303,6 +484,9 @@ int main(const int argc, char* argv[])
  
    DolphinAnalytics::Instance().ReportDolphinStart("nogui");
  
