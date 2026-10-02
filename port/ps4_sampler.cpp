@@ -30,7 +30,10 @@ namespace {
 constexpr int kSigProf = 27;    // FreeBSD value
 constexpr int kSaSiginfo = 0x40, kSaRestart = 0x0002;
 constexpr int kMcontextOffset = 0x40;  // measured on hardware (see ps4_crashlog.cpp)
-constexpr int kRipIndex = 20;
+constexpr int kRipIndex = 20, kRspIndex = 23;
+// Samples in system libraries (libkernel/libc at 0x800000000+) are attributed to the eboot
+// function that called into them: the first eboot code address on the stack, tagged.
+constexpr uint64_t kSystemLibs = 0x800000000ULL, kCallerTag = 1ULL << 62;
 constexpr uintptr_t kTextWindow = 0x4000000;
 constexpr int kMaxThreads = 4;
 constexpr int kMaxSamples = 16384;  // per thread and window (10 s at 1 kHz fits)
@@ -55,7 +58,18 @@ void profHandler(int, siginfo_t*, void* context) {
             reinterpret_cast<const uint64_t*>(static_cast<char*>(context) + kMcontextOffset);
         const int n = t.count.load(std::memory_order_relaxed);
         if (n < kMaxSamples) {
-            t.samples[n] = regs[kRipIndex];
+            uint64_t sample = regs[kRipIndex];
+            if (sample >= kSystemLibs) {
+                const uintptr_t text = reinterpret_cast<uintptr_t>(__text_start);
+                const auto* stack = reinterpret_cast<const uint64_t*>(regs[kRspIndex]);
+                for (int i = 0; i < 256; i++) {
+                    if (stack[i] >= text && stack[i] < text + kTextWindow) {
+                        sample = kCallerTag | (stack[i] - text);
+                        break;
+                    }
+                }
+            }
+            t.samples[n] = sample;
             t.count.store(n + 1, std::memory_order_release);
         }
         return;
@@ -87,6 +101,10 @@ void report(int fd, ThreadSamples& t, double window_start) {
     // Eboot code: exact addresses, aggregated by the symbolizer later; bucket by 16 bytes here.
     // Elsewhere (JIT code, modules): 1 MiB regions.
     for (int i = 0; i < n; i++) {
+        if (s[i] & kCallerTag) {
+            s[i] &= ~0xFULL;  // system library, attributed to its eboot caller
+            continue;
+        }
         const bool eboot = s[i] >= text && s[i] < text + kTextWindow;
         s[i] = eboot ? ((s[i] - text) & ~0xFULL) : (s[i] | (1ULL << 63)) >> 20 << 20;
     }
@@ -99,7 +117,7 @@ void report(int fd, ThreadSamples& t, double window_start) {
         while (j < n && s[j] == s[i])
             j++;
         entries[unique++] = {s[i], j - i};
-        if (!(s[i] >> 63))
+        if (!(s[i] >> 62))
             eboot_samples += j - i;
         i = j;
     }
@@ -113,6 +131,10 @@ void report(int fd, ThreadSamples& t, double window_start) {
         if (entries[i].key >> 63)
             snprintf(line, sizeof(line), "  %5.1f%% region 0x%llx\n", 100.0 * entries[i].count / n,
                      static_cast<unsigned long long>(entries[i].key & ~(1ULL << 63)));
+        else if (entries[i].key & kCallerTag)
+            snprintf(line, sizeof(line), "  %5.1f%% syscall from elf 0x%llx\n",
+                     100.0 * entries[i].count / n,
+                     static_cast<unsigned long long>(entries[i].key & ~kCallerTag));
         else
             snprintf(line, sizeof(line), "  %5.1f%% elf 0x%llx\n", 100.0 * entries[i].count / n,
                      static_cast<unsigned long long>(entries[i].key));

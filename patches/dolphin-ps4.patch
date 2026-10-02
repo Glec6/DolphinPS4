@@ -1502,7 +1502,7 @@ index 51c3fff..8e91ab7 100644
 +  ps4_add_eboot(dolphin-nogui)
 +endif()
 diff --git a/Source/Core/DolphinNoGUI/MainNoGUI.cpp b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
-index 3bf40ea..6975809 100644
+index 3bf40ea..f3f5bc4 100644
 --- a/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 +++ b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 @@ -5,7 +5,9 @@
@@ -1529,7 +1529,15 @@ index 3bf40ea..6975809 100644
  #include "Core/Boot/Boot.h"
  #include "Core/BootManager.h"
  #include "Core/Core.h"
-@@ -31,6 +39,22 @@
+@@ -23,6 +31,7 @@
+ #include "Core/Host.h"
+ #include "Core/System.h"
+ 
++#include "VideoCommon/VideoConfig.h"
+ #include "UICommon/CommandLineParse.h"
+ #ifdef USE_DISCORD_PRESENCE
+ #include "UICommon/DiscordPresence.h"
+@@ -31,6 +40,22 @@
  
  static std::unique_ptr<Platform> s_platform;
  
@@ -1552,7 +1560,7 @@ index 3bf40ea..6975809 100644
  static void signal_handler(int)
  {
    constexpr char message[] = "A signal was received. A second signal will force Dolphin to stop.\n";
-@@ -173,6 +197,10 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
+@@ -173,6 +198,10 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
    if (platform_name == "macos" || platform_name.empty())
      return Platform::CreateMacOSPlatform();
  #endif
@@ -1563,7 +1571,7 @@ index 3bf40ea..6975809 100644
  
    if (platform_name == "headless" || platform_name.empty())
      return Platform::CreateHeadlessPlatform();
-@@ -184,8 +212,17 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
+@@ -184,8 +213,17 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
  #define main app_main
  #endif
  
@@ -1582,7 +1590,7 @@ index 3bf40ea..6975809 100644
    const auto parser =
        CommandLineParse::CreateParser(CommandLineParse::ParserOptions::OmitGUIOptions);
    parser->add_option("-p", "--platform")
-@@ -207,6 +244,10 @@ int main(const int argc, char* argv[])
+@@ -207,6 +245,10 @@ int main(const int argc, char* argv[])
  #ifdef __APPLE__
                  ,
                  "macos"
@@ -1593,7 +1601,7 @@ index 3bf40ea..6975809 100644
  #endif
        });
  
-@@ -270,7 +311,148 @@ int main(const int argc, char* argv[])
+@@ -270,7 +312,161 @@ int main(const int argc, char* argv[])
  
    UICommon::SetUserDirectory(user_directory);
    UICommon::Init();
@@ -1665,6 +1673,19 @@ index 3bf40ea..6975809 100644
 +    // compiles the first time the game uses it (a short hitch).
 +    Config::SetBase(Config::GFX_SHADER_CACHE,
 +                    Platform::GetPS4Option("shader_cache", "on") == "on");
++    // shader_compile=async (Vulkan default): new shaders compile on background threads while the
++    // game keeps running (objects appear a few frames late) instead of stalling the frame, and
++    // the shader cache from earlier sessions is precompiled in the background at boot.
++    // shader_compile=sync waits for each shader (OpenGL: Piglet can't compile off-thread).
++    // compile_threads=<n> sets the background compiler threads (default 2).
++    if (video != "opengl" && Platform::GetPS4Option("shader_compile", "async") == "async")
++    {
++      const int threads = std::clamp(atoi(Platform::GetPS4Option("compile_threads", "2").c_str()), 1, 4);
++      Config::SetBase(Config::GFX_SHADER_COMPILATION_MODE,
++                      ShaderCompilationMode::AsynchronousSkipRendering);
++      Config::SetBase(Config::GFX_SHADER_COMPILER_THREADS, threads);
++      Config::SetBase(Config::GFX_SHADER_PRECOMPILER_THREADS, threads);
++    }
 +    // efb_access=off skips CPU reads/writes of the EFB, which stall on GPU readbacks.
 +    Config::SetBase(Config::GFX_HACK_EFB_ACCESS_ENABLE,
 +                    Platform::GetPS4Option("efb_access", "on") == "on");
@@ -1742,7 +1763,7 @@ index 3bf40ea..6975809 100644
  
    Common::ScopeGuard ui_common_guard([] {
      UICommon::ShutdownControllers();
-@@ -284,6 +466,12 @@ int main(const int argc, char* argv[])
+@@ -284,6 +480,12 @@ int main(const int argc, char* argv[])
    }
  
    auto core_state_changed_hook = Core::AddOnStateChangedCallback([](const Core::State state) {
@@ -1755,7 +1776,7 @@ index 3bf40ea..6975809 100644
      if (state == Core::State::Uninitialized)
        s_platform->Stop();
    });
-@@ -303,6 +491,9 @@ int main(const int argc, char* argv[])
+@@ -303,6 +505,9 @@ int main(const int argc, char* argv[])
  
    DolphinAnalytics::Instance().ReportDolphinStart("nogui");
  
