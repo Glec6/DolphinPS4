@@ -198,6 +198,7 @@ struct ac_drm_device {
 #define FENCE_IB_COUNT 512
 
 static void ps4_scan_tails(ac_drm_device *dev);
+static bool ps4_mapped(const void *p, uint64_t len);
 static void ps4_scan_writes(ac_drm_device *dev, uint32_t *ib, unsigned num_dw, uint64_t seq,
                             int depth);
 struct ps4_deferred;
@@ -632,6 +633,151 @@ ps4_find_symbol(const char *name)
    return NULL;
 }
 
+/* ---------------------------------------------------------------------------------------------
+ * Flight recorder (with RADV_PS4_TRACE, ps4.ini radv_trace=on). Nothing reports a GPU fault on a
+ * retail PS4 - the app is just gone, and its core dump is encrypted - but data written with
+ * write() sits in the kernel's page cache and survives the kill. So:
+ *  - /data/DolphinPS4/flight/ib-N.bin: the complete command stream of each submission (every IB,
+ *    chained and nested), in a ring of 8 files (N = submission % 8);
+ *  - /data/DolphinPS4/flight/progress.log: submissions, the GPU's completed submission, and the
+ *    last RADV trace id (written by the CP as it reaches each draw), every millisecond it changes.
+ * After a kill, the last trace id locates the draw the GPU died on inside the saved stream.
+ */
+#include <sys/stat.h>
+static volatile const uint32_t *ps4_trace_id;
+static int ps4_progress_fd = -1;
+
+void ac_ps4_set_trace_va(uint64_t va);
+void
+ac_ps4_set_trace_va(uint64_t va)
+{
+   ps4_trace_id = (volatile const uint32_t *)(uintptr_t)va;
+}
+
+static void
+ps4_progress(const char *fmt, ...)
+{
+   if (ps4_progress_fd < 0)
+      return;
+   char line[256];
+   va_list ap;
+   va_start(ap, fmt);
+   const int n = vsnprintf(line, sizeof(line), fmt, ap);
+   va_end(ap);
+   if (n > 0)
+      write(ps4_progress_fd, line, MIN2(n, (int)sizeof(line) - 1));
+}
+
+static void *
+ps4_progress_thread(void *arg)
+{
+   (void)arg;
+   ac_drm_device *dev;
+   uint64_t last_done = ~0ull;
+   uint32_t last_trace = ~0u;
+   int64_t last_write = 0;
+   for (;;) {
+      sceKernelUsleep(500);
+      dev = ps4_fault_dev; /* the device in use (the last one created) */
+      const uint64_t done = ps4_completed(dev);
+      const uint32_t trace = ps4_trace_id ? *ps4_trace_id : 0;
+      const int64_t now = os_time_get_nano();
+      if (done == last_done && trace == last_trace)
+         continue;
+      if (done == last_done && now - last_write < 2000000)
+         continue; /* trace ids alone: at most every 2 ms */
+      ps4_progress("%lld.%06lld completed %llu submitted %llu trace %u\n",
+                   (long long)(now / 1000000000), (long long)(now / 1000 % 1000000),
+                   (unsigned long long)done, (unsigned long long)dev->last_seq, trace);
+      last_done = done;
+      last_trace = trace;
+      last_write = now;
+   }
+   return NULL;
+}
+
+struct ps4_ib_record {
+   uint32_t magic; /* 'IBRC' */
+   uint32_t depth;
+   uint64_t seq;
+   uint64_t va;
+   uint32_t num_dw;
+   uint32_t top_index;
+};
+
+static void
+ps4_record_ib(int fd, const uint32_t *ib, unsigned num_dw, uint64_t seq, unsigned top, int depth)
+{
+   for (unsigned link = 0; link < 256 && num_dw; link++) {
+      if (!ps4_mapped(ib, num_dw * 4ull))
+         return;
+      const struct ps4_ib_record r = {0x43524249, depth, seq, (uintptr_t)ib, num_dw, top};
+      write(fd, &r, sizeof(r));
+      write(fd, ib, num_dw * 4ull);
+      const uint32_t *next = NULL;
+      unsigned next_dw = 0;
+      for (unsigned i = 0; i < num_dw;) {
+         const uint32_t h = ib[i];
+         if (h >> 30 == 2) {
+            i++;
+            continue;
+         }
+         if (h >> 30 != 3)
+            break;
+         const unsigned op = (h >> 8) & 0xff;
+         const unsigned body = ((h >> 16) & 0x3fff) + 1;
+         if (i + 1 + body > num_dw)
+            break;
+         const uint32_t *b = &ib[i + 1];
+         if ((op == 0x3f || op == 0x33) && body >= 3) {
+            const uint32_t *t = (const uint32_t *)(uintptr_t)(b[0] | ((uint64_t)(b[1] & 0xffff) << 32));
+            if (b[2] & (1u << 20)) {
+               next = t;
+               next_dw = b[2] & 0xfffff;
+               break;
+            }
+            if (depth < 2)
+               ps4_record_ib(fd, t, b[2] & 0xfffff, seq, top, depth + 1);
+         }
+         i += 1 + body;
+      }
+      if (!next)
+         return;
+      ib = next;
+      num_dw = next_dw;
+   }
+}
+
+static void
+ps4_record_submission(void *const *dcb, const uint32_t *dcb_sizes, unsigned num_ibs, uint64_t seq)
+{
+   if (ps4_progress_fd < 0)
+      return;
+   char path[64];
+   snprintf(path, sizeof(path), "/data/DolphinPS4/flight/ib-%u.bin", (unsigned)(seq % 8));
+   const int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+   if (fd < 0)
+      return;
+   for (unsigned i = 0; i < num_ibs; i++)
+      ps4_record_ib(fd, dcb[i], dcb_sizes[i] / 4, seq, i, 0);
+   close(fd);
+   ps4_progress("submit %llu -> ib-%u.bin\n", (unsigned long long)seq, (unsigned)(seq % 8));
+}
+
+static void
+ps4_start_flight_recorder(ac_drm_device *dev)
+{
+   if (!getenv("RADV_PS4_TRACE") || ps4_progress_fd >= 0)
+      return;
+   mkdir("/data/DolphinPS4/flight", 0777);
+   ps4_progress_fd = open("/data/DolphinPS4/flight/progress.log", O_WRONLY | O_CREAT | O_TRUNC, 0666);
+   if (ps4_progress_fd < 0)
+      return;
+   pthread_t t;
+   pthread_create(&t, NULL, ps4_progress_thread, dev);
+   ps4_log("radv/ps4: flight recorder on (/data/DolphinPS4/flight)\n");
+}
+
 static void
 ps4_install_fault_capture(ac_drm_device *dev, int gnm_module)
 {
@@ -807,6 +953,7 @@ ac_drm_device_initialize(int fd, bool is_virtio, uint32_t *major_version, uint32
    if (!ps4_fault_dev)
       ps4_install_fault_capture(dev, dev->gnm_module);
    ps4_fault_dev = dev; /* the last device created is the one in use */
+   ps4_start_flight_recorder(dev);
    ps4_log("radv/ps4: device initialized\n");
    return 0;
 
@@ -1836,6 +1983,8 @@ ac_drm_cs_submit_raw2(ac_drm_device *dev, uint32_t ctx_id, uint32_t bo_list_hand
          break;
       }
    }
+   ps4_record_submission(dcb, dcb_sizes, num_ibs, dev->last_seq + 1);
+
    /* Commands that would write where they mustn't: report and disable them (RADV_PS4_SCAN=1;
     * it found nothing in the boss-intro crash and costs CPU time). */
    static int scan = -1;
