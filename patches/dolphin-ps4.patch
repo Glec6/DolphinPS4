@@ -1730,10 +1730,10 @@ index f4dc8a9..4e5ff67 100644
  
 diff --git a/Source/Core/DolphinNoGUI/PlatformPS4.cpp b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
 new file mode 100644
-index 0000000..121da7e
+index 0000000..0747185
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
-@@ -0,0 +1,410 @@
+@@ -0,0 +1,412 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -1926,11 +1926,13 @@ index 0000000..121da7e
 +      // never waited (below 100% means the emulated CPU itself is the bottleneck).
 +      snprintf(line, sizeof(line),
 +               "monitor: %lld s, speed %.0f%% (max %.0f%%), %.1f FPS, %.1f VPS, %zu MiB flexible "
-+               "free, CPU core %d, %llu fastmem faults, GL shaders %d programs %d textures %d",
++               "free, CPU core %d, %llu fastmem faults, GL shaders %d programs %d textures %d "
++               "(created %d, reused %d) fbos created %d",
 +               static_cast<long long>(seconds), perf.GetSpeed() * 100.0,
 +               perf.GetMaxSpeed() * 100.0, perf.GetFPS(), perf.GetVPS(),
 +               flexible / (1024 * 1024), static_cast<int>(Config::Get(Config::MAIN_CPU_CORE)),
-+               ps4_fault_count, ps4_gl_shaders, ps4_gl_programs, ps4_gl_textures);
++               ps4_fault_count, ps4_gl_shaders, ps4_gl_programs, ps4_gl_textures,
++               ps4_gl_texture_creations, ps4_gl_texture_reuses, ps4_gl_fbo_creations);
 +      BootTrace(line);
 +      LogProfile();
 +    }
@@ -2572,7 +2574,7 @@ index ce1b7a5..941b744 100644
    g_backend_info.bSupportsPipelineCacheData = supports_glsl_cache;
  
 diff --git a/Source/Core/VideoBackends/OGL/OGLGfx.cpp b/Source/Core/VideoBackends/OGL/OGLGfx.cpp
-index ff5402b..3318e3f 100644
+index ff5402b..80ce07d 100644
 --- a/Source/Core/VideoBackends/OGL/OGLGfx.cpp
 +++ b/Source/Core/VideoBackends/OGL/OGLGfx.cpp
 @@ -2,6 +2,7 @@
@@ -3288,14 +3290,34 @@ index ff5402b..3318e3f 100644
  }
  
  void OGLGfx::DispatchComputeShader(const AbstractShader* shader, u32 groupsize_x, u32 groupsize_y,
-@@ -415,8 +1067,30 @@ bool OGLGfx::BindBackbuffer(const ClearColor& clear_color)
+@@ -415,8 +1067,62 @@ bool OGLGfx::BindBackbuffer(const ClearColor& clear_color)
    return true;
  }
  
 +#ifdef __ORBIS__
 +void OGLGfx::PS4DeferDelete(u32 texture, u32 framebuffer)
 +{
-+  m_ps4_pending_deletes.push_back({m_ps4_frame, texture, framebuffer});
++  m_ps4_pending_deletes.push_back({m_ps4_frame, texture, framebuffer, false, {}});
++}
++
++void OGLGfx::PS4RecycleTexture(u32 texture, const PS4TextureKey& key)
++{
++  m_ps4_pending_deletes.push_back({m_ps4_frame, texture, 0, true, key});
++}
++
++u32 OGLGfx::PS4TakeTexture(const PS4TextureKey& key)
++{
++  for (auto it = m_ps4_free_textures.begin(); it != m_ps4_free_textures.end(); ++it)
++  {
++    if (it->first == key)
++    {
++      const u32 texture = it->second;
++      m_ps4_free_textures.erase(it);
++      ps4_gl_texture_reuses++;
++      return texture;
++    }
++  }
++  return 0;
 +}
 +#endif
 +
@@ -3311,15 +3333,27 @@ index ff5402b..3318e3f 100644
 +      return false;
 +    if (pending.framebuffer)
 +      glDeleteFramebuffers(1, &pending.framebuffer);
-+    if (pending.texture)
++    if (pending.texture && pending.recycle)
++    {
++      // Keep up to 256 released textures for reuse; delete the oldest beyond that.
++      m_ps4_free_textures.emplace_back(pending.key, pending.texture);
++      if (m_ps4_free_textures.size() > 256)
++      {
++        glDeleteTextures(1, &m_ps4_free_textures.front().second);
++        m_ps4_free_textures.erase(m_ps4_free_textures.begin());
++      }
++    }
++    else if (pending.texture)
++    {
 +      glDeleteTextures(1, &pending.texture);
++    }
 +    return true;
 +  });
 +#endif
    if (g_ogl_config.bSupportsDebug)
    {
      if (Common::Log::LogManager::GetInstance()->IsEnabled(Common::Log::LogType::HOST_GPU,
-@@ -618,6 +1292,7 @@ void OGLGfx::ApplyBlendingState(const BlendingState state)
+@@ -618,6 +1324,7 @@ void OGLGfx::ApplyBlendingState(const BlendingState state)
  
  void OGLGfx::SetPipeline(const AbstractPipeline* pipeline)
  {
@@ -3327,7 +3361,7 @@ index ff5402b..3318e3f 100644
    if (m_current_pipeline == pipeline)
      return;
  
-@@ -733,3 +1408,133 @@ SurfaceInfo OGLGfx::GetSurfaceInfo() const
+@@ -733,3 +1440,133 @@ SurfaceInfo OGLGfx::GetSurfaceInfo() const
  }
  
  }  // namespace OGL
@@ -3462,10 +3496,10 @@ index ff5402b..3318e3f 100644
 +}
 +#endif
 diff --git a/Source/Core/VideoBackends/OGL/OGLGfx.h b/Source/Core/VideoBackends/OGL/OGLGfx.h
-index a76008f..f801e82 100644
+index a76008f..6bdd1a9 100644
 --- a/Source/Core/VideoBackends/OGL/OGLGfx.h
 +++ b/Source/Core/VideoBackends/OGL/OGLGfx.h
-@@ -53,6 +53,12 @@ public:
+@@ -53,6 +53,24 @@ public:
    void SetSamplerState(u32 index, const SamplerState& state) override;
    void SetComputeImageTexture(u32 index, AbstractTexture* texture, bool read, bool write) override;
    void UnbindTexture(const AbstractTexture* texture) override;
@@ -3474,11 +3508,23 @@ index a76008f..f801e82 100644
 +  // (GPU crash in Sonic Adventure DX's FMVs, which create and delete textures every frame).
 +  // Textures and framebuffers are deleted a few presented frames later instead.
 +  void PS4DeferDelete(u32 texture, u32 framebuffer);
++
++  // Every GL object Piglet creates takes libkernel internal memory, which games that keep
++  // creating and destroying textures ran out of within minutes ("Internal Memory is running
++  // out"). Released textures are therefore recycled for new textures of the same storage
++  // instead of being deleted (after the same frame delay as PS4DeferDelete).
++  struct PS4TextureKey
++  {
++    u32 target, width, height, levels, layers, samples, format;
++    bool operator==(const PS4TextureKey&) const = default;
++  };
++  void PS4RecycleTexture(u32 texture, const PS4TextureKey& key);
++  u32 PS4TakeTexture(const PS4TextureKey& key);
 +#endif
    void SetViewport(float x, float y, float width, float height, float near_depth,
                     float far_depth) override;
    void Draw(u32 base_vertex, u32 num_vertices) override;
-@@ -114,6 +120,16 @@ private:
+@@ -114,6 +132,19 @@ private:
    u32 m_shared_read_framebuffer = 0;
    u32 m_shared_draw_framebuffer = 0;
    float m_backbuffer_scale;
@@ -3488,7 +3534,10 @@ index a76008f..f801e82 100644
 +    u64 frame;
 +    u32 texture;
 +    u32 framebuffer;
++    bool recycle;
++    PS4TextureKey key;
 +  };
++  std::vector<std::pair<PS4TextureKey, u32>> m_ps4_free_textures;
 +  std::vector<PS4PendingDelete> m_ps4_pending_deletes;
 +  u64 m_ps4_frame = 0;
 +#endif
@@ -3773,7 +3822,7 @@ index efbb826..73f3d03 100644
    const u32 m_buffertype;
    const u32 m_size;
 diff --git a/Source/Core/VideoBackends/OGL/OGLTexture.cpp b/Source/Core/VideoBackends/OGL/OGLTexture.cpp
-index 003a7ec..df9ffc5 100644
+index 003a7ec..657369b 100644
 --- a/Source/Core/VideoBackends/OGL/OGLTexture.cpp
 +++ b/Source/Core/VideoBackends/OGL/OGLTexture.cpp
 @@ -2,6 +2,7 @@
@@ -3796,17 +3845,45 @@ index 003a7ec..df9ffc5 100644
  namespace OGL
  {
  GLenum OGLTexture::GetGLInternalFormatForTextureFormat(AbstractTextureFormat format, bool storage)
-@@ -129,6 +135,9 @@ OGLTexture::OGLTexture(const TextureConfig& tex_config, std::string_view name)
+@@ -128,7 +134,23 @@ OGLTexture::OGLTexture(const TextureConfig& tex_config, std::string_view name)
+                    "OpenGL does not support multisampled textures with mip levels");
  
    const GLenum target = GetGLTarget();
-   glGenTextures(1, &m_texId);
 +#ifdef __ORBIS__
 +  ps4_gl_textures++;
++  // A released texture with the same immutable storage (see OGLGfx::PS4RecycleTexture).
++  const OGLGfx::PS4TextureKey ps4_key{
++      target, m_config.width, m_config.height, m_config.levels, m_config.layers,
++      m_config.samples,
++      static_cast<u32>(GetGLInternalFormatForTextureFormat(m_config.format, true))};
++  m_texId = GetOGLGfx()->PS4TakeTexture(ps4_key);
++  const bool ps4_recycled = m_texId != 0;
++  if (!ps4_recycled)
++  {
++    glGenTextures(1, &m_texId);
++    ps4_gl_texture_creations++;
++  }
++#else
+   glGenTextures(1, &m_texId);
 +#endif
    glActiveTexture(GL_MUTABLE_TEXTURE_INDEX);
    glBindTexture(target, m_texId);
  
-@@ -197,6 +206,24 @@ OGLTexture::OGLTexture(const TextureConfig& tex_config, std::string_view name)
+@@ -140,6 +162,13 @@ OGLTexture::OGLTexture(const TextureConfig& tex_config, std::string_view name)
+   glTexParameteri(target, GL_TEXTURE_MAX_LEVEL, m_config.levels - 1);
+ 
+   GLenum gl_internal_format = GetGLInternalFormatForTextureFormat(m_config.format, true);
++#ifdef __ORBIS__
++  if (ps4_recycled)
++  {
++    // Storage already allocated (immutable, same size and format).
++  }
++  else
++#endif
+   if (g_ogl_config.bSupportsTextureStorage && m_config.type == AbstractTextureType::Texture_CubeMap)
+   {
+     glTexStorage2D(target, m_config.levels, gl_internal_format, m_config.width, m_config.height);
+@@ -197,6 +226,24 @@ OGLTexture::OGLTexture(const TextureConfig& tex_config, std::string_view name)
      }
    }
  
@@ -3831,7 +3908,7 @@ index 003a7ec..df9ffc5 100644
    if (m_config.IsRenderTarget())
    {
      // We can't render to compressed formats.
-@@ -216,8 +243,15 @@ OGLTexture::OGLTexture(const TextureConfig& tex_config, std::string_view name)
+@@ -216,8 +263,18 @@ OGLTexture::OGLTexture(const TextureConfig& tex_config, std::string_view name)
  
  OGLTexture::~OGLTexture()
  {
@@ -3840,14 +3917,17 @@ index 003a7ec..df9ffc5 100644
 +#endif
    GetOGLGfx()->UnbindTexture(this);
 +#ifdef __ORBIS__
-+  GetOGLGfx()->PS4DeferDelete(m_texId, 0);
++  GetOGLGfx()->PS4RecycleTexture(
++      m_texId, {GetGLTarget(), m_config.width, m_config.height, m_config.levels, m_config.layers,
++                m_config.samples,
++                static_cast<u32>(GetGLInternalFormatForTextureFormat(m_config.format, true))});
 +#else
    glDeleteTextures(1, &m_texId);
 +#endif
  }
  
  void OGLTexture::CopyRectangleFromTexture(const AbstractTexture* src,
-@@ -279,6 +313,7 @@ void OGLTexture::ResolveFromTexture(const AbstractTexture* src,
+@@ -279,6 +336,7 @@ void OGLTexture::ResolveFromTexture(const AbstractTexture* src,
  void OGLTexture::Load(u32 level, u32 width, u32 height, u32 row_length, const u8* buffer,
                        size_t buffer_size, u32 layer)
  {
@@ -3855,7 +3935,7 @@ index 003a7ec..df9ffc5 100644
    if (level >= m_config.levels)
      PanicAlertFmt("Texture only has {} levels, can't update level {}", m_config.levels, level);
  
-@@ -670,7 +705,11 @@ OGLFramebuffer::OGLFramebuffer(AbstractTexture* color_attachment, AbstractTextur
+@@ -670,7 +728,11 @@ OGLFramebuffer::OGLFramebuffer(AbstractTexture* color_attachment, AbstractTextur
  
  OGLFramebuffer::~OGLFramebuffer()
  {
@@ -3867,7 +3947,17 @@ index 003a7ec..df9ffc5 100644
  }
  
  std::unique_ptr<OGLFramebuffer>
-@@ -744,6 +783,25 @@ OGLFramebuffer::Create(OGLTexture* color_attachment, OGLTexture* depth_attachmen
+@@ -692,6 +754,9 @@ OGLFramebuffer::Create(OGLTexture* color_attachment, OGLTexture* depth_attachmen
+ 
+   GLuint fbo;
+   glGenFramebuffers(1, &fbo);
++#ifdef __ORBIS__
++  ps4_gl_fbo_creations++;
++#endif
+   glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+ 
+   std::vector<GLenum> buffers;
+@@ -744,6 +809,25 @@ OGLFramebuffer::Create(OGLTexture* color_attachment, OGLTexture* depth_attachmen
  
    glDrawBuffers(static_cast<GLsizei>(buffers.size()), buffers.data());
  
@@ -4595,10 +4685,10 @@ index 3c57ea7..aa515f1 100644
    Common::EnumMap<PrimitiveFunction, OpcodeDecoder::Primitive::GX_DRAW_POINTS> m_primitive_table{};
 diff --git a/Source/Core/VideoCommon/PS4Profile.h b/Source/Core/VideoCommon/PS4Profile.h
 new file mode 100644
-index 0000000..623679a
+index 0000000..e7f1528
 --- /dev/null
 +++ b/Source/Core/VideoCommon/PS4Profile.h
-@@ -0,0 +1,62 @@
+@@ -0,0 +1,64 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -4641,6 +4731,8 @@ index 0000000..623679a
 +
 +// Live GL objects (Piglet takes kernel-internal memory per object; running out crashes it).
 +extern "C" int ps4_gl_shaders, ps4_gl_programs, ps4_gl_textures;
++// Total GL objects created / textures reused from the recycle pool (OGLGfx.cpp).
++extern "C" int ps4_gl_texture_creations, ps4_gl_texture_reuses, ps4_gl_fbo_creations;
 +
 +extern "C" unsigned long long ps4_prof_ticks[PS4_PROF_CATEGORY_COUNT];
 +extern "C" unsigned long long ps4_prof_count[PS4_PROF_CATEGORY_COUNT];
@@ -5049,10 +5141,10 @@ index 4e4567d..92d5dbb 100644
    //
    // - EFB to RAM:
 diff --git a/Source/Core/VideoCommon/VertexManagerBase.cpp b/Source/Core/VideoCommon/VertexManagerBase.cpp
-index 2bc6d58..c950467 100644
+index 2bc6d58..3ccffd8 100644
 --- a/Source/Core/VideoCommon/VertexManagerBase.cpp
 +++ b/Source/Core/VideoCommon/VertexManagerBase.cpp
-@@ -2,6 +2,13 @@
+@@ -2,6 +2,14 @@
  // SPDX-License-Identifier: GPL-2.0-or-later
  
  #include "VideoCommon/VertexManagerBase.h"
@@ -5061,12 +5153,13 @@ index 2bc6d58..c950467 100644
 +#ifdef __ORBIS__
 +unsigned long long ps4_prof_ticks[PS4_PROF_CATEGORY_COUNT];
 +int ps4_gl_shaders, ps4_gl_programs, ps4_gl_textures;
++int ps4_gl_texture_creations, ps4_gl_texture_reuses, ps4_gl_fbo_creations;
 +unsigned long long ps4_prof_count[PS4_PROF_CATEGORY_COUNT];
 +#endif
  
  #include <array>
  #include <cmath>
-@@ -192,7 +199,13 @@ DataReader VertexManagerBase::PrepareForAdditionalData(OpcodeDecoder::Primitive
+@@ -192,7 +200,13 @@ DataReader VertexManagerBase::PrepareForAdditionalData(OpcodeDecoder::Primitive
      }
      else
      {
@@ -5080,7 +5173,7 @@ index 2bc6d58..c950467 100644
      }
  
      remaining_index_generator_indices = m_index_generator.GetRemainingIndices(primitive);
-@@ -434,6 +447,7 @@ BitSet32 VertexManagerBase::UsedTextures() const
+@@ -434,6 +448,7 @@ BitSet32 VertexManagerBase::UsedTextures() const
  
  void VertexManagerBase::Flush()
  {
