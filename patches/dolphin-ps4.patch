@@ -1482,7 +1482,7 @@ index 51c3fff..8e91ab7 100644
 +  ps4_add_eboot(dolphin-nogui)
 +endif()
 diff --git a/Source/Core/DolphinNoGUI/MainNoGUI.cpp b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
-index 3bf40ea..2b972d4 100644
+index 3bf40ea..6975809 100644
 --- a/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 +++ b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 @@ -5,7 +5,9 @@
@@ -1509,7 +1509,7 @@ index 3bf40ea..2b972d4 100644
  #include "Core/Boot/Boot.h"
  #include "Core/BootManager.h"
  #include "Core/Core.h"
-@@ -31,6 +39,20 @@
+@@ -31,6 +39,22 @@
  
  static std::unique_ptr<Platform> s_platform;
  
@@ -1520,6 +1520,8 @@ index 3bf40ea..2b972d4 100644
 +extern "C" int ps4_show_fps;            // VideoCommon/Present.cpp
 +extern "C" int ps4_cpu_thread_core, ps4_gpu_thread_core, ps4_thread_priority;  // Core/Core.cpp
 +extern "C" void ps4_sampler_start();  // DolphinPS4 port/ps4_sampler.cpp
++extern "C" size_t sceKernelGetDirectMemorySize();  // libkernel
++extern "C" void ps4_boot_trace(const char* line);  // DolphinPS4 port/ps4_crashlog.cpp
 +extern "C" int ps4_uniform_merge_mode;  // VideoBackends/OGL/OGLGfx.cpp
 +extern "C" int ps4_audio_thread_core;   // AudioCommon/PS4AudioStream.cpp
 +extern "C" unsigned ps4_uniform_ring_count;  // VideoBackends/OGL/ProgramShaderCache.cpp
@@ -1530,7 +1532,7 @@ index 3bf40ea..2b972d4 100644
  static void signal_handler(int)
  {
    constexpr char message[] = "A signal was received. A second signal will force Dolphin to stop.\n";
-@@ -173,6 +195,10 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
+@@ -173,6 +197,10 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
    if (platform_name == "macos" || platform_name.empty())
      return Platform::CreateMacOSPlatform();
  #endif
@@ -1541,7 +1543,7 @@ index 3bf40ea..2b972d4 100644
  
    if (platform_name == "headless" || platform_name.empty())
      return Platform::CreateHeadlessPlatform();
-@@ -184,8 +210,17 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
+@@ -184,8 +212,17 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
  #define main app_main
  #endif
  
@@ -1560,7 +1562,7 @@ index 3bf40ea..2b972d4 100644
    const auto parser =
        CommandLineParse::CreateParser(CommandLineParse::ParserOptions::OmitGUIOptions);
    parser->add_option("-p", "--platform")
-@@ -207,6 +242,10 @@ int main(const int argc, char* argv[])
+@@ -207,6 +244,10 @@ int main(const int argc, char* argv[])
  #ifdef __APPLE__
                  ,
                  "macos"
@@ -1571,7 +1573,7 @@ index 3bf40ea..2b972d4 100644
  #endif
        });
  
-@@ -270,7 +309,147 @@ int main(const int argc, char* argv[])
+@@ -270,7 +311,148 @@ int main(const int argc, char* argv[])
  
    UICommon::SetUserDirectory(user_directory);
    UICommon::Init();
@@ -1601,6 +1603,12 @@ index 3bf40ea..2b972d4 100644
 +  {
 +    // video=vulkan: Mesa's RADV on GNM (needs the plain homebrew identity, no Piglet);
 +    // video=opengl: Piglet (OpenGL ES, needs the RetroArch identity).
++    {
++      // The app identity decides the direct memory size (RADV's GPU memory comes from it).
++      char line[96];
++      snprintf(line, sizeof(line), "direct memory %zu MiB\n", sceKernelGetDirectMemorySize() >> 20);
++      ps4_boot_trace(line);
++    }
 +    const std::string video = Platform::GetPS4Option("video", "vulkan");
 +    Config::SetBase(Config::MAIN_GFX_BACKEND, video == "opengl" ? "OGL" : "Vulkan");
 +    // radv_debug=<RADV_DEBUG flags>, e.g. hang,noumr,syncshaders: RADV's GPU hang reports go to
@@ -1681,11 +1689,6 @@ index 3bf40ea..2b972d4 100644
 +    }
 +    // show_fps=off hides the FPS / speed counter in the top-left corner.
 +    ps4_show_fps = Platform::GetPS4Option("show_fps", "on") == "on";
-+    if (video != "opengl")
-+    {
-+      Config::SetBase(Config::GFX_SHOW_FPS, ps4_show_fps != 0);
-+      Config::SetBase(Config::GFX_SHOW_SPEED, ps4_show_fps != 0);
-+    }
 +    // uniform_merge=auto|on|off: one upload for pixel + vertex constants per draw (auto: when
 +    // Piglet passes the range test at startup).
 +    {
@@ -1719,7 +1722,7 @@ index 3bf40ea..2b972d4 100644
  
    Common::ScopeGuard ui_common_guard([] {
      UICommon::ShutdownControllers();
-@@ -284,6 +463,12 @@ int main(const int argc, char* argv[])
+@@ -284,6 +466,12 @@ int main(const int argc, char* argv[])
    }
  
    auto core_state_changed_hook = Core::AddOnStateChangedCallback([](const Core::State state) {
@@ -1732,7 +1735,7 @@ index 3bf40ea..2b972d4 100644
      if (state == Core::State::Uninitialized)
        s_platform->Stop();
    });
-@@ -303,6 +488,9 @@ int main(const int argc, char* argv[])
+@@ -303,6 +491,9 @@ int main(const int argc, char* argv[])
  
    DolphinAnalytics::Instance().ReportDolphinStart("nogui");
  
@@ -5802,10 +5805,20 @@ index 92f7c1f..3378a49 100644
      m_default_pixel_shader = g_gfx->CreateShaderFromSource(
          ShaderStage::Pixel, GetHeader(false) + default_pixel_shader_code + GetFooter(), nullptr,
 diff --git a/Source/Core/VideoCommon/Present.cpp b/Source/Core/VideoCommon/Present.cpp
-index 41d05f3..c952a67 100644
+index 41d05f3..12e6ec3 100644
 --- a/Source/Core/VideoCommon/Present.cpp
 +++ b/Source/Core/VideoCommon/Present.cpp
-@@ -10,6 +10,7 @@
+@@ -3,6 +3,9 @@
+ 
+ #include "VideoCommon/Present.h"
+ 
++#include <algorithm>
++#include <cstdio>
++#include <cstring>
+ #include "Common/ChunkFile.h"
+ #include "Core/Config/GraphicsSettings.h"
+ #include "Core/Config/MainSettings.h"
+@@ -10,6 +13,7 @@
  #include "Core/HW/VideoInterface.h"
  #include "Core/Host.h"
  #include "Core/System.h"
@@ -5813,7 +5826,7 @@ index 41d05f3..c952a67 100644
  
  #include "InputCommon/ControllerInterface/ControllerInterface.h"
  
-@@ -124,9 +125,12 @@ bool Presenter::Initialize()
+@@ -124,9 +128,12 @@ bool Presenter::Initialize()
      if (!m_post_processor->Initialize(m_backbuffer_format))
        return false;
  
@@ -5826,7 +5839,7 @@ index 41d05f3..c952a67 100644
  
      // Draw a blank frame (and complete OnScreenUI initialization)
      g_gfx->BindBackbuffer({{0.0f, 0.0f, 0.0f, 1.0f}});
-@@ -903,10 +907,37 @@ void Presenter::RenderXFBToScreen(const MathUtil::Rectangle<int>& target_rc,
+@@ -903,10 +910,84 @@ void Presenter::RenderXFBToScreen(const MathUtil::Rectangle<int>& target_rc,
    }
  }
  
@@ -5837,6 +5850,53 @@ index 41d05f3..c952a67 100644
 +extern "C" int ps4_render_diagnostics;  // ps4.ini diagnostics=on
 +// VideoBackends/OGL/OGLGfx.cpp; ps4.ini show_fps=off hides it.
 +extern "C" void ps4_draw_counter(int width, int height, float fps, float speed_percent);
++
++// The same FPS / speed counter for the other backends (Vulkan): seven-segment digits as region
++// clears of the bound backbuffer (AbstractGfx::ClearRegion, colour 0xAARRGGBB).
++static void PS4DrawCounterGeneric(int height, float fps, float speed_percent)
++{
++  const auto rect = [](int x, int y, int w, int h, u32 color) {
++    g_gfx->ClearRegion(MathUtil::Rectangle<int>(x, y, x + w, y + h), true, true, false, color, 0);
++  };
++  // Segments a..g: top, top right, bottom right, bottom, bottom left, top left, middle.
++  static constexpr u8 digits[10] = {0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0x7F, 0x6F};
++  const int u = std::max(2, height / 200);  // segment thickness
++  const int dw = 4 * u, dh = 7 * u, advance = dw + 2 * u;
++
++  char fps_text[16], speed_text[16];
++  snprintf(fps_text, sizeof(fps_text), "%.1f", fps);
++  snprintf(speed_text, sizeof(speed_text), "%d", static_cast<int>(speed_percent + 0.5f));
++  const int chars = static_cast<int>(std::strlen(fps_text) + std::strlen(speed_text)) + 1;
++  const int x0 = 6 * u, y0 = 6 * u;
++  rect(x0 - 2 * u, y0 - 2 * u, chars * advance + 3 * u, dh + 4 * u, 0xFF000000);
++
++  int x = x0;
++  const auto draw_text = [&](const char* text, u32 color) {
++    for (const char* c = text; *c; c++, x += advance)
++    {
++      if (*c == '.')
++      {
++        rect(x + u, y0 + dh - u, u, u, color);
++        x -= advance / 2;
++        continue;
++      }
++      if (*c < '0' || *c > '9')
++        continue;
++      const u8 seg = digits[*c - '0'];
++      const int half = dh / 2;
++      if (seg & 0x01) rect(x, y0, dw, u, color);                          // a
++      if (seg & 0x02) rect(x + dw - u, y0, u, half + 1, color);           // b
++      if (seg & 0x04) rect(x + dw - u, y0 + half, u, dh - half, color);   // c
++      if (seg & 0x08) rect(x, y0 + dh - u, dw, u, color);                 // d
++      if (seg & 0x10) rect(x, y0 + half, u, dh - half, color);            // e
++      if (seg & 0x20) rect(x, y0, u, half + 1, color);                    // f
++      if (seg & 0x40) rect(x, y0 + half - u / 2, dw, u, color);           // g
++    }
++  };
++  draw_text(fps_text, 0xFFFFFFFF);
++  x += advance / 2;
++  draw_text(speed_text, 0xFFFFD91A);
++}
 +extern "C" int ps4_show_fps;
 +int ps4_show_fps = 1;
 +#endif
@@ -5864,13 +5924,13 @@ index 41d05f3..c952a67 100644
    if (g_gfx->IsHeadless() || (!m_onscreen_ui && !m_xfb_entry))
      return;
  
-@@ -934,7 +965,18 @@ void Presenter::Present(PresentInfo* present_info)
+@@ -934,7 +1015,18 @@ void Presenter::Present(PresentInfo* present_info)
    UpdateDrawRectangle();
  
    g_gfx->BeginUtilityDrawing();
 +#ifdef __ORBIS__
 +  // Port diagnostics are done: black around the game image, as on other platforms.
-   const bool backbuffer_bound = g_gfx->BindBackbuffer({{0.0f, 0.0f, 0.0f, 1.0f}});
++  const bool backbuffer_bound = g_gfx->BindBackbuffer({{0.0f, 0.0f, 0.0f, 1.0f}});
 +  static bool s_reported_unbound = false;
 +  if (!backbuffer_bound && !s_reported_unbound)
 +  {
@@ -5878,12 +5938,12 @@ index 41d05f3..c952a67 100644
 +    ps4_boot_trace("present: backbuffer could not be bound");
 +  }
 +#else
-+  const bool backbuffer_bound = g_gfx->BindBackbuffer({{0.0f, 0.0f, 0.0f, 1.0f}});
+   const bool backbuffer_bound = g_gfx->BindBackbuffer({{0.0f, 0.0f, 0.0f, 1.0f}});
 +#endif
  
    // Render the XFB to the screen.
    if (backbuffer_bound && m_xfb_entry)
-@@ -945,7 +987,30 @@ void Presenter::Present(PresentInfo* present_info)
+@@ -945,7 +1037,34 @@ void Presenter::Present(PresentInfo* present_info)
      AdjustRectanglesToFitBounds(&render_target_rc, &render_source_rc, m_backbuffer_width,
                                  m_backbuffer_height);
      RenderXFBToScreen(render_target_rc, m_xfb_entry->texture.get(), render_source_rc);
@@ -5903,12 +5963,16 @@ index 41d05f3..c952a67 100644
 +#ifdef __ORBIS__
 +  // The seven-segment counter is drawn with GL scissored clears (OGLGfx.cpp); other backends
 +  // use Dolphin's own on-screen FPS/speed display (MainNoGUI.cpp).
-+  if (backbuffer_bound && ps4_show_fps && Config::Get(Config::MAIN_GFX_BACKEND) == "OGL")
++  if (backbuffer_bound && ps4_show_fps)
 +  {
 +    // Refreshed by the DolphinNoGUI monitor (PerformanceMetrics::UpdateStats) every 2 s.
 +    const auto& perf = Core::System::GetInstance().GetPerfMetrics();
-+    ps4_draw_counter(m_backbuffer_width, m_backbuffer_height, static_cast<float>(perf.GetFPS()),
-+                     static_cast<float>(perf.GetSpeed() * 100.0));
++    const float fps = static_cast<float>(perf.GetFPS());
++    const float speed = static_cast<float>(perf.GetSpeed() * 100.0);
++    if (Config::Get(Config::MAIN_GFX_BACKEND) == "OGL")
++      ps4_draw_counter(m_backbuffer_width, m_backbuffer_height, fps, speed);
++    else
++      PS4DrawCounterGeneric(m_backbuffer_height, fps, speed);
    }
 +#endif
  
