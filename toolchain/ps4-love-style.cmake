@@ -62,6 +62,17 @@ endif ()
 string(REPLACE "*(.init_array);"
     "KEEP(*(SORT_BY_INIT_PRIORITY(.init_array.*))); KEEP(*(.init_array));"
     PS4_LINK_SCRIPT_TEXT "${PS4_LINK_SCRIPT_TEXT}")
+# It also only collects plain .data/.tdata/.tbss. Per-symbol sections (.data.<name>: C++ template
+# statics and inline variables, libc's stdin/stdout/stderr FILEs, the C++ personality pointer,
+# all of Mesa with -fdata-sections) became orphans placed past the end of the data segment's
+# file image, so they started out as zeros on the console.
+foreach (rule ".data" ".tdata" ".tbss")
+    string(FIND "${PS4_LINK_SCRIPT_TEXT}" "*(${rule})" PS4_RULE_POS)
+    if (PS4_RULE_POS EQUAL -1)
+        message(FATAL_ERROR "Unexpected ${PS4_LINK_SCRIPT_IN}: no '*(${rule})' rule to patch")
+    endif ()
+    string(REPLACE "*(${rule})" "*(${rule} ${rule}.*)" PS4_LINK_SCRIPT_TEXT "${PS4_LINK_SCRIPT_TEXT}")
+endforeach ()
 file(WRITE ${PS4_LINK_SCRIPT} "${PS4_LINK_SCRIPT_TEXT}")
 string(REPLACE "${PS4_LINK_SCRIPT_IN}" "${PS4_LINK_SCRIPT}" CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS}")
 if (NOT CMAKE_EXE_LINKER_FLAGS MATCHES "ps4-link.x")
