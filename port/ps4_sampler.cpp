@@ -174,7 +174,119 @@ void* samplerThread(void*) {
 
 }  // namespace
 
+// ---------------------------------------------------------------------------------------------
+// Hang dumps: every thread that matters registers here (ps4_watch_thread, also done by
+// ps4_sampler_register_thread). ps4_dump_thread_stacks() signals each one; the handler records
+// its instruction pointer and every eboot code address on its stack (return addresses, newest
+// first). Used by DolphinNoGUI's watchdog when emulation stops advancing.
+namespace {
+constexpr int kSigDump = 30;  // SIGUSR1 (FreeBSD)
+constexpr int kMaxWatched = 16, kMaxFrames = 48;
+
+struct WatchedThread {
+    std::atomic<pthread_t> thread{};
+    char name[32] = {};  // copied: some callers pass temporaries
+    uint64_t rip = 0;
+    uint64_t frames[kMaxFrames];
+    int frame_count = 0;
+    std::atomic<int> done{0};
+};
+WatchedThread g_watched[kMaxWatched];
+std::atomic<int> g_watched_count{0};
+
+void dumpHandler(int, siginfo_t*, void* context) {
+    const pthread_t self = pthread_self();
+    const uintptr_t text = reinterpret_cast<uintptr_t>(__text_start);
+    for (int i = 0; i < g_watched_count.load(std::memory_order_acquire); i++) {
+        WatchedThread& t = g_watched[i];
+        if (t.thread.load(std::memory_order_relaxed) != self)
+            continue;
+        const auto* regs =
+            reinterpret_cast<const uint64_t*>(static_cast<char*>(context) + kMcontextOffset);
+        t.rip = regs[kRipIndex];
+        const auto* stack = reinterpret_cast<const uint64_t*>(regs[kRspIndex]);
+        int n = 0;
+        for (int s = 0; s < 512 && n < kMaxFrames; s++) {
+            if (stack[s] >= text && stack[s] < text + kTextWindow)
+                t.frames[n++] = stack[s] - text;
+        }
+        t.frame_count = n;
+        t.done.store(1, std::memory_order_release);
+        return;
+    }
+}
+
+void installDumpHandler() {
+    static std::atomic<bool> installed{false};
+    if (installed.exchange(true))
+        return;
+    struct sigaction action;
+    memset(&action, 0, sizeof(action));
+    void (*handler)(int, siginfo_t*, void*) = dumpHandler;
+    memcpy(&action, &handler, sizeof(handler));
+    action.sa_flags = kSaSiginfo | kSaRestart;
+    sigemptyset(&action.sa_mask);
+    sigaction(kSigDump, &action, nullptr);
+}
+}  // namespace
+
+extern "C" void ps4_watch_thread(const char* name) {
+    installDumpHandler();
+    const pthread_t self = pthread_self();
+    for (int i = 0; i < std::min(g_watched_count.load(), kMaxWatched); i++) {
+        if (g_watched[i].thread.load() == self)
+            return;  // already watched (e.g. registered for sampling and named)
+    }
+    const int index = g_watched_count.fetch_add(1);
+    if (index >= kMaxWatched)
+        return;
+    snprintf(g_watched[index].name, sizeof(g_watched[index].name), "%s", name ? name : "?");
+    g_watched[index].thread.store(self);
+}
+
+// Writes every watched thread's stack to `path` (appending), headed by `reason`.
+extern "C" void ps4_dump_thread_stacks(const char* path, const char* reason) {
+    const int fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0666);
+    if (fd < 0)
+        return;
+    char line[256];
+    snprintf(line, sizeof(line), "==== %s (eboot addresses relative to .text, symbolize with "
+                                 "llvm-symbolizer --obj=<oelf>)\n", reason);
+    writeLine(fd, line);
+    const uintptr_t text = reinterpret_cast<uintptr_t>(__text_start);
+    const int count = std::min(g_watched_count.load(std::memory_order_acquire), kMaxWatched);
+    for (int i = 0; i < count; i++) {
+        WatchedThread& t = g_watched[i];
+        t.done.store(0);
+        if (pthread_kill(t.thread.load(), kSigDump) != 0) {
+            snprintf(line, sizeof(line), "-- %s: signal failed (thread gone?)\n", t.name);
+            writeLine(fd, line);
+            continue;
+        }
+        const timespec pause = {0, 1000000};
+        for (int w = 0; w < 200 && !t.done.load(std::memory_order_acquire); w++)
+            nanosleep(&pause, nullptr);
+        if (!t.done.load(std::memory_order_acquire)) {
+            snprintf(line, sizeof(line), "-- %s: no answer (signals blocked?)\n", t.name);
+            writeLine(fd, line);
+            continue;
+        }
+        const bool in_eboot = t.rip >= text && t.rip < text + kTextWindow;
+        snprintf(line, sizeof(line), "-- %s: rip %s0x%llx\n   stack:", t.name,
+                 in_eboot ? "elf " : "(system/JIT) ",
+                 static_cast<unsigned long long>(in_eboot ? t.rip - text : t.rip));
+        writeLine(fd, line);
+        for (int f = 0; f < t.frame_count; f++) {
+            snprintf(line, sizeof(line), " 0x%llx", static_cast<unsigned long long>(t.frames[f]));
+            writeLine(fd, line);
+        }
+        writeLine(fd, "\n");
+    }
+    close(fd);
+}
+
 extern "C" void ps4_sampler_register_thread(const char* name) {
+    ps4_watch_thread(name);
     const int index = g_thread_count.load();
     if (index >= kMaxThreads)
         return;

@@ -999,7 +999,7 @@ index 0000000..49ed2ff
 +
 +}  // namespace Common
 diff --git a/Source/Core/Common/Thread.cpp b/Source/Core/Common/Thread.cpp
-index d9a40fc..f65690c 100644
+index d9a40fc..3d6de2b 100644
 --- a/Source/Core/Common/Thread.cpp
 +++ b/Source/Core/Common/Thread.cpp
 @@ -124,7 +124,7 @@ void SetThreadAffinity(std::thread::native_handle_type thread, u32 mask)
@@ -1034,6 +1034,23 @@ index d9a40fc..f65690c 100644
  void SleepCurrentThread(int ms)
  {
    usleep(1000 * ms);
+@@ -166,8 +182,16 @@ void SwitchCurrentThread()
+   usleep(1000 * 1);
+ }
+ 
++#ifdef __ORBIS__
++extern "C" void ps4_watch_thread(const char* name);  // DolphinPS4 port/ps4_sampler.cpp
++#endif
++
+ void SetCurrentThreadName(const char* name)
+ {
++#ifdef __ORBIS__
++  // PS4 port: every named thread can be asked for its stack when emulation hangs.
++  ps4_watch_thread(name);
++#endif
+ #ifdef __APPLE__
+   pthread_setname_np(name);
+ #elif defined __FreeBSD__ || defined __OpenBSD__
 diff --git a/Source/Core/Common/Thread.h b/Source/Core/Common/Thread.h
 index fbba27a..905cf17 100644
 --- a/Source/Core/Common/Thread.h
@@ -1854,10 +1871,10 @@ index f4dc8a9..4e5ff67 100644
  
 diff --git a/Source/Core/DolphinNoGUI/PlatformPS4.cpp b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
 new file mode 100644
-index 0000000..9f815b0
+index 0000000..663211e
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
-@@ -0,0 +1,508 @@
+@@ -0,0 +1,533 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -1891,6 +1908,7 @@ index 0000000..9f815b0
 +#include "Common/Config/Config.h"
 +#include "Core/Config/MainSettings.h"
 +#include "Core/Core.h"
++#include "Core/CoreTiming.h"
 +#include "VideoCommon/PerformanceMetrics.h"
 +#include "VideoCommon/PS4Profile.h"
 +
@@ -1900,6 +1918,7 @@ index 0000000..9f815b0
 +
 +extern "C" int sceSystemServiceLoadExec(const char* path, char* const argv[]);
 +extern "C" void ps4_boot_trace(const char* stage);
++extern "C" void ps4_dump_thread_stacks(const char* path, const char* reason);  // ps4_sampler.cpp
 +extern "C" int ps4_jit_in_system_pool;           // DolphinPS4 port/ps4_runtime.cpp
 +extern "C" unsigned long long ps4_fault_count;
 +
@@ -2104,6 +2123,10 @@ index 0000000..9f815b0
 +  BootTrace("main loop");
 +  int frame = 0;
 +  const auto start = std::chrono::steady_clock::now();
++  // Hang watchdog: if emulated time stops advancing for ~10 s while running, every Dolphin
++  // thread's stack goes to /data/DolphinPS4/hang-stacks.txt (once per hang).
++  u64 watchdog_ticks = 0;
++  int watchdog_stalled = 0;
 +  while (m_running.IsSet())
 +  {
 +    UpdateRunningFlag();
@@ -2155,6 +2178,25 @@ index 0000000..9f815b0
 +#endif
 +      BootTrace(line);
 +      LogProfile();
++
++      auto& system = Core::System::GetInstance();
++      const u64 ticks = system.GetCoreTiming().GetTicks();
++      if (Core::GetState(system) == Core::State::Running && ticks == watchdog_ticks)
++      {
++        if (++watchdog_stalled == 5)
++        {
++          char reason[96];
++          snprintf(reason, sizeof(reason), "emulation stalled ~10 s at %lld s",
++                   static_cast<long long>(seconds));
++          BootTrace("watchdog: emulation stalled, writing hang-stacks.txt");
++          ps4_dump_thread_stacks("/data/DolphinPS4/hang-stacks.txt", reason);
++        }
++      }
++      else
++      {
++        watchdog_stalled = 0;
++      }
++      watchdog_ticks = ticks;
 +    }
 +    // Port diagnostics: a screenshot every ~10 s (User/ScreenShots) shows what Dolphin renders,
 +    // independently of what reaches the TV.
