@@ -5542,7 +5542,7 @@ index a761a81..3416e1f 100644
      return false;
  
 diff --git a/Source/Core/VideoCommon/Fifo.cpp b/Source/Core/VideoCommon/Fifo.cpp
-index f183c93..c378916 100644
+index f183c93..702d4de 100644
 --- a/Source/Core/VideoCommon/Fifo.cpp
 +++ b/Source/Core/VideoCommon/Fifo.cpp
 @@ -2,6 +2,7 @@
@@ -5553,7 +5553,24 @@ index f183c93..c378916 100644
  
  #include <atomic>
  #include <cstring>
-@@ -302,6 +303,7 @@ void FifoManager::RunGpuLoop()
+@@ -230,7 +231,15 @@ void FifoManager::ReadDataFromFifo(u32 read_ptr)
+   }
+   // Copy new video instructions to m_video_buffer for future use in rendering the new picture
+   auto& memory = m_system.GetMemory();
+-  memory.CopyFromEmu(m_video_buffer_write_ptr, read_ptr, GPFifo::GATHER_PIPE_SIZE);
++#ifdef __ORBIS__
++  // PS4: once per 32 bytes of GPU commands; CopyFromEmu's range lookup and out-of-line copy were
++  // a few percent of the GPU thread. The FIFO lives in MEM1: copy straight from it.
++  if (read_ptr + GPFifo::GATHER_PIPE_SIZE <= memory.GetRamSizeReal())
++    __builtin_memcpy(m_video_buffer_write_ptr, memory.GetRAM() + read_ptr,
++                     GPFifo::GATHER_PIPE_SIZE);
++  else
++#endif
++    memory.CopyFromEmu(m_video_buffer_write_ptr, read_ptr, GPFifo::GATHER_PIPE_SIZE);
+   m_video_buffer_write_ptr += GPFifo::GATHER_PIPE_SIZE;
+ }
+ 
+@@ -302,6 +311,7 @@ void FifoManager::RunGpuLoop()
            // See comment in SyncGPU
            if (write_ptr > seen_ptr)
            {
@@ -5561,7 +5578,7 @@ index f183c93..c378916 100644
              m_video_buffer_read_ptr =
                  OpcodeDecoder::RunFifo(DataReader(m_video_buffer_read_ptr, write_ptr), nullptr);
              m_video_buffer_seen_ptr = write_ptr;
-@@ -340,8 +342,11 @@ void FifoManager::RunGpuLoop()
+@@ -340,8 +350,11 @@ void FifoManager::RunGpuLoop()
                         distance);
  
              u8* write_ptr = m_video_buffer_write_ptr;
@@ -5575,7 +5592,7 @@ index f183c93..c378916 100644
  
              fifo.CPReadPointer.store(readPtr, std::memory_order_relaxed);
              fifo.CPReadWriteDistance.fetch_sub(GPFifo::GATHER_PIPE_SIZE, std::memory_order_seq_cst);
-@@ -551,7 +556,10 @@ int FifoManager::WaitForGpuThread(int ticks)
+@@ -551,7 +564,10 @@ int FifoManager::WaitForGpuThread(int ticks)
  
    // Wait for GPU
    if (now >= m_config_sync_gpu_max_distance)
