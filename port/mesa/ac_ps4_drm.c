@@ -83,6 +83,7 @@ struct amdgpu_bo {
    bool cpu_owned; /* mapped by bo_cpu_map rather than a VA op */
    uint32_t heap;
    uint64_t flags;
+   off_t pad_phys; /* RADEON_FLAG_VM_PAD_1PAGE page, when it lies past the buffer (else -1) */
 };
 
 struct amdgpu_va {
@@ -350,6 +351,7 @@ ac_drm_bo_alloc(ac_drm_device *dev, struct amdgpu_bo_alloc_request *req, ac_drm_
    bo->size = align64(MAX2(req->alloc_size, 1), PS4_PAGE);
    bo->heap = req->preferred_heap;
    bo->flags = req->flags;
+   bo->pad_phys = -1;
 
    /* VRAM: write-combined garlic (the GPU's fast path); GTT: CPU-cached onion, coherent. */
    const int type = (req->preferred_heap & AMDGPU_GEM_DOMAIN_VRAM) ||
@@ -393,6 +395,8 @@ ac_drm_bo_free(ac_drm_device *dev, ac_drm_bo bo)
    if (b->cpu_owned)
       sceKernelMunmap(b->cpu, b->size);
    sceKernelReleaseDirectMemory(b->phys, b->size);
+   if (b->pad_phys >= 0)
+      sceKernelReleaseDirectMemory(b->pad_phys, PS4_PAGE);
    simple_mtx_lock(&dev->lock);
    dev->bos[b->handle] = NULL;
    simple_mtx_unlock(&dev->lock);
@@ -497,6 +501,33 @@ ps4_va_op(ac_drm_device *dev, uint32_t bo_handle, uint64_t offset, uint64_t size
          return -EINVAL;
       }
       void *a = (void *)(uintptr_t)addr;
+      const uint64_t cpu = (uintptr_t)b->cpu;
+      if (b->cpu && addr != cpu) {
+         /* A second mapping of the same memory: RADEON_FLAG_VM_PAD_1PAGE maps the first page
+          * again after the buffer, so that prefetches past the end hit valid memory. The PS4
+          * can't map direct memory twice (EBUSY). Inside the buffer's own (16 KiB rounded)
+          * mapping it's already backed; past it, back it with a page of its own. */
+         if (addr >= cpu && addr + size <= cpu + b->size)
+            return 0;
+         if (addr != cpu + b->size || size != PS4_PAGE || b->pad_phys >= 0) {
+            ps4_log("radv/ps4: unsupported alias mapping of bo %u at %#llx (+%#llx, %#llx bytes)\n",
+                    b->handle, (unsigned long long)addr, (unsigned long long)offset,
+                    (unsigned long long)size);
+            return -ENOSYS;
+         }
+         off_t pad;
+         if (sceKernelAllocateDirectMemory(0, sceKernelGetDirectMemorySize(), PS4_PAGE, PS4_PAGE,
+                                           PS4_WB_ONION, &pad))
+            return -ENOMEM;
+         if (sceKernelMapDirectMemory(&a, PS4_PAGE, PS4_PROT_CPU_RW | PS4_PROT_GPU_RW,
+                                      PS4_MAP_FIXED, pad, PS4_PAGE) ||
+             a != (void *)(uintptr_t)addr) {
+            sceKernelReleaseDirectMemory(pad, PS4_PAGE);
+            return -ENOMEM;
+         }
+         b->pad_phys = pad;
+         return 0;
+      }
       int r = sceKernelMapDirectMemory(&a, size, PS4_PROT_CPU_RW | PS4_PROT_GPU_RW, PS4_MAP_FIXED,
                                        b->phys + offset, PS4_PAGE);
       if (r || a != (void *)(uintptr_t)addr) {
