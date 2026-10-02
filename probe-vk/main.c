@@ -74,6 +74,24 @@ int main(void) {
   setenv("MESA_DEBUG", "1", 1);
   fprintf(stderr, "stderr works\n");
   ac_ps4_trace("probe: trace test\n");
+  {
+    // Are the data relocations applied? vk_physical_device_trampolines is a table of function
+    // pointers filled by R_X86_64_RELATIVE relocations; slot 28 (offset 0xe0) =
+    // vk_tramp_GetPhysicalDeviceProperties2, which RADV's WSI found NULL.
+    extern void* vk_physical_device_trampolines[];
+    int filled = 0;
+    for (int i = 0; i < 72; i++)
+      filled += vk_physical_device_trampolines[i] != NULL;
+    Log("trampolines at %p: %d of 72 slots set; [0] %p [1] %p [28] %p [29] %p\n",
+        (void*)vk_physical_device_trampolines, filled, vk_physical_device_trampolines[0],
+        vk_physical_device_trampolines[1], vk_physical_device_trampolines[28],
+        vk_physical_device_trampolines[29]);
+    const uint64_t* page = (const uint64_t*)((uintptr_t)vk_physical_device_trampolines & ~0x3fffull);
+    for (int i = 0; i < 64; i += 4)
+      Log("  data+%#05x: %016llx %016llx %016llx %016llx\n", i * 8,
+          (unsigned long long)page[i], (unsigned long long)page[i + 1],
+          (unsigned long long)page[i + 2], (unsigned long long)page[i + 3]);
+  }
   Log("Vulkan probe start\n");
   // System modules used by the runtime (see probe-gnm): load before any call into them.
   sceSysmoduleLoadModuleInternal(0x80000010);  // SystemService
