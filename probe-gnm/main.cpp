@@ -154,7 +154,8 @@ constexpr uint32_t Pm4(uint32_t opcode, uint32_t body_dwords) {
     return (3u << 30) | ((body_dwords - 1) << 16) | (opcode << 8);
 }
 constexpr uint32_t kOpNop = 0x10, kOpNumInstances = 0x2F, kOpEventWrite = 0x46,
-                   kOpDmaData = 0x50, kOpSetContextReg = 0x69, kOpSetUconfigReg = 0x79;
+                   kOpDmaData = 0x50, kOpSetContextReg = 0x69, kOpSetShReg = 0x76,
+                   kOpSetUconfigReg = 0x79;
 
 struct CommandBuffer {
     uint32_t* base;
@@ -185,6 +186,13 @@ struct CommandBuffer {
     // Consecutive context registers starting at `reg` (dword offset from 0x28000 / 4 = 0xA000).
     void ContextRegs(uint32_t reg, std::initializer_list<uint32_t> values) {
         *cur++ = Pm4(kOpSetContextReg, 1 + static_cast<uint32_t>(values.size()));
+        *cur++ = reg;
+        for (uint32_t v : values)
+            *cur++ = v;
+    }
+    // Consecutive persistent-state (SH) registers, dword offsets from 0x2C00.
+    void ShRegs(uint32_t reg, std::initializer_list<uint32_t> values) {
+        *cur++ = Pm4(kOpSetShReg, 1 + static_cast<uint32_t>(values.size()));
         *cur++ = reg;
         for (uint32_t v : values)
             *cur++ = v;
@@ -264,6 +272,59 @@ void InstallFaultHandler(int32_t gnm) {
     const int signals[] = {SIGSEGV, SIGBUS, SIGILL, SIGFPE};
     for (int sig : signals)
         sigaction(sig, &action, nullptr);
+}
+
+// Everything but the shaders for a draw into `frame`: Gnm's default hardware state, colour
+// target 0 = the linear framebuffer, no depth, full-screen viewport, generic scissor = centre
+// box. Register numbers: AMD CIK (Mesa sid.h), dword offsets from the context register base.
+void SetupDrawState(CommandBuffer& cb, void* frame) {
+    cb.Gnm("InitDefaultHardwareState350", 0x100, [](uint32_t* c, uint32_t n) {
+        return sceGnmDrawInitDefaultHardwareState350(c, n);
+    });
+
+    // Colour target 0: the linear framebuffer (8_8_8_8 UNORM, tile mode 8 = linear aligned).
+    const uintptr_t target = reinterpret_cast<uintptr_t>(frame);
+    const uint32_t pitch_tiles = kWidth / 8 - 1, slice_tiles = kWidth * kHeight / 64 - 1;
+    cb.ContextRegs(0x318, {static_cast<uint32_t>(target >> 8),   // CB_COLOR0_BASE
+                           pitch_tiles,                          // CB_COLOR0_PITCH
+                           slice_tiles,                          // CB_COLOR0_SLICE
+                           0,                                    // CB_COLOR0_VIEW
+                           0xAu << 2,                            // CB_COLOR0_INFO
+                           8u | (8u << 5),                       // CB_COLOR0_ATTRIB
+                           0,                                    // (DCC, unused on CIK)
+                           0,                                    // CB_COLOR0_CMASK
+                           0,                                    // CB_COLOR0_CMASK_SLICE
+                           static_cast<uint32_t>(target >> 8),   // CB_COLOR0_FMASK
+                           slice_tiles});                        // CB_COLOR0_FMASK_SLICE
+    cb.ContextRegs(0x8E, {0xF});                                 // CB_TARGET_MASK
+    cb.ContextRegs(0x202, {(1u << 4) | (0xCCu << 16)});          // CB_COLOR_CONTROL normal, copy
+    cb.ContextRegs(0x1E0, {0});                                  // CB_BLEND0_CONTROL off
+
+    // No depth/stencil.
+    cb.ContextRegs(0x000, {0});                                  // DB_RENDER_CONTROL
+    cb.ContextRegs(0x010, {0, 0});                               // DB_Z_INFO, DB_STENCIL_INFO
+    cb.ContextRegs(0x200, {0});                                  // DB_DEPTH_CONTROL
+
+    // Scissors and viewport: full screen, generic scissor = centre box.
+    const uint32_t full = kWidth | (kHeight << 16);
+    cb.ContextRegs(0x00C, {0, full});                            // PA_SC_SCREEN_SCISSOR_TL/BR
+    cb.ContextRegs(0x080, {0, 0x80000000, full, 0xFFFF});        // WINDOW_OFFSET, WINDOW_SCISSOR, CLIPRECT_RULE
+    cb.ContextRegs(0x090, {0x80000000 | (kWidth / 4) | ((kHeight / 4) << 16),
+                           (kWidth * 3 / 4) | ((kHeight * 3 / 4) << 16)});  // GENERIC_SCISSOR
+    cb.ContextRegs(0x094, {0x80000000, full});                   // PA_SC_VPORT_SCISSOR_0
+    const auto f = [](float v) {
+        uint32_t u;
+        memcpy(&u, &v, 4);
+        return u;
+    };
+    cb.ContextRegs(0x0B4, {f(0.0f), f(1.0f)});                   // PA_SC_VPORT_ZMIN/ZMAX_0
+    cb.ContextRegs(0x10F, {f(kWidth / 2.0f), f(kWidth / 2.0f), f(-(kHeight / 2.0f)),
+                           f(kHeight / 2.0f), f(0.5f), f(0.5f)});  // PA_CL_VPORT_*
+    cb.ContextRegs(0x204, {1u << 16});                           // PA_CL_CLIP_CNTL clip off
+    cb.ContextRegs(0x205, {0});                                  // PA_SU_SC_MODE_CNTL no cull
+    cb.ContextRegs(0x206, {0x43F});                              // PA_CL_VTE_CNTL
+    cb.ContextRegs(0x2F8, {0});                                  // PA_SC_AA_CONFIG
+    cb.ContextRegs(0x30E, {0xFFFFFFFF, 0xFFFFFFFF});             // PA_SC_AA_MASK
 }
 
 }  // namespace
@@ -355,59 +416,12 @@ int main() {
     }
 
     // Step 4: a real draw. Framebuffer 1 is filled dark red, then Gnm's embedded full-screen VS
-    // and embedded PS 1 draw a rect list into it, scissored to the centre box. Register numbers:
-    // AMD CIK (Mesa sid.h), dword offsets from the context register base.
+    // and embedded PS 1 draw a rect list into it, scissored to the centre box.
     {
         CommandBuffer cb{cmd_memory, cmd_memory};
         Log("step 4 (draw): building\n");
         cb.Fill(frames[1], 0xFF000080, kFrameBytes);
-        cb.Gnm("InitDefaultHardwareState350", 0x100, [](uint32_t* c, uint32_t n) {
-            return sceGnmDrawInitDefaultHardwareState350(c, n);
-        });
-
-        // Colour target 0: the linear framebuffer (8_8_8_8 UNORM, tile mode 8 = linear aligned).
-        const uintptr_t target = reinterpret_cast<uintptr_t>(frames[1]);
-        const uint32_t pitch_tiles = kWidth / 8 - 1, slice_tiles = kWidth * kHeight / 64 - 1;
-        cb.ContextRegs(0x318, {static_cast<uint32_t>(target >> 8),   // CB_COLOR0_BASE
-                               pitch_tiles,                          // CB_COLOR0_PITCH
-                               slice_tiles,                          // CB_COLOR0_SLICE
-                               0,                                    // CB_COLOR0_VIEW
-                               0xAu << 2,                            // CB_COLOR0_INFO
-                               8u | (8u << 5),                       // CB_COLOR0_ATTRIB
-                               0,                                    // (DCC, unused on CIK)
-                               0,                                    // CB_COLOR0_CMASK
-                               0,                                    // CB_COLOR0_CMASK_SLICE
-                               static_cast<uint32_t>(target >> 8),   // CB_COLOR0_FMASK
-                               slice_tiles});                        // CB_COLOR0_FMASK_SLICE
-        cb.ContextRegs(0x8E, {0xF});                                 // CB_TARGET_MASK
-        cb.ContextRegs(0x202, {(1u << 4) | (0xCCu << 16)});          // CB_COLOR_CONTROL normal, copy
-        cb.ContextRegs(0x1E0, {0});                                  // CB_BLEND0_CONTROL off
-
-        // No depth/stencil.
-        cb.ContextRegs(0x000, {0});                                  // DB_RENDER_CONTROL
-        cb.ContextRegs(0x010, {0, 0});                               // DB_Z_INFO, DB_STENCIL_INFO
-        cb.ContextRegs(0x200, {0});                                  // DB_DEPTH_CONTROL
-
-        // Scissors and viewport: full screen, generic scissor = centre box.
-        const uint32_t full = kWidth | (kHeight << 16);
-        cb.ContextRegs(0x00C, {0, full});                            // PA_SC_SCREEN_SCISSOR_TL/BR
-        cb.ContextRegs(0x080, {0, 0x80000000, full, 0xFFFF});        // WINDOW_OFFSET, WINDOW_SCISSOR, CLIPRECT_RULE
-        cb.ContextRegs(0x090, {0x80000000 | (kWidth / 4) | ((kHeight / 4) << 16),
-                               (kWidth * 3 / 4) | ((kHeight * 3 / 4) << 16)});  // GENERIC_SCISSOR
-        cb.ContextRegs(0x094, {0x80000000, full});                   // PA_SC_VPORT_SCISSOR_0
-        const auto f = [](float v) {
-            uint32_t u;
-            memcpy(&u, &v, 4);
-            return u;
-        };
-        cb.ContextRegs(0x0B4, {f(0.0f), f(1.0f)});                   // PA_SC_VPORT_ZMIN/ZMAX_0
-        cb.ContextRegs(0x10F, {f(kWidth / 2.0f), f(kWidth / 2.0f), f(-(kHeight / 2.0f)),
-                               f(kHeight / 2.0f), f(0.5f), f(0.5f)});  // PA_CL_VPORT_*
-        cb.ContextRegs(0x204, {1u << 16});                           // PA_CL_CLIP_CNTL clip off
-        cb.ContextRegs(0x205, {0});                                  // PA_SU_SC_MODE_CNTL no cull
-        cb.ContextRegs(0x206, {0x43F});                              // PA_CL_VTE_CNTL
-        cb.ContextRegs(0x2F8, {0});                                  // PA_SC_AA_CONFIG
-        cb.ContextRegs(0x30E, {0xFFFFFFFF, 0xFFFFFFFF});             // PA_SC_AA_MASK
+        SetupDrawState(cb, frames[1]);
 
         cb.Gnm("SetEmbeddedVsShader(0)", 0x1D, [](uint32_t* c, uint32_t n) {
             return sceGnmSetEmbeddedVsShader(c, n, 0, 0);
@@ -428,6 +442,79 @@ int main() {
         Wait(6);
         const uint32_t* pixels = static_cast<uint32_t*>(frames[1]);
         Log("step 4: corner pixel %#x (expect 0xff000080), centre pixel %#x (drawn if different)\n",
+            pixels[0], pixels[(kHeight / 2) * kWidth + kWidth / 2]);
+    }
+
+    // Step 5: our own GCN shaders (gfx7, assembled with llvm-mc -mcpu=bonaire), registers set
+    // directly instead of through Gnm: a magenta rect over half the screen into framebuffer 0.
+    {
+        Log("step 5 (own shaders): building\n");
+        // VS: rect list corners from the vertex id (v0): x = id&1 ? 0.5 : -0.5,
+        // y = id&2 ? -0.5 : 0.5; exports one (unused) parameter and the position.
+        static const uint32_t vs_code[] = {
+            0x36020081,              // v_and_b32 v1, 1, v0
+            0x7d8a0280,              // v_cmp_ne_u32 vcc, 0, v1
+            0xd2000002, 0x01a9e0f1,  // v_cndmask_b32_e64 v2, -0.5, 0.5, vcc
+            0x36020082,              // v_and_b32 v1, 2, v0
+            0x7d8a0280,              // v_cmp_ne_u32 vcc, 0, v1
+            0xd2000003, 0x01a9e2f0,  // v_cndmask_b32_e64 v3, 0.5, -0.5, vcc
+            0x7e080280,              // v_mov_b32 v4, 0
+            0x7e0a02f2,              // v_mov_b32 v5, 1.0
+            0xf800020f, 0x05050505,  // exp param0 v5, v5, v5, v5
+            0xf80008cf, 0x05040302,  // exp pos0 v2, v3, v4, v5 done
+            0xbf810000,              // s_endpgm
+        };
+        // PS: magenta.
+        static const uint32_t ps_code[] = {
+            0x7e0002f2,              // v_mov_b32 v0, 1.0
+            0x7e020280,              // v_mov_b32 v1, 0
+            0xf800180f, 0x00000100,  // exp mrt0 v0, v1, v0, v0 done vm
+            0xbf810000,              // s_endpgm
+        };
+        uint8_t* shaders = static_cast<uint8_t*>(AllocGpuMemory(kAlign, "shaders"));
+        if (!shaders)
+            return 1;
+        memcpy(shaders, vs_code, sizeof(vs_code));
+        memcpy(shaders + 0x100, ps_code, sizeof(ps_code));
+        const uint64_t vs_addr = reinterpret_cast<uintptr_t>(shaders);
+        const uint64_t ps_addr = vs_addr + 0x100;
+
+        CommandBuffer cb{cmd_memory, cmd_memory};
+        cb.Fill(frames[0], 0xFF000080, kFrameBytes);
+        SetupDrawState(cb, frames[0]);
+        // RSRC1: VGPRS = (vgprs - 1) / 4, SGPRS = (sgprs - 1) / 8 (16 covers vcc),
+        // FLOAT_MODE = 0xC0 (denormals on, like Mesa).
+        const uint32_t float_mode = 0xC0u << 12;
+        cb.ShRegs(0x48, {static_cast<uint32_t>(vs_addr >> 8), static_cast<uint32_t>(vs_addr >> 40),
+                         ((8 - 1) / 4) | (((16 - 1) / 8) << 6) | float_mode,  // RSRC1_VS
+                         0});                                                // RSRC2_VS
+        cb.ContextRegs(0x1B1, {0});                                  // SPI_VS_OUT_CONFIG: 1 param
+        cb.ContextRegs(0x1C3, {4});                                  // SPI_SHADER_POS_FORMAT 4COMP
+        cb.ContextRegs(0x207, {0});                                  // PA_CL_VS_OUT_CNTL
+        cb.ShRegs(0x08, {static_cast<uint32_t>(ps_addr >> 8), static_cast<uint32_t>(ps_addr >> 40),
+                         ((4 - 1) / 4) | (((16 - 1) / 8) << 6) | float_mode,  // RSRC1_PS
+                         0});                                                // RSRC2_PS
+        // At least one interpolator must be enabled: PERSP_CENTER (i, j in v0, v1).
+        cb.ContextRegs(0x1B3, {2, 2});                               // SPI_PS_INPUT_ENA/ADDR
+        cb.ContextRegs(0x1B6, {0});                                  // SPI_PS_IN_CONTROL: 0 interps
+        cb.ContextRegs(0x1B8, {0});                                  // SPI_BARYC_CNTL
+        cb.ContextRegs(0x1C4, {0, 9});                               // SPI_SHADER_Z/COL_FORMAT 32_ABGR
+        cb.ContextRegs(0x203, {0});                                  // DB_SHADER_CONTROL
+        cb.ContextRegs(0x8F, {0xF});                                 // CB_SHADER_MASK
+        cb.ContextRegs(0x090, {0x80000000, kWidth | (kHeight << 16)});  // no generic scissor
+        cb.UconfigReg(0x242, 0x11);                                  // VGT_PRIMITIVE_TYPE rect list
+        *cb.cur++ = Pm4(kOpNumInstances, 1);
+        *cb.cur++ = 1;
+        cb.Gnm("DrawIndexAuto(3)", 7, [](uint32_t* c, uint32_t n) {
+            return sceGnmDrawIndexAuto(c, n, 3, 0);
+        });
+        *cb.cur++ = Pm4(kOpEventWrite, 1);
+        *cb.cur++ = 0x16;                                            // CACHE_FLUSH_AND_INV_EVENT
+
+        SubmitAndFlip(cb, video, 0, "step 5 (own shaders)");
+        Wait(6);
+        const uint32_t* pixels = static_cast<uint32_t*>(frames[0]);
+        Log("step 5: corner pixel %#x (expect 0xff000080), centre pixel %#x (expect 0xffff00ff)\n",
             pixels[0], pixels[(kHeight / 2) * kWidth + kWidth / 2]);
     }
 
