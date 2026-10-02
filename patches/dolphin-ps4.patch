@@ -2575,7 +2575,7 @@ index ce1b7a5..941b744 100644
    g_backend_info.bSupportsPipelineCacheData = supports_glsl_cache;
  
 diff --git a/Source/Core/VideoBackends/OGL/OGLGfx.cpp b/Source/Core/VideoBackends/OGL/OGLGfx.cpp
-index ff5402b..b193012 100644
+index ff5402b..64ba949 100644
 --- a/Source/Core/VideoBackends/OGL/OGLGfx.cpp
 +++ b/Source/Core/VideoBackends/OGL/OGLGfx.cpp
 @@ -2,6 +2,7 @@
@@ -2878,7 +2878,7 @@ index ff5402b..b193012 100644
    UpdateActiveConfig();
  }
  
-@@ -271,14 +532,383 @@ void OGLGfx::SetViewport(float x, float y, float width, float height, float near
+@@ -271,14 +532,390 @@ void OGLGfx::SetViewport(float x, float y, float width, float height, float near
    glDepthRangef(near_depth, far_depth);
  }
  
@@ -3185,6 +3185,13 @@ index ff5402b..b193012 100644
  {
 +  PS4_PROFILE(PS4_PROF_DRAW);
 +#ifdef __ORBIS__
++  static int s_measured_draws = 0;
++  const bool ps4_measure = s_measured_draws < 6;
++  const unsigned long long ps4_free_before = ps4_measure ? ps4_internal_memory_free() : 0;
++  if (ps4_measure)
++  {
++    s_measured_draws++;
++  }
 +  if (!g_ogl_config.bSupportsGLBaseVertex)
 +  {
 +    // The indices start at GetPS4FirstIndex() (OGL VertexManager::ResetBuffer): the vertex
@@ -3262,7 +3269,7 @@ index ff5402b..b193012 100644
    if (g_ogl_config.bSupportsGLBaseVertex)
    {
      glDrawElementsBaseVertex(static_cast<const OGLPipeline*>(m_current_pipeline)->GetGLPrimitive(),
-@@ -290,6 +920,28 @@ void OGLGfx::DrawIndexed(u32 base_index, u32 num_indices, u32 base_vertex)
+@@ -290,6 +927,37 @@ void OGLGfx::DrawIndexed(u32 base_index, u32 num_indices, u32 base_vertex)
      glDrawElements(static_cast<const OGLPipeline*>(m_current_pipeline)->GetGLPrimitive(),
                     num_indices, GL_UNSIGNED_SHORT, static_cast<u16*>(nullptr) + base_index);
    }
@@ -3281,6 +3288,15 @@ index ff5402b..b193012 100644
 +             num_indices, base_index, base_vertex);
 +    ps4_boot_trace(line);
 +  }
++  if (ps4_measure)
++  {
++    char line[96];
++    snprintf(line, sizeof(line), "draw #%d: internal memory %+lld KiB", s_draws,
++             (static_cast<long long>(ps4_internal_memory_free()) -
++              static_cast<long long>(ps4_free_before)) /
++                 1024);
++    ps4_boot_trace(line);
++  }
 +  if (s_draws == 1 || s_draws == 100 || s_draws == 1000 || s_draws == 10000 || s_draws == 100000)
 +  {
 +    char line[64];
@@ -3291,7 +3307,7 @@ index ff5402b..b193012 100644
  }
  
  void OGLGfx::DispatchComputeShader(const AbstractShader* shader, u32 groupsize_x, u32 groupsize_y,
-@@ -415,8 +1067,63 @@ bool OGLGfx::BindBackbuffer(const ClearColor& clear_color)
+@@ -415,8 +1083,81 @@ bool OGLGfx::BindBackbuffer(const ClearColor& clear_color)
    return true;
  }
  
@@ -3326,6 +3342,24 @@ index ff5402b..b193012 100644
  {
 +  PS4_PROFILE(PS4_PROF_PRESENT);
 +#ifdef __ORBIS__
++  // Port measurement: libkernel internal memory across the first presented frames.
++  {
++    static int s_presents = 0;
++    static unsigned long long s_last = 0;
++    const unsigned long long now = ps4_internal_memory_free();
++    if (s_presents < 12 || s_presents % 600 == 0)
++    {
++      char line[128];
++      snprintf(line, sizeof(line), "present #%d: internal memory %llu KiB (%+lld KiB since last)",
++               s_presents, now / 1024,
++               s_last ? (static_cast<long long>(now) - static_cast<long long>(s_last)) / 1024 : 0);
++      ps4_boot_trace(line);
++    }
++    s_presents++;
++    s_last = now;
++  }
++#endif
++#ifdef __ORBIS__
 +  // Delete what was released at least 2 presented frames ago (see PS4DeferDelete): long
 +  // enough for the GPU, short enough not to pile up textures in games that churn them.
 +  m_ps4_frame++;
@@ -3355,7 +3389,7 @@ index ff5402b..b193012 100644
    if (g_ogl_config.bSupportsDebug)
    {
      if (Common::Log::LogManager::GetInstance()->IsEnabled(Common::Log::LogType::HOST_GPU,
-@@ -618,6 +1325,7 @@ void OGLGfx::ApplyBlendingState(const BlendingState state)
+@@ -618,6 +1359,7 @@ void OGLGfx::ApplyBlendingState(const BlendingState state)
  
  void OGLGfx::SetPipeline(const AbstractPipeline* pipeline)
  {
@@ -3363,7 +3397,7 @@ index ff5402b..b193012 100644
    if (m_current_pipeline == pipeline)
      return;
  
-@@ -733,3 +1441,133 @@ SurfaceInfo OGLGfx::GetSurfaceInfo() const
+@@ -733,3 +1475,133 @@ SurfaceInfo OGLGfx::GetSurfaceInfo() const
  }
  
  }  // namespace OGL
@@ -3859,7 +3893,7 @@ index efbb826..73f3d03 100644
    const u32 m_buffertype;
    const u32 m_size;
 diff --git a/Source/Core/VideoBackends/OGL/OGLTexture.cpp b/Source/Core/VideoBackends/OGL/OGLTexture.cpp
-index 003a7ec..f62db25 100644
+index 003a7ec..57788cb 100644
 --- a/Source/Core/VideoBackends/OGL/OGLTexture.cpp
 +++ b/Source/Core/VideoBackends/OGL/OGLTexture.cpp
 @@ -2,6 +2,7 @@
@@ -3918,11 +3952,12 @@ index 003a7ec..f62db25 100644
    glActiveTexture(GL_MUTABLE_TEXTURE_INDEX);
    glBindTexture(target, m_texId);
  
-@@ -140,6 +174,13 @@ OGLTexture::OGLTexture(const TextureConfig& tex_config, std::string_view name)
+@@ -140,6 +174,14 @@ OGLTexture::OGLTexture(const TextureConfig& tex_config, std::string_view name)
    glTexParameteri(target, GL_TEXTURE_MAX_LEVEL, m_config.levels - 1);
  
    GLenum gl_internal_format = GetGLInternalFormatForTextureFormat(m_config.format, true);
 +#ifdef __ORBIS__
++  const unsigned long long ps4_storage_before = ps4_internal_memory_free();
 +  if (ps4_recycled)
 +  {
 +    // Storage already allocated (immutable, same size and format).
@@ -3932,11 +3967,21 @@ index 003a7ec..f62db25 100644
    if (g_ogl_config.bSupportsTextureStorage && m_config.type == AbstractTextureType::Texture_CubeMap)
    {
      glTexStorage2D(target, m_config.levels, gl_internal_format, m_config.width, m_config.height);
-@@ -197,6 +238,24 @@ OGLTexture::OGLTexture(const TextureConfig& tex_config, std::string_view name)
+@@ -197,6 +239,34 @@ OGLTexture::OGLTexture(const TextureConfig& tex_config, std::string_view name)
      }
    }
  
 +#ifdef __ORBIS__
++  if (!ps4_recycled && ps4_gl_texture_creations <= 12)
++  {
++    char line[128];
++    snprintf(line, sizeof(line), "texture #%d %ux%ux%u storage: internal memory %+lld KiB",
++             ps4_gl_texture_creations, m_config.width, m_config.height, m_config.layers,
++             (static_cast<long long>(ps4_internal_memory_free()) -
++              static_cast<long long>(ps4_storage_before)) /
++                 1024);
++    ps4_boot_trace(line);
++  }
 +  // Port diagnostics: does Piglet accept the texture storage Dolphin asks for?
 +  {
 +    static int s_reported = 0;
@@ -3957,7 +4002,7 @@ index 003a7ec..f62db25 100644
    if (m_config.IsRenderTarget())
    {
      // We can't render to compressed formats.
-@@ -216,8 +275,18 @@ OGLTexture::OGLTexture(const TextureConfig& tex_config, std::string_view name)
+@@ -216,8 +286,18 @@ OGLTexture::OGLTexture(const TextureConfig& tex_config, std::string_view name)
  
  OGLTexture::~OGLTexture()
  {
@@ -3976,7 +4021,7 @@ index 003a7ec..f62db25 100644
  }
  
  void OGLTexture::CopyRectangleFromTexture(const AbstractTexture* src,
-@@ -279,6 +348,7 @@ void OGLTexture::ResolveFromTexture(const AbstractTexture* src,
+@@ -279,6 +359,7 @@ void OGLTexture::ResolveFromTexture(const AbstractTexture* src,
  void OGLTexture::Load(u32 level, u32 width, u32 height, u32 row_length, const u8* buffer,
                        size_t buffer_size, u32 layer)
  {
@@ -3984,7 +4029,7 @@ index 003a7ec..f62db25 100644
    if (level >= m_config.levels)
      PanicAlertFmt("Texture only has {} levels, can't update level {}", m_config.levels, level);
  
-@@ -670,7 +740,11 @@ OGLFramebuffer::OGLFramebuffer(AbstractTexture* color_attachment, AbstractTextur
+@@ -670,7 +751,11 @@ OGLFramebuffer::OGLFramebuffer(AbstractTexture* color_attachment, AbstractTextur
  
  OGLFramebuffer::~OGLFramebuffer()
  {
@@ -3996,7 +4041,7 @@ index 003a7ec..f62db25 100644
  }
  
  std::unique_ptr<OGLFramebuffer>
-@@ -692,6 +766,16 @@ OGLFramebuffer::Create(OGLTexture* color_attachment, OGLTexture* depth_attachmen
+@@ -692,6 +777,16 @@ OGLFramebuffer::Create(OGLTexture* color_attachment, OGLTexture* depth_attachmen
  
    GLuint fbo;
    glGenFramebuffers(1, &fbo);
@@ -4013,7 +4058,7 @@ index 003a7ec..f62db25 100644
    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
  
    std::vector<GLenum> buffers;
-@@ -744,6 +828,25 @@ OGLFramebuffer::Create(OGLTexture* color_attachment, OGLTexture* depth_attachmen
+@@ -744,6 +839,25 @@ OGLFramebuffer::Create(OGLTexture* color_attachment, OGLTexture* depth_attachmen
  
    glDrawBuffers(static_cast<GLsizei>(buffers.size()), buffers.data());
  
