@@ -88,7 +88,8 @@ libs=(src/amd/vulkan/libvulkan_radeon.a src/amd/addrlib/libaddrlib.a
     src/vulkan/runtime/libvulkan_runtime.a src/vulkan/util/libvulkan_util.a
     src/vulkan/wsi/libvulkan_wsi.a)
 # RADV derives its pipeline-cache UUID from the binary's build-id note via dladdr, which the PS4
-# lacks ("cannot generate UUID"): give it the Mesa commit plus our PS4 layer's hash instead.
-build_id="$(git -C "$MESA" rev-parse HEAD)$(sha1sum "$HERE/../port/mesa/ac_ps4_drm.c" | cut -c1-40)"
+# lacks ("cannot generate UUID"): give it the Mesa commit instead (stable, so editing
+# port/mesa/ac_ps4_drm.c doesn't rebuild all of RADV; the disk shader cache is off).
+build_id="$(git -C "$MESA" rev-parse HEAD)"
 meson configure "$build" -Dradv-build-id="$build_id" >/dev/null
 ninja -C "$build" "${@:2}" "${libs[@]}"
