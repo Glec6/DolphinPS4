@@ -235,8 +235,11 @@ void installDumpHandler() {
 }
 }  // namespace
 
+extern "C" void ps4_heap_private_arena(const char* name);  // ps4_runtime.cpp
+
 extern "C" void ps4_watch_thread(const char* name) {
     installDumpHandler();
+    ps4_heap_private_arena(name);
     const pthread_t self = pthread_self();
     for (int i = 0; i < std::min(g_watched_count.load(), kMaxWatched); i++) {
         if (g_watched[i].thread.load() == self)

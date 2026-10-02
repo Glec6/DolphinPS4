@@ -19,7 +19,10 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/mman.h>
+
+#include <atomic>
 #include <sys/types.h>
 
 // Declared by hand: the toolchain headers give these the wrong (or no) prototypes.
@@ -226,6 +229,17 @@ __attribute__((tls_model("initial-exec"))) thread_local const char* t_op = "?";
 __attribute__((tls_model("initial-exec"))) thread_local const void* t_caller = nullptr;
 int g_errors = 0;
 
+// Per-thread arenas. One locked heap made Dolphin's busy threads (CPU, video, Vulkan submission,
+// shader compilers) contend: dlmalloc's spin lock then yields to the kernel, and in Ultimate
+// Spider-Man the video thread spent ~9% (likely more) of its time there. Each of those threads
+// gets a private dlmalloc arena carved out of the main heap; with FOOTERS every chunk records
+// its arena, so free/realloc from any thread return memory to the right one. A full arena falls
+// back to the main heap.
+constexpr size_t ARENA_SIZE = 8 * MB;
+constexpr int MAX_ARENAS = 12;
+__attribute__((tls_model("initial-exec"))) thread_local mspace t_arena = nullptr;
+std::atomic<int> g_arenaCount{0};
+
 // Checks the heap's control block before every operation; the first time it is found
 // overwritten, logs when (operation number, current and previous caller) and what it now holds.
 unsigned long long g_ops = 0;
@@ -295,7 +309,9 @@ void* __wrap_malloc(size_t size) {
     t_op = "malloc";
     t_caller = __builtin_return_address(0);
     checkHeap(t_op, t_caller);
-    void* p = mspace_malloc(getHeap(), size);
+    void* p = t_arena ? mspace_malloc(t_arena, size) : nullptr;
+    if (!p)
+        p = mspace_malloc(getHeap(), size);
     if (!p)
         reportFailure("malloc", size);
     return p;
@@ -322,7 +338,9 @@ void* __wrap_calloc(size_t nelem, size_t size) {
     t_op = "calloc";
     t_caller = __builtin_return_address(0);
     checkHeap(t_op, t_caller);
-    void* p = mspace_calloc(getHeap(), nelem, size);
+    void* p = t_arena ? mspace_calloc(t_arena, nelem, size) : nullptr;
+    if (!p)
+        p = mspace_calloc(getHeap(), nelem, size);
     if (!p)
         reportFailure("calloc", nelem * size);
     return p;
@@ -342,7 +360,19 @@ void* __wrap_realloc(void* ptr, size_t size) {
         mspace_free(getHeap(), ptr);
         return nullptr;
     }
-    void* p = mspace_realloc(getHeap(), ptr, size);
+    // With FOOTERS this grows the chunk inside the arena it came from (the mspace argument is
+    // only used for new allocations); when that arena is full, move it to this thread's.
+    void* p = ptr ? mspace_realloc(getHeap(), ptr, size) : nullptr;
+    if (!p) {
+        p = t_arena ? mspace_malloc(t_arena, size) : nullptr;
+        if (!p)
+            p = mspace_malloc(getHeap(), size);
+        if (p && ptr) {
+            const size_t old_size = mspace_usable_size(ptr);
+            memcpy(p, ptr, old_size < size ? old_size : size);
+            mspace_free(getHeap(), ptr);
+        }
+    }
     if (!p)
         reportFailure("realloc", size);
     return p;
@@ -352,10 +382,33 @@ void* __wrap_memalign(size_t alignment, size_t size) {
     t_op = "memalign";
     t_caller = __builtin_return_address(0);
     checkHeap(t_op, t_caller);
-    void* p = mspace_memalign(getHeap(), alignment, size);
+    void* p = t_arena ? mspace_memalign(t_arena, alignment, size) : nullptr;
+    if (!p)
+        p = mspace_memalign(getHeap(), alignment, size);
     if (!p)
         reportFailure("memalign", size);
     return p;
+}
+
+// Gives the calling thread a private arena if it is one of Dolphin's busy threads (called when
+// a thread names itself: Common::SetCurrentThreadName -> ps4_watch_thread).
+void ps4_heap_private_arena(const char* name) {
+    static const char* const busy[] = {"CPU thread", "CPU-GPU thread", "Video thread",
+                                       "VK submission thread", "AsyncShaderCompiler Worker",
+                                       "DVD thread", "Audio thread - PS4"};
+    if (t_arena || !name || !getHeap())
+        return;
+    bool wanted = false;
+    for (const char* b : busy)
+        wanted |= strcmp(name, b) == 0;
+    if (!wanted || g_arenaCount.fetch_add(1) >= MAX_ARENAS)
+        return;
+    void* block = mspace_malloc(getHeap(), ARENA_SIZE);
+    if (!block)
+        return;
+    t_arena = create_mspace_with_base(block, ARENA_SIZE, 1);
+    heapLog("[dolphin] heap: private %zu MiB arena for '%s'%s\n", ARENA_SIZE / MB, name,
+            t_arena ? "" : " FAILED");
 }
 
 // posix_memalign and aligned_alloc in libc.a are built on __memalign.
