@@ -1451,10 +1451,10 @@ index 940e93c..39c95f2 100644
  
    if (!m_system.GetJitInterface().WantsPageTableMappings())
 diff --git a/Source/Core/DolphinNoGUI/CMakeLists.txt b/Source/Core/DolphinNoGUI/CMakeLists.txt
-index 51c3fff..0b31728 100644
+index 51c3fff..8e91ab7 100644
 --- a/Source/Core/DolphinNoGUI/CMakeLists.txt
 +++ b/Source/Core/DolphinNoGUI/CMakeLists.txt
-@@ -23,6 +23,14 @@ if(${CMAKE_SYSTEM_NAME} STREQUAL "Linux")
+@@ -23,6 +23,18 @@ if(${CMAKE_SYSTEM_NAME} STREQUAL "Linux")
    target_sources(dolphin-nogui PRIVATE PlatformFBDev.cpp)
  endif()
  
@@ -1464,12 +1464,16 @@ index 51c3fff..0b31728 100644
 +  target_sources(dolphin-nogui PRIVATE PlatformPS4.cpp ${PS4_RUNTIME_SOURCES})
 +  target_link_libraries(dolphin-nogui PRIVATE
 +    SceSysmodule SceSystemService SceUserService SceVideoOut SceAudioOut ScePad SceNet)
++  if(ENABLE_VULKAN)
++    # The Vulkan backend runs on Mesa's RADV on GNM, linked in (no Vulkan loader on the PS4).
++    ps4_link_mesa(dolphin-nogui)
++  endif()
 +endif()
 +
  if (WIN32)
    target_sources(dolphin-nogui PRIVATE DolphinNoGUI.exe.manifest DolphinNoGUI.rc)
  
-@@ -68,3 +76,7 @@ set(CPACK_PACKAGE_EXECUTABLES ${CPACK_PACKAGE_EXECUTABLES} dolphin-nogui)
+@@ -68,3 +80,7 @@ set(CPACK_PACKAGE_EXECUTABLES ${CPACK_PACKAGE_EXECUTABLES} dolphin-nogui)
  if (NOT WIN32)
    install(TARGETS dolphin-nogui RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
  endif()
@@ -1478,7 +1482,7 @@ index 51c3fff..0b31728 100644
 +  ps4_add_eboot(dolphin-nogui)
 +endif()
 diff --git a/Source/Core/DolphinNoGUI/MainNoGUI.cpp b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
-index 3bf40ea..f40c356 100644
+index 3bf40ea..5bf87ad 100644
 --- a/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 +++ b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 @@ -5,7 +5,9 @@
@@ -1567,7 +1571,7 @@ index 3bf40ea..f40c356 100644
  #endif
        });
  
-@@ -270,7 +309,126 @@ int main(const int argc, char* argv[])
+@@ -270,7 +309,130 @@ int main(const int argc, char* argv[])
  
    UICommon::SetUserDirectory(user_directory);
    UICommon::Init();
@@ -1595,6 +1599,10 @@ index 3bf40ea..f40c356 100644
 +  Config::SetBase(Config::MAIN_LARGE_ENTRY_POINTS_MAP, false);
 +  // Switches for testing on hardware without rebuilding (/data/DolphinPS4/ps4.ini).
 +  {
++    // video=vulkan: Mesa's RADV on GNM (needs the plain homebrew identity, no Piglet);
++    // video=opengl: Piglet (OpenGL ES, needs the RetroArch identity).
++    const std::string video = Platform::GetPS4Option("video", "vulkan");
++    Config::SetBase(Config::MAIN_GFX_BACKEND, video == "opengl" ? "OGL" : "Vulkan");
 +    const std::string core = Platform::GetPS4Option("cpu_core", "jit");
 +    Config::SetBase(Config::MAIN_CPU_CORE, core == "interpreter"       ? PowerPC::CPUCore::Interpreter :
 +                                           core == "cachedinterpreter" ? PowerPC::CPUCore::CachedInterpreter :
@@ -1694,7 +1702,7 @@ index 3bf40ea..f40c356 100644
  
    Common::ScopeGuard ui_common_guard([] {
      UICommon::ShutdownControllers();
-@@ -284,6 +442,12 @@ int main(const int argc, char* argv[])
+@@ -284,6 +446,12 @@ int main(const int argc, char* argv[])
    }
  
    auto core_state_changed_hook = Core::AddOnStateChangedCallback([](const Core::State state) {
@@ -1707,7 +1715,7 @@ index 3bf40ea..f40c356 100644
      if (state == Core::State::Uninitialized)
        s_platform->Stop();
    });
-@@ -303,6 +467,9 @@ int main(const int argc, char* argv[])
+@@ -303,6 +471,9 @@ int main(const int argc, char* argv[])
  
    DolphinAnalytics::Instance().ReportDolphinStart("nogui");
  
@@ -4841,6 +4849,450 @@ index 6657f34..b45d76e 100644
      SetParameters(sampler, state);
      it = m_cache.emplace(state, sampler).first;
    }
+diff --git a/Source/Core/VideoBackends/Vulkan/CommandBufferManager.cpp b/Source/Core/VideoBackends/Vulkan/CommandBufferManager.cpp
+index c82417e..c6cc3b0 100644
+--- a/Source/Core/VideoBackends/Vulkan/CommandBufferManager.cpp
++++ b/Source/Core/VideoBackends/Vulkan/CommandBufferManager.cpp
+@@ -9,6 +9,7 @@
+ #include "Common/Assert.h"
+ #include "Common/MsgHandler.h"
+ 
++#include "VideoBackends/Vulkan/VKSwapChain.h"
+ #include "VideoBackends/Vulkan/VulkanContext.h"
+ #include "VideoCommon/Constants.h"
+ #include "vulkan/vulkan_core.h"
+@@ -420,11 +421,13 @@ void CommandBufferManager::SubmitCommandBuffer(u32 command_buffer_index,
+     submit_info.waitSemaphoreCount = 1;
+   }
+ 
++#ifndef __ORBIS__  // the PS4 swap chain waits for the fence instead (PS4PresentSwapChainImage)
+   if (present_swap_chain != VK_NULL_HANDLE)
+   {
+     submit_info.signalSemaphoreCount = 1;
+     submit_info.pSignalSemaphores = &m_present_semaphores[present_image_index];
+   }
++#endif
+ 
+   VkResult res =
+       vkQueueSubmit(g_vulkan_context->GetGraphicsQueue(), 1, &submit_info, resources.fence);
+@@ -435,6 +438,14 @@ void CommandBufferManager::SubmitCommandBuffer(u32 command_buffer_index,
+                   static_cast<int>(res));
+   }
+ 
++#ifdef __ORBIS__
++  if (present_swap_chain != VK_NULL_HANDLE)
++  {
++    PS4PresentSwapChainImage(present_image_index, resources.fence);
++    m_last_present_result = VK_SUCCESS;
++    present_swap_chain = VK_NULL_HANDLE;
++  }
++#endif
+   // Do we have a swap chain to present?
+   if (present_swap_chain != VK_NULL_HANDLE)
+   {
+diff --git a/Source/Core/VideoBackends/Vulkan/VKSwapChain.cpp b/Source/Core/VideoBackends/Vulkan/VKSwapChain.cpp
+index 370e22d..2e36798 100644
+--- a/Source/Core/VideoBackends/Vulkan/VKSwapChain.cpp
++++ b/Source/Core/VideoBackends/Vulkan/VKSwapChain.cpp
+@@ -4,8 +4,10 @@
+ #include "VideoBackends/Vulkan/VKSwapChain.h"
+ 
+ #include <algorithm>
++#include <array>
+ #include <cstdint>
+ 
++#include "Common/Align.h"
+ #include "Common/Assert.h"
+ #include "Common/Contains.h"
+ #include "Common/Logging/Log.h"
+@@ -21,8 +23,76 @@
+ #include <X11/Xlib.h>
+ #endif
+ 
++#ifdef __ORBIS__
++#include <orbis/VideoOut.h>
++#include <orbis/libkernel.h>
++#endif
++
+ namespace Vulkan
+ {
++#ifdef __ORBIS__
++// PS4 swap chain: RADV (Mesa) has no window system here. The images are linear R8G8B8A8 images
++// in host-visible memory, registered as VideoOut buffers (GPU address = CPU address on the PS4),
++// and presenting flips VideoOut to the image once its command buffer has finished.
++namespace
++{
++constexpr u32 PS4_SWAP_IMAGES = 3;
++constexpr u32 PS4_WIDTH = 1920, PS4_HEIGHT = 1080;
++constexpr VkDeviceSize PS4_FRAMEBUFFER_ALIGN = 2 << 20;  // VideoOut buffer alignment
++int s_video = -1;
++int s_buffer_set = -1;
++OrbisKernelEqueue s_flip_queue;
++bool s_vsync = true;
++
++bool PS4OpenVideoOut()
++{
++  if (s_video >= 0)
++    return true;
++  s_video = sceVideoOutOpen(0xFF, 0, 0, nullptr);
++  if (s_video < 0)
++  {
++    ERROR_LOG_FMT(VIDEO, "sceVideoOutOpen failed: {:#x}", static_cast<u32>(s_video));
++    return false;
++  }
++  sceKernelCreateEqueue(&s_flip_queue, "dolphin flip");
++  sceVideoOutAddFlipEvent(s_flip_queue, s_video, nullptr);
++  return true;
++}
++
++u32 PS4HostVisibleMemoryType(u32 type_bits)
++{
++  VkPhysicalDeviceMemoryProperties props;
++  vkGetPhysicalDeviceMemoryProperties(g_vulkan_context->GetPhysicalDevice(), &props);
++  const VkMemoryPropertyFlags want = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT |
++                                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
++                                     VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
++  for (u32 i = 0; i < props.memoryTypeCount; i++)
++  {
++    if ((type_bits & (1u << i)) && (props.memoryTypes[i].propertyFlags & want) == want)
++      return i;
++  }
++  return UINT32_MAX;
++}
++}  // namespace
++
++void PS4PresentSwapChainImage(u32 image_index, VkFence fence)
++{
++  vkWaitForFences(g_vulkan_context->GetDevice(), 1, &fence, VK_TRUE, UINT64_MAX);
++  const int r = sceVideoOutSubmitFlip(
++      s_video, static_cast<int>(image_index),
++      s_vsync ? ORBIS_VIDEO_OUT_FLIP_VSYNC : ORBIS_VIDEO_OUT_FLIP_HSYNC, 0);
++  if (r < 0)
++  {
++    ERROR_LOG_FMT(VIDEO, "sceVideoOutSubmitFlip failed: {:#x}", static_cast<u32>(r));
++    return;
++  }
++  // Wait for the flip, so that the image after next (3 images) is off screen when reused.
++  OrbisKernelEvent ev;
++  int count = 0;
++  sceKernelWaitEqueue(s_flip_queue, &ev, 1, &count, nullptr);
++}
++#endif
++
+ SwapChain::SwapChain(const WindowSystemInfo& wsi, VkSurfaceKHR surface, bool vsync)
+     : m_wsi(wsi), m_surface(surface), m_vsync_enabled(vsync),
+       m_fullscreen_supported(g_vulkan_context->SupportsExclusiveFullscreen(wsi, surface))
+@@ -38,6 +108,11 @@ SwapChain::~SwapChain()
+ 
+ VkSurfaceKHR SwapChain::CreateVulkanSurface(VkInstance instance, const WindowSystemInfo& wsi)
+ {
++#ifdef __ORBIS__
++  // A placeholder: the PS4 swap chain presents through VideoOut.
++  if (wsi.type == WindowSystemType::Orbis)
++    return reinterpret_cast<VkSurfaceKHR>(uintptr_t{1});
++#endif
+ #if defined(VK_USE_PLATFORM_WIN32_KHR)
+   if (wsi.type == WindowSystemType::Windows)
+   {
+@@ -273,6 +348,18 @@ bool SwapChain::SelectPresentMode()
+ 
+ bool SwapChain::CreateSwapChain()
+ {
++#ifdef __ORBIS__
++  if (!PS4OpenVideoOut())
++    return false;
++  m_surface_format = {VK_FORMAT_R8G8B8A8_UNORM, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR};
++  m_texture_format = AbstractTextureFormat::RGBA8;
++  m_width = PS4_WIDTH;
++  m_height = PS4_HEIGHT;
++  m_layers = 1;
++  s_vsync = m_vsync_enabled;
++  m_swap_chain = reinterpret_cast<VkSwapchainKHR>(uintptr_t{1});  // placeholder handle
++  return true;
++#endif
+   // Look up surface properties to determine image count and dimensions
+   VkSurfaceCapabilitiesKHR surface_capabilities;
+   VkResult res = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(g_vulkan_context->GetPhysicalDevice(),
+@@ -407,6 +494,87 @@ bool SwapChain::CreateSwapChain()
+ bool SwapChain::SetupSwapChainImages()
+ {
+   ASSERT(m_swap_chain_images.empty());
++#ifdef __ORBIS__
++  {
++    const VkDevice device = g_vulkan_context->GetDevice();
++    const TextureConfig texture_config(m_width, m_height, 1, 1, 1, m_texture_format,
++                                       AbstractTextureFlag_RenderTarget,
++                                       AbstractTextureType::Texture_2DArray);
++    std::array<void*, PS4_SWAP_IMAGES> addresses{};
++    u32 pitch = m_width;
++    for (u32 i = 0; i < PS4_SWAP_IMAGES; i++)
++    {
++      SwapChainImage image;
++      VkImageCreateInfo info = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
++      info.imageType = VK_IMAGE_TYPE_2D;
++      info.format = m_surface_format.format;
++      info.extent = {m_width, m_height, 1};
++      info.mipLevels = 1;
++      info.arrayLayers = 1;
++      info.samples = VK_SAMPLE_COUNT_1_BIT;
++      info.tiling = VK_IMAGE_TILING_LINEAR;
++      info.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
++                   VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
++      info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
++      VkResult res = vkCreateImage(device, &info, nullptr, &image.image);
++      if (res != VK_SUCCESS)
++      {
++        LOG_VULKAN_ERROR(res, "vkCreateImage (PS4 swap chain) failed: ");
++        return false;
++      }
++      VkMemoryRequirements req;
++      vkGetImageMemoryRequirements(device, image.image, &req);
++      // VideoOut wants 2 MiB aligned buffers: over-allocate, bind at an aligned offset.
++      VkMemoryAllocateInfo alloc = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
++      alloc.allocationSize = req.size + PS4_FRAMEBUFFER_ALIGN;
++      alloc.memoryTypeIndex = PS4HostVisibleMemoryType(req.memoryTypeBits);
++      res = vkAllocateMemory(device, &alloc, nullptr, &image.memory);
++      u8* base = nullptr;
++      if (res == VK_SUCCESS)
++        res = vkMapMemory(device, image.memory, 0, VK_WHOLE_SIZE, 0, reinterpret_cast<void**>(&base));
++      if (res != VK_SUCCESS)
++      {
++        LOG_VULKAN_ERROR(res, "PS4 swap chain memory failed: ");
++        vkDestroyImage(device, image.image, nullptr);
++        return false;
++      }
++      const uintptr_t base_address = reinterpret_cast<uintptr_t>(base);
++      VkDeviceSize offset = Common::AlignUp(base_address, PS4_FRAMEBUFFER_ALIGN) - base_address;
++      offset = Common::AlignUp(offset, req.alignment);
++      vkBindImageMemory(device, image.image, image.memory, offset);
++      VkImageSubresource subresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0};
++      VkSubresourceLayout layout;
++      vkGetImageSubresourceLayout(device, image.image, &subresource, &layout);
++      addresses[i] = base + offset + layout.offset;
++      pitch = static_cast<u32>(layout.rowPitch / 4);
++
++      image.texture = VKTexture::CreateAdopted(texture_config, image.image,
++                                               VK_IMAGE_VIEW_TYPE_2D, VK_IMAGE_LAYOUT_UNDEFINED);
++      if (!image.texture)
++        return false;
++      image.framebuffer = VKFramebuffer::Create(image.texture.get(), nullptr, {});
++      if (!image.framebuffer)
++        return false;
++      m_swap_chain_images.emplace_back(std::move(image));
++    }
++
++    OrbisVideoOutBufferAttribute attribute;
++    sceVideoOutSetBufferAttribute(&attribute, ORBIS_VIDEO_OUT_PIXEL_FORMAT_A8B8G8R8_SRGB,
++                                  ORBIS_VIDEO_OUT_TILING_MODE_LINEAR, 0, m_width, m_height,
++                                  pitch);
++    s_buffer_set = sceVideoOutRegisterBuffers(s_video, 0, addresses.data(), PS4_SWAP_IMAGES,
++                                              &attribute);
++    if (s_buffer_set < 0)
++    {
++      ERROR_LOG_FMT(VIDEO, "sceVideoOutRegisterBuffers failed: {:#x}",
++                    static_cast<u32>(s_buffer_set));
++      return false;
++    }
++    INFO_LOG_FMT(VIDEO, "PS4 swap chain: {} images {}x{}, pitch {}", PS4_SWAP_IMAGES, m_width,
++                 m_height, pitch);
++    return true;
++  }
++#endif
+ 
+   uint32_t image_count;
+   VkResult res =
+@@ -464,6 +632,22 @@ bool SwapChain::SetupSwapChainImages()
+ 
+ void SwapChain::DestroySwapChainImages()
+ {
++#ifdef __ORBIS__
++  if (s_buffer_set >= 0)
++  {
++    sceVideoOutUnregisterBuffers(s_video, s_buffer_set);
++    s_buffer_set = -1;
++  }
++  for (auto& it : m_swap_chain_images)
++  {
++    it.framebuffer.reset();
++    it.texture.reset();
++    vkDestroyImage(g_vulkan_context->GetDevice(), it.image, nullptr);
++    vkFreeMemory(g_vulkan_context->GetDevice(), it.memory, nullptr);
++  }
++  m_swap_chain_images.clear();
++  return;
++#endif
+   for (auto& it : m_swap_chain_images)
+   {
+     // Images themselves are cleaned up by the swap chain object
+@@ -477,6 +661,10 @@ void SwapChain::DestroySwapChain()
+ {
+   if (m_swap_chain == VK_NULL_HANDLE)
+     return;
++#ifdef __ORBIS__
++  m_swap_chain = VK_NULL_HANDLE;  // placeholder handle
++  return;
++#endif
+ 
+   // Release exclusive fullscreen before destroying.
+   if (m_current_fullscreen_state)
+@@ -488,6 +676,13 @@ void SwapChain::DestroySwapChain()
+ 
+ VkResult SwapChain::AcquireNextImage()
+ {
++#ifdef __ORBIS__
++  // Round robin; PS4PresentSwapChainImage waits for each flip, so the next image is free.
++  m_current_swap_chain_image_index =
++      (m_current_swap_chain_image_index + 1) % static_cast<u32>(m_swap_chain_images.size());
++  m_current_swap_chain_image_is_valid = true;
++  return VK_SUCCESS;
++#endif
+   VkResult res = vkAcquireNextImageKHR(g_vulkan_context->GetDevice(), m_swap_chain, UINT64_MAX,
+                                        g_command_buffer_mgr->GetCurrentCommandBufferSemaphore(),
+                                        VK_NULL_HANDLE, &m_current_swap_chain_image_index);
+@@ -612,6 +807,10 @@ bool SwapChain::RecreateSurface(void* native_handle)
+ 
+ void SwapChain::DestroySurface()
+ {
++#ifdef __ORBIS__
++  m_surface = VK_NULL_HANDLE;  // placeholder handle
++  return;
++#endif
+   vkDestroySurfaceKHR(g_vulkan_context->GetVulkanInstance(), m_surface, nullptr);
+   m_surface = VK_NULL_HANDLE;
+ }
+diff --git a/Source/Core/VideoBackends/Vulkan/VKSwapChain.h b/Source/Core/VideoBackends/Vulkan/VKSwapChain.h
+index 17334db..0d1a712 100644
+--- a/Source/Core/VideoBackends/Vulkan/VKSwapChain.h
++++ b/Source/Core/VideoBackends/Vulkan/VKSwapChain.h
+@@ -18,6 +18,12 @@ class ObjectCache;
+ class VKTexture;
+ class VKFramebuffer;
+ 
++#ifdef __ORBIS__
++// PS4: the swap chain images are linear images registered as VideoOut buffers. Presenting waits
++// for the frame's command buffer fence, then flips to the image (VKSwapChain.cpp).
++void PS4PresentSwapChainImage(u32 image_index, VkFence fence);
++#endif
++
+ class SwapChain
+ {
+ public:
+@@ -89,6 +95,9 @@ private:
+     VkImage image{};
+     std::unique_ptr<VKTexture> texture;
+     std::unique_ptr<VKFramebuffer> framebuffer;
++#ifdef __ORBIS__
++    VkDeviceMemory memory = VK_NULL_HANDLE;  // the image is ours, not a VkSwapchainKHR's
++#endif
+   };
+ 
+   WindowSystemInfo m_wsi;
+diff --git a/Source/Core/VideoBackends/Vulkan/VulkanContext.cpp b/Source/Core/VideoBackends/Vulkan/VulkanContext.cpp
+index d388300..de289e4 100644
+--- a/Source/Core/VideoBackends/Vulkan/VulkanContext.cpp
++++ b/Source/Core/VideoBackends/Vulkan/VulkanContext.cpp
+@@ -344,7 +344,9 @@ bool VulkanContext::SelectInstanceExtensions(std::vector<const char*>* extension
+   };
+ 
+   // Common extensions
+-  if (wstype != WindowSystemType::Headless && !AddExtension(VK_KHR_SURFACE_EXTENSION_NAME, true))
++  const bool has_surface_extensions =
++      wstype != WindowSystemType::Headless && wstype != WindowSystemType::Orbis;
++  if (has_surface_extensions && !AddExtension(VK_KHR_SURFACE_EXTENSION_NAME, true))
+   {
+     return false;
+   }
+@@ -377,7 +379,7 @@ bool VulkanContext::SelectInstanceExtensions(std::vector<const char*>* extension
+ #endif
+ 
+   AddExtension(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME, false);
+-  if (wstype != WindowSystemType::Headless)
++  if (has_surface_extensions)
+   {
+     AddExtension(VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME, false);
+   }
+@@ -600,8 +602,10 @@ std::unique_ptr<VulkanContext> VulkanContext::Create(VkInstance instance, VkPhys
+       !context->CreateAllocator(vk_api_version))
+   {
+     // Since we are destroying the instance, we're also responsible for destroying the surface.
++#ifndef __ORBIS__  // the PS4 surface is a placeholder handle
+     if (surface != VK_NULL_HANDLE)
+       vkDestroySurfaceKHR(instance, surface, nullptr);
++#endif
+ 
+     return nullptr;
+   }
+@@ -716,7 +720,17 @@ bool VulkanContext::CreateDevice(VkSurfaceKHR surface, bool enable_validation_la
+       }
+     }
+ 
++#ifdef __ORBIS__
++    // VideoOut presents whatever the graphics queue rendered (VKSwapChain.cpp).
++    if (surface && graphics_supported)
++    {
++      m_present_queue_family_index = i;
++      break;
++    }
++    if (false)
++#else
+     if (surface)
++#endif
+     {
+       VkBool32 present_supported;
+       VkResult res =
+@@ -785,7 +799,11 @@ bool VulkanContext::CreateDevice(VkSurfaceKHR surface, bool enable_validation_la
+   }
+   device_info.pQueueCreateInfos = queue_infos.data();
+ 
++#ifdef __ORBIS__
++  if (!SelectDeviceExtensions(false))  // no VK_KHR_swapchain: VideoOut swap chain
++#else
+   if (!SelectDeviceExtensions(surface != VK_NULL_HANDLE))
++#endif
+     return false;
+ 
+   // convert std::string list to a char pointer list which we can feed in
+diff --git a/Source/Core/VideoBackends/Vulkan/VulkanLoader.cpp b/Source/Core/VideoBackends/Vulkan/VulkanLoader.cpp
+index a761a81..cbd3ce8 100644
+--- a/Source/Core/VideoBackends/Vulkan/VulkanLoader.cpp
++++ b/Source/Core/VideoBackends/Vulkan/VulkanLoader.cpp
+@@ -41,6 +41,12 @@ static void ResetVulkanLibraryFunctionPointers()
+ 
+ static Common::DynamicLibrary s_vulkan_module;
+ 
++#ifdef __ORBIS__
++// PS4: Mesa's RADV is linked into the executable (no Vulkan loader); this is its ICD entry point.
++extern "C" VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vk_icdGetInstanceProcAddr(VkInstance instance,
++                                                                              const char* name);
++#endif
++
+ static bool OpenVulkanLibrary(bool force_system_library)
+ {
+ #if defined(__APPLE__)
+@@ -94,6 +100,23 @@ static bool OpenVulkanLibrary(bool force_system_library)
+ 
+ bool LoadVulkanLibrary(bool force_system_library)
+ {
++#ifdef __ORBIS__
++  bool missing = false;
++#define VULKAN_MODULE_ENTRY_POINT(name, required)                                                  \
++  name = reinterpret_cast<PFN_##name>(vk_icdGetInstanceProcAddr(VK_NULL_HANDLE, #name));          \
++  if (!name && required)                                                                           \
++  {                                                                                                \
++    ERROR_LOG_FMT(VIDEO, "Vulkan: RADV lacks required module function {}", #name);                 \
++    missing = true;                                                                                \
++  }
++#include "VideoBackends/Vulkan/VulkanEntryPoints.inl"
++#undef VULKAN_MODULE_ENTRY_POINT
++  // vk_icdGetInstanceProcAddr is the loader-level vkGetInstanceProcAddr.
++  vkGetInstanceProcAddr = vk_icdGetInstanceProcAddr;
++  if (missing)
++    ResetVulkanLibraryFunctionPointers();
++  return !missing;
++#endif
+   if (!s_vulkan_module.IsOpen() && !OpenVulkanLibrary(force_system_library))
+     return false;
+ 
 diff --git a/Source/Core/VideoCommon/Fifo.cpp b/Source/Core/VideoCommon/Fifo.cpp
 index f183c93..c378916 100644
 --- a/Source/Core/VideoCommon/Fifo.cpp
