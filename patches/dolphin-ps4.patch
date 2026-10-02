@@ -1196,6 +1196,43 @@ index fc614fd..25a840f 100644
    if (Config::Get(Config::MAIN_CPU_CORE) != PowerPC::CPUCore::Interpreter)
    {
      system.GetPowerPC().SetMode(PowerPC::CoreMode::JIT);
+diff --git a/Source/Core/Core/HW/GPFifo.cpp b/Source/Core/Core/HW/GPFifo.cpp
+index 0de434b..0b3cc7e 100644
+--- a/Source/Core/Core/HW/GPFifo.cpp
++++ b/Source/Core/Core/HW/GPFifo.cpp
+@@ -93,8 +93,18 @@ void GPFifoManager::UpdateGatherPipe()
+   for (processed = 0; pipe_count >= GATHER_PIPE_SIZE; processed += GATHER_PIPE_SIZE)
+   {
+     // copy the GatherPipe
+-    memory.CopyToEmu(processor_interface.m_fifo_cpu_write_pointer, m_gather_pipe + processed,
+-                     GATHER_PIPE_SIZE);
++#ifdef __ORBIS__
++    // PS4: this runs for every 32 bytes the game sends to the GPU. CopyToEmu's range lookup plus
++    // an out-of-line libc memcpy cost ~14% of the CPU thread in heavy scenes; the FIFO lives in
++    // MEM1, so copy straight into it (a constant-size copy the compiler inlines).
++    const u32 write_pointer = processor_interface.m_fifo_cpu_write_pointer;
++    if (write_pointer + GATHER_PIPE_SIZE <= memory.GetRamSizeReal())
++      __builtin_memcpy(memory.GetRAM() + write_pointer, m_gather_pipe + processed,
++                       GATHER_PIPE_SIZE);
++    else
++#endif
++      memory.CopyToEmu(processor_interface.m_fifo_cpu_write_pointer, m_gather_pipe + processed,
++                       GATHER_PIPE_SIZE);
+     pipe_count -= GATHER_PIPE_SIZE;
+ 
+     // increase the CPUWritePointer
+@@ -107,7 +117,10 @@ void GPFifoManager::UpdateGatherPipe()
+   }
+ 
+   // move back the spill bytes
+-  memmove(m_gather_pipe, m_gather_pipe + processed, pipe_count);
++#ifdef __ORBIS__
++  if (pipe_count != 0)  // usually none: skip the libc call
++#endif
++    memmove(m_gather_pipe, m_gather_pipe + processed, pipe_count);
+   SetGatherPipeCount(pipe_count);
+ }
+ 
 diff --git a/Source/Core/Core/MemTools.cpp b/Source/Core/Core/MemTools.cpp
 index a7919fb..8de7f4d 100644
 --- a/Source/Core/Core/MemTools.cpp
