@@ -15,6 +15,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#include <orbis/Sysmodule.h>
 #include <orbis/UserService.h>
 #include <orbis/VideoOut.h>
 #include <orbis/libkernel.h>
@@ -136,8 +137,25 @@ int main() {
     Log("GNM probe start\n");
 
     Log("direct memory size %zu MiB\n", sceKernelGetDirectMemorySize() >> 20);
-    // Newer firmware: video out for the system user needs the user service initialized (v01.03
-    // crashed inside sceVideoOutOpen without it).
+    // Calling into a system library whose module isn't loaded kills the app
+    // (PRX_NOT_RESOLVED_FUNCTION): v01.03 died in sceVideoOutOpen, v01.04 in
+    // sceUserServiceInitialize. Load them first, like Dolphin's LoadSystemModules.
+    static const struct {
+        const char* name;
+        OrbisSysModuleInternal id;
+    } modules[] = {{"SystemService", ORBIS_SYSMODULE_INTERNAL_SYSTEM_SERVICE},
+                   {"UserService", ORBIS_SYSMODULE_INTERNAL_USER_SERVICE},
+                   {"VideoOut", ORBIS_SYSMODULE_INTERNAL_VIDEO_OUT}};
+    for (const auto& m : modules)
+        Log("load module %s = %#x\n", m.name, sceSysmoduleLoadModuleInternal(m.id));
+    // GnmDriver has no sysmodule id: load the system prx directly.
+    int32_t gnm = sceKernelLoadStartModule("libSceGnmDriver.sprx", 0, nullptr, 0, nullptr, nullptr);
+    Log("load libSceGnmDriver.sprx = %#x\n", gnm);
+    if (gnm < 0) {
+        gnm = sceKernelLoadStartModule("/system/common/lib/libSceGnmDriver.sprx", 0, nullptr, 0,
+                                       nullptr, nullptr);
+        Log("load /system/common/lib/libSceGnmDriver.sprx = %#x\n", gnm);
+    }
     Log("calling sceUserServiceInitialize\n");
     Log("sceUserServiceInitialize = %#x\n", sceUserServiceInitialize(nullptr));
     int32_t user = -1;
