@@ -39,5 +39,5 @@ target_compile_options(vk_probe PRIVATE -Wall -Wno-format)
 # vk_common_GetPhysicalDeviceProperties2 was left out and resolved to NULL. ps4.cmake calls
 # ld.lld directly, so these are raw linker flags.
 target_link_libraries(vk_probe PRIVATE --whole-archive ${MESA_LIBS} --no-whole-archive
-                      z SceSysmodule SceSystemService SceUserService pthread)
+                      z SceSysmodule SceSystemService SceUserService SceVideoOut pthread)
 ps4_add_eboot(vk_probe)
