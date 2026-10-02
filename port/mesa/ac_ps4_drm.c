@@ -486,6 +486,7 @@ static int
 ps4_va_op(ac_drm_device *dev, uint32_t bo_handle, uint64_t offset, uint64_t size, uint64_t addr,
           uint64_t flags, uint32_t ops)
 {
+   const uint64_t exact_size = size;
    size = align64(size, PS4_PAGE);
    if (flags & AMDGPU_VM_PAGE_PRT) {
       ps4_log("radv/ps4: sparse (PRT) mapping requested - unsupported\n");
@@ -507,7 +508,7 @@ ps4_va_op(ac_drm_device *dev, uint32_t bo_handle, uint64_t offset, uint64_t size
           * again after the buffer, so that prefetches past the end hit valid memory. The PS4
           * can't map direct memory twice (EBUSY). Inside the buffer's own (16 KiB rounded)
           * mapping it's already backed; past it, back it with a page of its own. */
-         if (addr >= cpu && addr + size <= cpu + b->size)
+         if (addr >= cpu && addr + exact_size <= cpu + b->size)
             return 0;
          if (addr != cpu + b->size || size != PS4_PAGE || b->pad_phys >= 0) {
             ps4_log("radv/ps4: unsupported alias mapping of bo %u at %#llx (+%#llx, %#llx bytes)\n",
