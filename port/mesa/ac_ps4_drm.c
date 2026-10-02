@@ -59,6 +59,7 @@ int sceKernelVirtualQuery(const void *addr, int flags, struct ps4_vq_info *info,
 
 #define PS4_PROT_CPU_RW 0x03
 #define PS4_PROT_GPU_RW 0x30
+#define PS4_PROT_GPU_READ 0x10
 #define PS4_MAP_FIXED 0x10
 #define PS4_WB_ONION 0
 #define PS4_WC_GARLIC 3
@@ -967,7 +968,17 @@ ps4_va_op(ac_drm_device *dev, uint32_t bo_handle, uint64_t offset, uint64_t size
       const bool whole = offset == 0 && size == b->size && !b->cpu;
       const uint64_t map_size = whole ? size + PS4_TAIL : size;
       ps4_check_va_free(addr, map_size, "map");
-      int r = sceKernelMapDirectMemory(&a, map_size, PS4_PROT_CPU_RW | PS4_PROT_GPU_RW,
+      /* GPU read-only when RADV asks for it (command buffers), as amdgpu enforces on Linux: there
+       * a stray GPU write into one is dropped, here it would land. */
+      const bool gpu_ro = flags && !(flags & AMDGPU_VM_PAGE_WRITEABLE);
+      if (gpu_ro) {
+         static unsigned logged;
+         if (logged++ < 3)
+            ps4_log("radv/ps4: bo %u mapped GPU read-only at %#llx\n", b->handle,
+                    (unsigned long long)addr);
+      }
+      int r = sceKernelMapDirectMemory(&a, map_size,
+                                       PS4_PROT_CPU_RW | (gpu_ro ? PS4_PROT_GPU_READ : PS4_PROT_GPU_RW),
                                        PS4_MAP_FIXED, b->phys + offset, PS4_PAGE);
       if (!r && whole && a == (void *)(uintptr_t)addr) {
          memset((uint8_t *)a + size, 0, PS4_TAIL);
@@ -1353,6 +1364,8 @@ static unsigned ps4_corrupt_reports;
 static bool
 ps4_check_ib_chain(ac_drm_device *dev, const uint32_t *ib, unsigned num_dw, uint64_t seq)
 {
+   const uint32_t *prev = NULL;
+   unsigned prev_dw = 0;
    for (unsigned link = 0; link < 256 && num_dw; link++) {
       const char *problem = NULL;
       if (ib[0] >> 30 != 3 && ib[0] >> 30 != 2)
@@ -1382,8 +1395,17 @@ ps4_check_ib_chain(ac_drm_device *dev, const uint32_t *ib, unsigned num_dw, uint
             if (f) {
                fprintf(f, "==== submission %llu, chain link %u: IB %p, %u dwords, %s\n",
                        (unsigned long long)seq, link, (void *)ib, num_dw, problem);
-               fprintf(f, "  first dwords: %08x %08x %08x %08x %08x %08x %08x %08x\n", ib[0], ib[1],
-                       ib[2], ib[3], ib[4], ib[5], ib[6], ib[7]);
+               fprintf(f, "  first 48 dwords:");
+               for (unsigned i = 0; i < 48 && i < num_dw; i++)
+                  fprintf(f, "%s%08x", i % 8 ? " " : "\n    ", ib[i]);
+               fprintf(f, "\n");
+               if (prev && prev_dw >= 32) {
+                  fprintf(f, "  last 32 dwords of the IB chaining to it (%p, %u dwords):", (void *)prev,
+                          prev_dw);
+                  for (unsigned i = prev_dw - 32; i < prev_dw; i++)
+                     fprintf(f, "%s%08x", (i - (prev_dw - 32)) % 8 ? " " : "\n    ", prev[i]);
+                  fprintf(f, "\n");
+               }
                ps4_describe_va(dev, f, (uintptr_t)ib);
                if (next)
                   ps4_describe_va(dev, f, next);
@@ -1405,6 +1427,8 @@ ps4_check_ib_chain(ac_drm_device *dev, const uint32_t *ib, unsigned num_dw, uint
       }
       if (!next)
          return true;
+      prev = ib;
+      prev_dw = num_dw;
       ib = (const uint32_t *)(uintptr_t)next;
       num_dw = next_dw;
    }
