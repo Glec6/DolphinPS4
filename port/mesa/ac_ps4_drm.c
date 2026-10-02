@@ -14,6 +14,7 @@
 #include "ac_linux_drm.h"
 #include "ac_gpu_info.h"
 #include "addrlib/src/amdgpu_asic_addr.h"
+#include "ac_debug.h"
 #include "util/os_time.h"
 #include "util/simple_mtx.h"
 #include "util/u_math.h"
@@ -126,6 +127,15 @@ struct ac_drm_device {
    volatile uint64_t *fence;
    uint32_t *fence_ibs;
    uint64_t last_seq; /* last submitted */
+
+   /* The last submissions' command buffers, for the GPU hang report. */
+   struct {
+      uint64_t seq;
+      unsigned num_ibs;
+      uint64_t va[8];
+      uint32_t bytes[8];
+   } recent[16];
+   bool hang_reported;
 };
 
 #define FENCE_IB_DW 16
@@ -179,6 +189,64 @@ ps4_completed(ac_drm_device *dev)
 }
 
 /* Waits until submission `seq` has finished; returns false on timeout. */
+/* GPU addresses are CPU addresses: the IB parser can follow chained IBs directly. */
+static void
+ps4_ib_addr(void *data, uint64_t addr, struct ac_addr_info *info)
+{
+   ac_drm_device *dev = data;
+   memset(info, 0, sizeof(*info));
+   const bool in_window = (addr >= dev->va_start && addr < dev->va_start + PS4_VA_SIZE) ||
+                          (addr >= dev->va32_start && addr < dev->va32_start + PS4_VA32_SIZE);
+   if (in_window) {
+      info->cpu_addr = (void *)(uintptr_t)addr;
+      info->valid = true;
+   }
+}
+
+/* Writes the command buffers of the first submission the GPU hasn't finished, decoded by Mesa's
+ * IB parser, to /data/DolphinPS4/gpu-hang.txt (once). */
+static void
+ps4_report_hang(ac_drm_device *dev, uint64_t waited_seq)
+{
+   if (dev->hang_reported)
+      return;
+   dev->hang_reported = true;
+   const uint64_t completed = ps4_completed(dev);
+   ps4_log("radv/ps4: GPU hang? waiting for %llu, completed %llu, submitted %llu - writing "
+           "/data/DolphinPS4/gpu-hang.txt\n",
+           (unsigned long long)waited_seq, (unsigned long long)completed,
+           (unsigned long long)dev->last_seq);
+   FILE *f = fopen("/data/DolphinPS4/gpu-hang.txt", "w");
+   if (!f)
+      return;
+   fprintf(f, "waiting for %llu, GPU completed %llu, submitted %llu\n\n",
+           (unsigned long long)waited_seq, (unsigned long long)completed,
+           (unsigned long long)dev->last_seq);
+   for (unsigned r = 0; r < ARRAY_SIZE(dev->recent); r++) {
+      if (dev->recent[r].seq != completed + 1)
+         continue;
+      for (unsigned i = 0; i < dev->recent[r].num_ibs; i++) {
+         char name[64];
+         snprintf(name, sizeof(name), "submission %llu IB %u (%#llx, %u dwords)",
+                  (unsigned long long)dev->recent[r].seq, i,
+                  (unsigned long long)dev->recent[r].va[i], dev->recent[r].bytes[i] / 4);
+         struct ac_ib_parser ib = {
+            .f = f,
+            .ib = (uint32_t *)(uintptr_t)dev->recent[r].va[i],
+            .num_dw = dev->recent[r].bytes[i] / 4,
+            .gfx_level = GFX7,
+            .family = CHIP_BONAIRE,
+            .ip_type = AMD_IP_GFX,
+            .addr_callback = ps4_ib_addr,
+            .addr_callback_data = dev,
+         };
+         ac_parse_ib(&ib, name);
+      }
+   }
+   fclose(f);
+   ps4_log("radv/ps4: hang report written\n");
+}
+
 static bool
 ps4_wait_seq(ac_drm_device *dev, uint64_t seq, int64_t abs_timeout_ns)
 {
@@ -191,9 +259,7 @@ ps4_wait_seq(ac_drm_device *dev, uint64_t seq, int64_t abs_timeout_ns)
          return false;
       /* A wait this long means the GPU stopped (hang) or the fence write never happened. */
       if (!reported && now - start > 2000000000ll) {
-         ps4_log("radv/ps4: waiting > 2 s for submission %llu; GPU completed %llu, submitted %llu\n",
-                 (unsigned long long)seq, (unsigned long long)ps4_completed(dev),
-                 (unsigned long long)dev->last_seq);
+         ps4_report_hang(dev, seq);
          reported = true;
       }
       if (++spins > 64)
@@ -812,6 +878,15 @@ ac_drm_cs_submit_raw2(ac_drm_device *dev, uint32_t ctx_id, uint32_t bo_list_hand
    dcb[num_ibs] = fence_ib;
    dcb_sizes[num_ibs] = (cs - fence_ib) * 4;
 
+   {
+      const unsigned slot = seq % ARRAY_SIZE(dev->recent);
+      dev->recent[slot].seq = seq;
+      dev->recent[slot].num_ibs = MIN2(num_ibs, ARRAY_SIZE(dev->recent[slot].va));
+      for (unsigned i = 0; i < dev->recent[slot].num_ibs; i++) {
+         dev->recent[slot].va[i] = (uintptr_t)dcb[i];
+         dev->recent[slot].bytes[i] = dcb_sizes[i];
+      }
+   }
    int r = dev->submit(num_ibs + 1, dcb, dcb_sizes, ccb, ccb_sizes);
    dev->submit_done();
    if (seq <= 40 || seq % 1000 == 0)
@@ -967,6 +1042,7 @@ ps4_wait_common(ac_drm_device *dev, uint32_t *handles, uint64_t *points, unsigne
    const bool available = flags & DRM_SYNCOBJ_WAIT_FLAGS_WAIT_AVAILABLE;
    const bool for_submit = flags & (DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT | DRM_SYNCOBJ_WAIT_FLAGS_WAIT_AVAILABLE);
    unsigned spins = 0;
+   int64_t wait_start = 0;
    for (;;) {
       unsigned done = 0, first_done = ~0u;
       simple_mtx_lock(&dev->lock);
@@ -1004,6 +1080,10 @@ ps4_wait_common(ac_drm_device *dev, uint32_t *handles, uint64_t *points, unsigne
       }
       if (abs_timeout <= 0 || (abs_timeout != INT64_MAX && os_time_get_nano() >= abs_timeout))
          return -ETIME;
+      if (!wait_start)
+         wait_start = os_time_get_nano();
+      else if (os_time_get_nano() - wait_start > 2000000000ll && ps4_completed(dev) < dev->last_seq)
+         ps4_report_hang(dev, ps4_completed(dev) + 1);
       if (++spins > 64)
          sceKernelUsleep(50);
    }
