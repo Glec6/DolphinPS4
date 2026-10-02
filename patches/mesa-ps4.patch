@@ -1,0 +1,182 @@
+diff --git a/meson.build b/meson.build
+index 7d4dca7..3795b7a 100644
+--- a/meson.build
++++ b/meson.build
+@@ -1525,6 +1525,9 @@ if cc.has_header_symbol('time.h', 'struct timespec')
+    pre_args += '-DHAVE_STRUCT_TIMESPEC'
+ endif
+ 
++# PS4 homebrew (OpenOrbis): FreeBSD-like, no DRM, everything linked statically into the app.
++is_ps4 = cc.get_define('__ORBIS__') != ''
++
+ with_c11_threads = false
+ if cc.has_function('thrd_create', prefix: '#include <threads.h>')
+   if with_platform_android
+diff --git a/src/amd/vulkan/meson.build b/src/amd/vulkan/meson.build
+index 3696bad..ec3503d 100644
+--- a/src/amd/vulkan/meson.build
++++ b/src/amd/vulkan/meson.build
+@@ -243,33 +243,56 @@ if radv_build_id != ''
+   radv_flags += '-DRADV_BUILD_ID_OVERRIDE="' + radv_build_id + '"'
+ endif
+ 
+-libvulkan_radeon = shared_library(
+-  'vulkan_radeon',
+-  [libradv_files, radv_entrypoints, sha1_h, radix_sort_spv, bvh_spv, radv_annotate_layer],
+-  vs_module_defs : vulkan_api_def,
+-  include_directories : [
+-    inc_include, inc_src, inc_amd, inc_amd_common, inc_amd_common_llvm,
+-    inc_util, inc_virtio_gpu
+-  ],
+-  link_with : [
+-    libamd_common, libamd_common_llvm, libamdgpu_addrlib,
+-  ],
+-  dependencies : [
+-    dep_llvm, dep_libdrm_amdgpu, dep_thread, dep_elf, dep_dl, dep_m,
+-    dep_valgrind, radv_deps, idep_aco,
+-    idep_mesautil, idep_nir, idep_vulkan_util, idep_vulkan_wsi,
+-    idep_vulkan_runtime, idep_amdgfxregs_h, idep_xmlconfig,
+-  ],
+-  c_args : [no_override_init_args, radv_flags, c_msvc_compat_args],
+-  cpp_args : [radv_flags, cpp_msvc_compat_args],
+-  link_args : [
+-    ld_args_build_id, ld_args_bsymbolic, ld_args_gc_sections, vulkan_icd_link_args,
+-  ],
+-  link_depends : vulkan_icd_link_depends,
+-  gnu_symbol_visibility : 'hidden',
+-  name_prefix : host_machine.system() == 'windows' ? '' : [],
+-  install : true,
+-)
++if is_ps4
++  # Linked into the app; there is no dynamic Vulkan loader on the PS4.
++  libvulkan_radeon = static_library(
++    'vulkan_radeon',
++    [libradv_files, radv_entrypoints, sha1_h, radix_sort_spv, bvh_spv, radv_annotate_layer],
++    include_directories : [
++      inc_include, inc_src, inc_amd, inc_amd_common, inc_amd_common_llvm,
++      inc_util, inc_virtio_gpu
++    ],
++    link_with : [
++      libamd_common, libamd_common_llvm, libamdgpu_addrlib,
++    ],
++    dependencies : [
++      dep_llvm, dep_libdrm_amdgpu, dep_thread, dep_elf, dep_dl, dep_m,
++      dep_valgrind, radv_deps, idep_aco,
++      idep_mesautil, idep_nir, idep_vulkan_util, idep_vulkan_wsi,
++      idep_vulkan_runtime, idep_amdgfxregs_h, idep_xmlconfig,
++    ],
++    c_args : [no_override_init_args, radv_flags, c_msvc_compat_args],
++    cpp_args : [radv_flags, cpp_msvc_compat_args],
++  )
++else
++  libvulkan_radeon = shared_library(
++    'vulkan_radeon',
++    [libradv_files, radv_entrypoints, sha1_h, radix_sort_spv, bvh_spv, radv_annotate_layer],
++    vs_module_defs : vulkan_api_def,
++    include_directories : [
++      inc_include, inc_src, inc_amd, inc_amd_common, inc_amd_common_llvm,
++      inc_util, inc_virtio_gpu
++    ],
++    link_with : [
++      libamd_common, libamd_common_llvm, libamdgpu_addrlib,
++    ],
++    dependencies : [
++      dep_llvm, dep_libdrm_amdgpu, dep_thread, dep_elf, dep_dl, dep_m,
++      dep_valgrind, radv_deps, idep_aco,
++      idep_mesautil, idep_nir, idep_vulkan_util, idep_vulkan_wsi,
++      idep_vulkan_runtime, idep_amdgfxregs_h, idep_xmlconfig,
++    ],
++    c_args : [no_override_init_args, radv_flags, c_msvc_compat_args],
++    cpp_args : [radv_flags, cpp_msvc_compat_args],
++    link_args : [
++      ld_args_build_id, ld_args_bsymbolic, ld_args_gc_sections, vulkan_icd_link_args,
++    ],
++    link_depends : vulkan_icd_link_depends,
++    gnu_symbol_visibility : 'hidden',
++    name_prefix : host_machine.system() == 'windows' ? '' : [],
++    install : true,
++  )
++endif
+ 
+ if with_symbols_check
+   test(
+diff --git a/src/util/anon_file.c b/src/util/anon_file.c
+index a9ad2a2..96a3937 100644
+--- a/src/util/anon_file.c
++++ b/src/util/anon_file.c
+@@ -187,7 +187,7 @@ os_create_anonymous_file(int64_t size, const char *debug_name)
+    if (!debug_name)
+       debug_name = "mesa-shared";
+    fd = syscall(SYS_memfd_create, debug_name, MFD_CLOEXEC | MFD_ALLOW_SEALING);
+-#elif defined(__FreeBSD__)
++#elif defined(__FreeBSD__) && !defined(__PS4__)
+    fd = shm_open(SHM_ANON, O_CREAT | O_RDWR | O_CLOEXEC, 0600);
+ #elif defined(__OpenBSD__)
+    char template[] = "/tmp/mesa-XXXXXXXXXX";
+diff --git a/src/util/futex.h b/src/util/futex.h
+index b7ce088..319f02e 100644
+--- a/src/util/futex.h
++++ b/src/util/futex.h
+@@ -29,7 +29,7 @@
+ #else
+ #if defined(HAVE_LINUX_FUTEX_H) && defined(__linux__)
+ #define UTIL_FUTEX_SUPPORTED 1
+-#elif defined(__FreeBSD__)
++#elif defined(__FreeBSD__) && !defined(__PS4__)
+ #define UTIL_FUTEX_SUPPORTED 1
+ #elif defined(__OpenBSD__)
+ #define UTIL_FUTEX_SUPPORTED 1
+diff --git a/src/util/os_file.c b/src/util/os_file.c
+index 7d99383..5ba32f2 100644
+--- a/src/util/os_file.c
++++ b/src/util/os_file.c
+@@ -257,7 +257,7 @@ os_same_file_description(int fd1, int fd2)
+ 
+ #ifdef SYS_kcmp
+    return syscall(SYS_kcmp, pid, pid, KCMP_FILE, fd1, fd2);
+-#elif DETECT_OS_DRAGONFLY || DETECT_OS_FREEBSD
++#elif (DETECT_OS_DRAGONFLY || DETECT_OS_FREEBSD) && !defined(__PS4__)
+    int mib[] = { CTL_KERN, KERN_FILE };
+    size_t len;
+    if (sysctl(mib, ARRAY_SIZE(mib), NULL, &len, NULL, 0))
+diff --git a/src/util/u_cpu_detect.c b/src/util/u_cpu_detect.c
+index fd66769..db49368 100644
+--- a/src/util/u_cpu_detect.c
++++ b/src/util/u_cpu_detect.c
+@@ -56,8 +56,10 @@
+ #if DETECT_OS_BSD
+ #include <sys/param.h>
+ #include <sys/sysctl.h>
++#ifndef __PS4__
+ #include <machine/cpu.h>
+ #endif
++#endif
+ 
+ #if DETECT_OS_FREEBSD || DETECT_OS_OPENBSD
+ #if __has_include(<sys/auxv.h>)
+diff --git a/src/util/u_process.c b/src/util/u_process.c
+index 6846acd..196d0e9 100644
+--- a/src/util/u_process.c
++++ b/src/util/u_process.c
+@@ -286,7 +286,7 @@ util_get_command_line(char *cmdline, size_t size)
+       close(f);
+       return true;
+    }
+-#elif DETECT_OS_BSD
++#elif DETECT_OS_BSD && !defined(__PS4__)
+    int mib[] = {
+       CTL_KERN,
+ #if DETECT_OS_NETBSD || DETECT_OS_OPENBSD
+diff --git a/src/util/u_thread.c b/src/util/u_thread.c
+index 3a8785c..5542e9f 100644
+--- a/src/util/u_thread.c
++++ b/src/util/u_thread.c
+@@ -101,7 +101,7 @@ util_set_thread_affinity(thrd_t thread,
+                          uint32_t *old_mask,
+                          unsigned num_mask_bits)
+ {
+-#if defined(HAVE_PTHREAD_SETAFFINITY)
++#if defined(HAVE_PTHREAD_SETAFFINITY) && !defined(__PS4__)
+    cpu_set_t cpuset;
+ 
+    if (old_mask) {
