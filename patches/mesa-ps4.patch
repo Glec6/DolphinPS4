@@ -16,10 +16,10 @@ index 7d4dca7..2a78cf3 100644
  if cc.has_function('thrd_create', prefix: '#include <threads.h>')
    if with_platform_android
 diff --git a/src/amd/common/ac_linux_drm.h b/src/amd/common/ac_linux_drm.h
-index 9ea563c..d447567 100644
+index 9ea563c..33005e5 100644
 --- a/src/amd/common/ac_linux_drm.h
 +++ b/src/amd/common/ac_linux_drm.h
-@@ -317,6 +317,14 @@ typedef struct amdgpu_va *amdgpu_va_handle;
+@@ -317,6 +317,15 @@ typedef struct amdgpu_va *amdgpu_va_handle;
  
  #endif /* !defined(_WIN32) */
  
@@ -29,6 +29,7 @@ index 9ea563c..d447567 100644
 +int ac_ps4_fprintf(FILE *f, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 +#define fprintf ac_ps4_fprintf
 +void ac_ps4_trace(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
++void ac_ps4_get_stats(uint64_t *submitted, uint64_t *completed, uint64_t *bo_bytes, uint64_t *bo_count);
 +#endif
 +
  #ifdef __cplusplus

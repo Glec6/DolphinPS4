@@ -45,6 +45,8 @@ int sceKernelLoadStartModule(const char *path, size_t args, const void *argp, un
                              void *opt, int *res);
 int sceKernelDlsym(int handle, const char *symbol, void **address);
 int sceKernelDebugOutText(int channel, const char *text);
+int sceKernelCreateEqueue(void **eq, const char *name);
+int sceKernelWaitEqueue(void *eq, void *events, int num, int *out, unsigned *timeout_us);
 
 #define PS4_PROT_CPU_RW 0x03
 #define PS4_PROT_GPU_RW 0x30
@@ -115,6 +117,13 @@ struct ac_drm_device {
 
    struct util_vma_heap va_heap, va32_heap;
    uint64_t va_start, va32_start;
+
+   /* GPU end-of-pipe interrupts (sceGnmAddEqEvent): fence waits sleep on this queue. */
+   int (*add_eq_event)(void *eq, uint64_t id, void *udata);
+   void *eop_queue;
+
+   /* Statistics for the app's monitor (ac_ps4_get_stats). */
+   uint64_t bo_bytes, bo_count;
 
    struct amdgpu_bo **bos;
    unsigned num_bos;
@@ -319,6 +328,20 @@ ps4_report_hang(ac_drm_device *dev, uint64_t waited_seq)
    ps4_log("radv/ps4: hang report written\n");
 }
 
+/* Waits for the next GPU end-of-pipe interrupt (any submission's fence write), at most 1 ms. */
+static void
+ps4_sleep(ac_drm_device *dev)
+{
+   if (dev->eop_queue) {
+      uint64_t events[8][4];
+      int count = 0;
+      unsigned timeout = 1000;
+      sceKernelWaitEqueue(dev->eop_queue, events, 8, &count, &timeout);
+   } else {
+      sceKernelUsleep(50);
+   }
+}
+
 static bool
 ps4_wait_seq(ac_drm_device *dev, uint64_t seq, int64_t abs_timeout_ns)
 {
@@ -335,7 +358,7 @@ ps4_wait_seq(ac_drm_device *dev, uint64_t seq, int64_t abs_timeout_ns)
          reported = true;
       }
       if (++spins > 64)
-         sceKernelUsleep(50);
+         ps4_sleep(dev);
    }
    return true;
 }
@@ -355,6 +378,8 @@ ps4_load_gnm(ac_drm_device *dev)
       ps4_log("radv/ps4: loading %s failed (%#x)\n", path, module);
       return false;
    }
+   if (sceKernelDlsym(module, "sceGnmAddEqEvent", (void **)&dev->add_eq_event))
+      dev->add_eq_event = NULL;
    if (sceKernelDlsym(module, "sceGnmSubmitCommandBuffers", (void **)&dev->submit) ||
        sceKernelDlsym(module, "sceGnmSubmitDone", (void **)&dev->submit_done)) {
       ps4_log("radv/ps4: libSceGnmDriver symbols missing\n");
@@ -402,6 +427,7 @@ ps4_reserve(uint64_t addr, uint64_t size)
 }
 
 static struct util_sync_provider *ps4_sync_provider_init(ac_drm_device *dev);
+static ac_drm_device *ps4_last_device;
 
 /* Logs the first memory operations (bring-up). */
 static unsigned ps4_verbose_left = 64;
@@ -437,6 +463,14 @@ ac_drm_device_initialize(int fd, bool is_virtio, uint32_t *major_version, uint32
       goto fail;
    memset(page, 0, PS4_PAGE * 4);
    dev->fence = (volatile uint64_t *)page;
+   if (dev->add_eq_event) {
+      void *eq = NULL;
+      int r = sceKernelCreateEqueue(&eq, "radv eop");
+      int a = r == 0 ? dev->add_eq_event(eq, 0x40 /* GFX EOP */, NULL) : -1;
+      ps4_log("radv/ps4: EOP event queue %#x, sceGnmAddEqEvent %#x\n", r, a);
+      if (r == 0 && a == 0)
+         dev->eop_queue = eq;
+   }
    dev->fence_ibs = (uint32_t *)(page + 256);
    STATIC_ASSERT(256 + FENCE_IB_COUNT * FENCE_IB_DW * 4 <= PS4_PAGE * 4);
 
@@ -446,6 +480,7 @@ ac_drm_device_initialize(int fd, bool is_virtio, uint32_t *major_version, uint32
    *major_version = 3;
    *minor_version = 61;
    *out = dev;
+   ps4_last_device = dev;
    ps4_log("radv/ps4: device initialized\n");
    return 0;
 
@@ -528,6 +563,8 @@ ac_drm_bo_alloc(ac_drm_device *dev, struct amdgpu_bo_alloc_request *req, ac_drm_
    simple_mtx_unlock(&dev->lock);
 
    out->abo = bo;
+   __atomic_add_fetch(&dev->bo_bytes, bo->size, __ATOMIC_RELAXED);
+   __atomic_add_fetch(&dev->bo_count, 1, __ATOMIC_RELAXED);
    PS4_VERBOSE("radv/ps4: bo %u: %llu bytes, heap %#x, flags %#llx, align %#llx, phys %#llx\n",
                bo->handle, (unsigned long long)bo->size, bo->heap, (unsigned long long)bo->flags,
                (unsigned long long)align, (unsigned long long)bo->phys);
@@ -543,6 +580,8 @@ ac_drm_bo_free(ac_drm_device *dev, ac_drm_bo bo)
    if (b->cpu_owned)
       sceKernelMunmap(b->cpu, b->size);
    sceKernelReleaseDirectMemory(b->phys, b->size);
+   __atomic_sub_fetch(&dev->bo_bytes, b->size, __ATOMIC_RELAXED);
+   __atomic_sub_fetch(&dev->bo_count, 1, __ATOMIC_RELAXED);
    if (b->pad_phys >= 0)
       sceKernelReleaseDirectMemory(b->pad_phys, PS4_PAGE);
    simple_mtx_lock(&dev->lock);
@@ -859,12 +898,13 @@ static void ps4_add_point(struct ps4_syncobj *s, uint64_t point, uint64_t seq);
 /* EVENT_WRITE_EOP: flush and invalidate CB/DB and the texture caches, then write a 64-bit value
  * at end of pipe. */
 static uint32_t *
-ps4_emit_eop(uint32_t *cs, uint64_t addr, uint64_t value)
+ps4_emit_eop(uint32_t *cs, uint64_t addr, uint64_t value, bool interrupt)
 {
    *cs++ = 0xC0044700; /* PKT3(EVENT_WRITE_EOP, 4) */
    *cs++ = 0x14 | (5 << 8) | (1 << 16) | (1 << 17); /* CACHE_FLUSH_AND_INV_TS_EVENT, TCL1, TC */
    *cs++ = (uint32_t)addr;
-   *cs++ = ((addr >> 32) & 0xffff) | (2u << 29); /* DATA_SEL: 64-bit value, no interrupt */
+   /* DATA_SEL: 64-bit value; INT_SEL 2: interrupt once the write is confirmed. */
+   *cs++ = ((addr >> 32) & 0xffff) | (2u << 29) | (interrupt ? 2u << 24 : 0);
    *cs++ = (uint32_t)value;
    *cs++ = (uint32_t)(value >> 32);
    return cs;
@@ -946,8 +986,8 @@ ac_drm_cs_submit_raw2(ac_drm_device *dev, uint32_t ctx_id, uint32_t bo_list_hand
    uint32_t *fence_ib = dev->fence_ibs + (seq % FENCE_IB_COUNT) * FENCE_IB_DW;
    uint32_t *cs = fence_ib;
    if (user_fence_addr)
-      cs = ps4_emit_eop(cs, user_fence_addr, seq);
-   cs = ps4_emit_eop(cs, (uintptr_t)dev->fence, seq);
+      cs = ps4_emit_eop(cs, user_fence_addr, seq, false);
+   cs = ps4_emit_eop(cs, (uintptr_t)dev->fence, seq, dev->eop_queue != NULL);
    while ((cs - fence_ib) % 8)
       *cs++ = 0xFFFF1000; /* type-2 NOP padding */
    dcb[num_ibs] = fence_ib;
@@ -1160,7 +1200,7 @@ ps4_wait_common(ac_drm_device *dev, uint32_t *handles, uint64_t *points, unsigne
       else if (os_time_get_nano() - wait_start > 2000000000ll && ps4_completed(dev) < dev->last_seq)
          ps4_report_hang(dev, ps4_completed(dev) + 1);
       if (++spins > 64)
-         sceKernelUsleep(50);
+         ps4_sleep(dev);
    }
 }
 
@@ -1686,4 +1726,16 @@ ac_ps4_trace(const char *fmt, ...)
    vsnprintf(line, sizeof(line), fmt, args);
    va_end(args);
    ps4_log("%s", line);
+}
+
+/* For the app's performance monitor: the last device's submissions and GPU memory. */
+
+void
+ac_ps4_get_stats(uint64_t *submitted, uint64_t *completed, uint64_t *bo_bytes, uint64_t *bo_count)
+{
+   ac_drm_device *dev = ps4_last_device;
+   *submitted = dev ? dev->last_seq : 0;
+   *completed = dev ? ps4_completed(dev) : 0;
+   *bo_bytes = dev ? dev->bo_bytes : 0;
+   *bo_count = dev ? dev->bo_count : 0;
 }
