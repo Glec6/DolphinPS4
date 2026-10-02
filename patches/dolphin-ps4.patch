@@ -2597,7 +2597,7 @@ index ce1b7a5..941b744 100644
    g_backend_info.bSupportsPipelineCacheData = supports_glsl_cache;
  
 diff --git a/Source/Core/VideoBackends/OGL/OGLGfx.cpp b/Source/Core/VideoBackends/OGL/OGLGfx.cpp
-index ff5402b..64ba949 100644
+index ff5402b..b674b6b 100644
 --- a/Source/Core/VideoBackends/OGL/OGLGfx.cpp
 +++ b/Source/Core/VideoBackends/OGL/OGLGfx.cpp
 @@ -2,6 +2,7 @@
@@ -3392,10 +3392,10 @@ index ff5402b..64ba949 100644
 +      glDeleteFramebuffers(1, &pending.framebuffer);
 +    if (pending.texture && pending.recycle)
 +    {
-+      // Keep up to 96 released textures for reuse (each GL texture holds ~3.7 KiB of libkernel
-+      // internal memory); delete the oldest beyond that.
++      // Keep up to 16 released textures for reuse: a live GL texture holds ~20 KiB of the
++      // ~12.7 MiB libkernel internal memory; delete the oldest beyond that.
 +      m_ps4_free_textures.emplace_back(pending.key, pending.texture);
-+      if (m_ps4_free_textures.size() > 96)
++      if (m_ps4_free_textures.size() > 16)
 +      {
 +        glDeleteTextures(1, &m_ps4_free_textures.front().second);
 +        m_ps4_free_textures.erase(m_ps4_free_textures.begin());
@@ -3915,7 +3915,7 @@ index efbb826..73f3d03 100644
    const u32 m_buffertype;
    const u32 m_size;
 diff --git a/Source/Core/VideoBackends/OGL/OGLTexture.cpp b/Source/Core/VideoBackends/OGL/OGLTexture.cpp
-index 003a7ec..57788cb 100644
+index 003a7ec..704eb3f 100644
 --- a/Source/Core/VideoBackends/OGL/OGLTexture.cpp
 +++ b/Source/Core/VideoBackends/OGL/OGLTexture.cpp
 @@ -2,6 +2,7 @@
@@ -4043,15 +4043,38 @@ index 003a7ec..57788cb 100644
  }
  
  void OGLTexture::CopyRectangleFromTexture(const AbstractTexture* src,
-@@ -279,6 +359,7 @@ void OGLTexture::ResolveFromTexture(const AbstractTexture* src,
+@@ -279,6 +359,30 @@ void OGLTexture::ResolveFromTexture(const AbstractTexture* src,
  void OGLTexture::Load(u32 level, u32 width, u32 height, u32 row_length, const u8* buffer,
                        size_t buffer_size, u32 layer)
  {
++#ifdef __ORBIS__
++  // Port measurement: libkernel internal memory taken by texture uploads (first 30).
++  static int s_logged_loads = 0;
++  struct PS4LoadCost
++  {
++    int index;
++    unsigned long long before;
++    const TextureConfig& config;
++    ~PS4LoadCost()
++    {
++      if (index > 30)
++        return;
++      char line[128];
++      snprintf(line, sizeof(line), "texture upload #%d %ux%u levels %u: internal memory %+lld KiB",
++               index, config.width, config.height, config.levels,
++               (static_cast<long long>(ps4_internal_memory_free()) -
++                static_cast<long long>(before)) /
++                   1024);
++      ps4_boot_trace(line);
++    }
++  } ps4_load_cost{++s_logged_loads, s_logged_loads <= 30 ? ps4_internal_memory_free() : 0,
++                  m_config};
++#endif
 +  PS4_PROFILE(PS4_PROF_TEXTURE_UPLOAD);
    if (level >= m_config.levels)
      PanicAlertFmt("Texture only has {} levels, can't update level {}", m_config.levels, level);
  
-@@ -670,7 +751,11 @@ OGLFramebuffer::OGLFramebuffer(AbstractTexture* color_attachment, AbstractTextur
+@@ -670,7 +774,11 @@ OGLFramebuffer::OGLFramebuffer(AbstractTexture* color_attachment, AbstractTextur
  
  OGLFramebuffer::~OGLFramebuffer()
  {
@@ -4063,7 +4086,7 @@ index 003a7ec..57788cb 100644
  }
  
  std::unique_ptr<OGLFramebuffer>
-@@ -692,6 +777,16 @@ OGLFramebuffer::Create(OGLTexture* color_attachment, OGLTexture* depth_attachmen
+@@ -692,6 +800,16 @@ OGLFramebuffer::Create(OGLTexture* color_attachment, OGLTexture* depth_attachmen
  
    GLuint fbo;
    glGenFramebuffers(1, &fbo);
@@ -4080,7 +4103,7 @@ index 003a7ec..57788cb 100644
    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
  
    std::vector<GLenum> buffers;
-@@ -744,6 +839,25 @@ OGLFramebuffer::Create(OGLTexture* color_attachment, OGLTexture* depth_attachmen
+@@ -744,6 +862,25 @@ OGLFramebuffer::Create(OGLTexture* color_attachment, OGLTexture* depth_attachmen
  
    glDrawBuffers(static_cast<GLsizei>(buffers.size()), buffers.data());
  
@@ -5331,7 +5354,7 @@ index 41d05f3..e1958ed 100644
    if (m_onscreen_ui)
    {
 diff --git a/Source/Core/VideoCommon/TextureCacheBase.cpp b/Source/Core/VideoCommon/TextureCacheBase.cpp
-index 4e4567d..92d5dbb 100644
+index 4e4567d..beb1ff6 100644
 --- a/Source/Core/VideoCommon/TextureCacheBase.cpp
 +++ b/Source/Core/VideoCommon/TextureCacheBase.cpp
 @@ -2,6 +2,7 @@
@@ -5342,7 +5365,20 @@ index 4e4567d..92d5dbb 100644
  
  #include <algorithm>
  #include <chrono>
-@@ -1241,6 +1242,7 @@ private:
+@@ -60,7 +61,12 @@
+ 
+ static const u64 TEXHASH_INVALID = 0;
+ // Sonic the Fighters (inside Sonic Gems Collection) loops a 64 frames animation
++#ifdef __ORBIS__
++// PS4: every live texture costs ~20 KiB of a ~12.7 MiB system pool (Piglet); keep fewer around.
++static const int TEXTURE_KILL_THRESHOLD = 32;
++#else
+ static const int TEXTURE_KILL_THRESHOLD = 64;
++#endif
+ static const int TEXTURE_POOL_KILL_THRESHOLD = 3;
+ 
+ static int xfb_count = 0;
+@@ -1241,6 +1247,7 @@ private:
  
  TCacheEntry* TextureCacheBase::Load(u32 stage)
  {
@@ -5350,7 +5386,7 @@ index 4e4567d..92d5dbb 100644
    if (auto entry = LoadImpl(stage, false))
    {
      if (!DidLinkedAssetsChange(*entry))
-@@ -2151,6 +2153,7 @@ void TextureCacheBase::CopyRenderTargetToTexture(
+@@ -2151,6 +2158,7 @@ void TextureCacheBase::CopyRenderTargetToTexture(
      float gamma, bool clamp_top, bool clamp_bottom,
      const CopyFilterCoefficients::Values& filter_coefficients)
  {
