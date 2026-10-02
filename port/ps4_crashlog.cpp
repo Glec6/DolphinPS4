@@ -162,8 +162,10 @@ __attribute__((constructor(101))) void earlyInit() {
 // frame pointers; may include stale return addresses.
 extern "C" void ps4_boot_trace(const char* stage);
 extern "C" __attribute__((noinline)) void ps4_trace_callers(const char* what) {
-    uint64_t marker = 0;
-    const auto* stack = reinterpret_cast<const uint64_t*>(&marker);
+    // Read from the stack pointer itself: walking past a local variable is undefined behaviour
+    // the optimizer is free to drop (an earlier version printed nothing).
+    const uint64_t* stack;
+    asm volatile("mov %%rsp, %0" : "=r"(stack));
     char line[320];
     int len = snprintf(line, sizeof(line), "%s: callers", what);
     int found = 0;
