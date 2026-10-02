@@ -127,7 +127,10 @@ void report(int fd, ThreadSamples& t, double window_start) {
     snprintf(line, sizeof(line), "== %.0f s, %s: %d samples, %d in eboot code (%.0f%%)\n",
              window_start, t.name, n, eboot_samples, 100.0 * eboot_samples / n);
     writeLine(fd, line);
-    for (int i = 0; i < unique && i < 60; i++) {
+    // Every bucket seen at least twice (up to 800): a function spread over many 16-byte buckets
+    // fell below a top-60 cut, hiding about half of a busy thread. Aggregated per function
+    // offline (symbolizer).
+    for (int i = 0; i < unique && i < 800 && entries[i].count >= 2; i++) {
         if (entries[i].key >> 63)
             snprintf(line, sizeof(line), "  %5.1f%% region 0x%llx\n", 100.0 * entries[i].count / n,
                      static_cast<unsigned long long>(entries[i].key & ~(1ULL << 63)));
