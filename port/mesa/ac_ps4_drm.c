@@ -183,9 +183,19 @@ static bool
 ps4_wait_seq(ac_drm_device *dev, uint64_t seq, int64_t abs_timeout_ns)
 {
    unsigned spins = 0;
+   const int64_t start = os_time_get_nano();
+   bool reported = false;
    while (ps4_completed(dev) < seq) {
-      if (abs_timeout_ns != INT64_MAX && os_time_get_nano() >= abs_timeout_ns)
+      const int64_t now = os_time_get_nano();
+      if (abs_timeout_ns != INT64_MAX && now >= abs_timeout_ns)
          return false;
+      /* A wait this long means the GPU stopped (hang) or the fence write never happened. */
+      if (!reported && now - start > 2000000000ll) {
+         ps4_log("radv/ps4: waiting > 2 s for submission %llu; GPU completed %llu, submitted %llu\n",
+                 (unsigned long long)seq, (unsigned long long)ps4_completed(dev),
+                 (unsigned long long)dev->last_seq);
+         reported = true;
+      }
       if (++spins > 64)
          sceKernelUsleep(50);
    }
@@ -804,6 +814,10 @@ ac_drm_cs_submit_raw2(ac_drm_device *dev, uint32_t ctx_id, uint32_t bo_list_hand
 
    int r = dev->submit(num_ibs + 1, dcb, dcb_sizes, ccb, ccb_sizes);
    dev->submit_done();
+   if (seq <= 40 || seq % 1000 == 0)
+      ps4_log("radv/ps4: submit %llu: %u IBs (first %p, %u bytes) = %#x, GPU completed %llu\n",
+              (unsigned long long)seq, num_ibs, dcb[0], dcb_sizes[0], r,
+              (unsigned long long)ps4_completed(dev));
    if (r) {
       ps4_log("radv/ps4: sceGnmSubmitCommandBuffers(%u IBs) = %#x\n", num_ibs + 1, r);
       dev->last_seq--;
