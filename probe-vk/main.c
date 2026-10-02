@@ -9,6 +9,7 @@
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -43,11 +44,8 @@ __attribute__((format(printf, 1, 2))) static void Log(const char* fmt, ...) {
 
 // Mesa's own diagnostics go to stderr: keep them in the log too.
 static void RedirectStderr(void) {
-  int fd = open("/data/DolphinPS4/vk-probe-stderr.log", O_WRONLY | O_CREAT | O_TRUNC, 0666);
-  if (fd >= 0) {
-    dup2(fd, 2);
-    close(fd);
-  }
+  if (freopen("/data/DolphinPS4/vk-probe-stderr.log", "w", stderr))
+    setvbuf(stderr, NULL, _IONBF, 0);
 }
 
 #define LOAD(instance, name) PFN_##name name = (PFN_##name)vk_icdGetInstanceProcAddr(instance, #name)
@@ -60,6 +58,7 @@ static void RedirectStderr(void) {
   } while (0)
 
 static void Exit(void) {
+  fflush(stderr);
   if (g_log >= 0)
     close(g_log);
   sceSystemServiceLoadExec("exit", NULL);
@@ -69,6 +68,7 @@ static void Exit(void) {
 int main(void) {
   g_log = open("/data/DolphinPS4/vk-probe.log", O_WRONLY | O_CREAT | O_TRUNC, 0666);
   RedirectStderr();
+  setenv("RADV_DEBUG", "startup", 1);
   Log("Vulkan probe start\n");
   // System modules used by the runtime (see probe-gnm): load before any call into them.
   sceSysmoduleLoadModuleInternal(0x80000010);  // SystemService

@@ -25,7 +25,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <fcntl.h>
 #include <sys/types.h>
+#include <unistd.h>
 
 /* libkernel (declared here rather than through the OpenOrbis headers, which clash with Mesa's). */
 int sceKernelAllocateDirectMemory(off_t search_start, off_t search_end, size_t len, size_t align,
@@ -141,6 +143,12 @@ ps4_log(const char *fmt, ...)
    va_end(args);
    fputs(line, stderr);
    sceKernelDebugOutText(0, line);
+   /* Also straight to a file: the app may not route stderr anywhere. */
+   static int fd = -2;
+   if (fd == -2)
+      fd = open("/data/DolphinPS4/radv-ps4.log", O_WRONLY | O_CREAT | O_TRUNC, 0666);
+   if (fd >= 0)
+      write(fd, line, strlen(line));
 }
 
 /* ---------------------------------------------------------------------------------------------
