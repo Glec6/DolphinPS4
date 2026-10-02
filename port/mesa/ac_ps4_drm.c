@@ -104,6 +104,7 @@ struct amdgpu_bo {
    uint64_t last_va; /* last GPU address mapped at offset 0 (kept after unmap, for reports) */
    bool tail_mapped;   /* the overflow tail is mapped after the buffer (see PS4_TAIL) */
    bool tail_reported;
+   bool gpu_ro; /* mapped GPU read-only (command buffers) */
 };
 
 struct amdgpu_va {
@@ -195,6 +196,8 @@ struct ac_drm_device {
 #define FENCE_IB_COUNT 512
 
 static void ps4_scan_tails(ac_drm_device *dev);
+static void ps4_scan_writes(ac_drm_device *dev, uint32_t *ib, unsigned num_dw, uint64_t seq,
+                            int depth);
 struct ps4_deferred;
 static void ps4_defer(ac_drm_device *dev, struct ps4_deferred d);
 static void ps4_run_deferred(ac_drm_device *dev);
@@ -992,8 +995,10 @@ ps4_va_op(ac_drm_device *dev, uint32_t bo_handle, uint64_t offset, uint64_t size
       }
       if (offset == 0 && !b->cpu)
          b->cpu = a;
-      if (offset == 0)
+      if (offset == 0) {
          b->last_va = addr;
+         b->gpu_ro = gpu_ro;
+      }
       ps4_record(dev, 'M', b, addr, size);
       PS4_VERBOSE("radv/ps4: map bo %u +%#llx at %#llx (%#llx bytes)\n", b->handle,
                   (unsigned long long)offset, (unsigned long long)addr, (unsigned long long)size);
@@ -1356,6 +1361,159 @@ ps4_find_writer(ac_drm_device *dev, FILE *f, uint64_t target)
    }
 }
 
+/* The live buffer whose memory holds `va` (dev->lock held), or NULL. */
+static struct amdgpu_bo *
+ps4_bo_at(ac_drm_device *dev, uint64_t va)
+{
+   for (unsigned h = 1; h < dev->num_bos; h++) {
+      struct amdgpu_bo *b = dev->bos[h];
+      if (b && b->cpu && !b->cpu_owned && va >= b->last_va && va < b->last_va + b->size)
+         return b;
+   }
+   return NULL;
+}
+
+/* Every command that writes memory (WRITE_DATA, EVENT_WRITE(_EOP), COPY_DATA, DMA_DATA,
+ * ATOMIC_MEM) is checked before the GPU sees it: a destination inside a command buffer (mapped
+ * GPU read-only, so the write would fault and the system kill the app) or outside every buffer is
+ * reported and the command turned into a NOP of the same length. Render target / depth bases in a
+ * command buffer are reported. dev->lock held. */
+static unsigned ps4_bad_writes;
+static unsigned long long ps4_writes_checked;
+static void
+ps4_scan_writes(ac_drm_device *dev, uint32_t *ib, unsigned num_dw, uint64_t seq, int depth)
+{
+   for (unsigned link = 0; link < 256 && num_dw; link++) {
+      if (!ps4_mapped(ib, num_dw * 4ull))
+         return;
+      uint32_t *next = NULL;
+      unsigned next_dw = 0;
+      for (unsigned i = 0; i < num_dw;) {
+         const uint32_t h = ib[i];
+         if (h >> 30 == 2) {
+            i++;
+            continue;
+         }
+         if (h >> 30 != 3)
+            return;
+         const unsigned op = (h >> 8) & 0xff;
+         const unsigned body = ((h >> 16) & 0x3fff) + 1;
+         if (i + 1 + body > num_dw)
+            return;
+         uint32_t *b = &ib[i + 1];
+         uint64_t dst = 0, len = 4;
+         const char *name = NULL;
+         switch (op) {
+         case 0x37: /* WRITE_DATA */
+            if (body >= 4 && (((b[0] >> 8) & 0xf) == 1 || ((b[0] >> 8) & 0xf) == 2 ||
+                              ((b[0] >> 8) & 0xf) == 5)) {
+               dst = b[1] | ((uint64_t)b[2] << 32);
+               len = (body - 3) * 4ull;
+               name = "WRITE_DATA";
+            }
+            break;
+         case 0x47: /* EVENT_WRITE_EOP */
+            if (body >= 5 && (b[2] >> 29)) {
+               dst = b[1] | ((uint64_t)(b[2] & 0xffff) << 32);
+               len = (b[2] >> 29) == 1 ? 4 : 8;
+               name = "EVENT_WRITE_EOP";
+            }
+            break;
+         case 0x46: /* EVENT_WRITE with an address (ZPASS_DONE, pipeline stats, ...) */
+            if (body >= 3) {
+               dst = b[1] | ((uint64_t)(b[2] & 0xffff) << 32);
+               len = 8;
+               name = "EVENT_WRITE";
+            }
+            break;
+         case 0x40: /* COPY_DATA */
+            if (body >= 5 && (((b[0] >> 8) & 0xf) == 1 || ((b[0] >> 8) & 0xf) == 2 ||
+                              ((b[0] >> 8) & 0xf) == 5)) {
+               dst = b[3] | ((uint64_t)b[4] << 32);
+               len = (b[0] & (1u << 16)) ? 8 : 4;
+               name = "COPY_DATA";
+            }
+            break;
+         case 0x50: /* DMA_DATA */
+            if (body >= 6 && (((b[0] >> 20) & 3) == 0 || ((b[0] >> 20) & 3) == 3)) {
+               dst = b[3] | ((uint64_t)b[4] << 32);
+               len = MAX2(b[5] & 0x1fffff, 1);
+               name = "DMA_DATA";
+            }
+            break;
+         case 0x1e: /* ATOMIC_MEM */
+            if (body >= 3) {
+               dst = b[1] | ((uint64_t)b[2] << 32);
+               len = 8;
+               name = "ATOMIC_MEM";
+            }
+            break;
+         case 0x69: /* SET_CONTEXT_REG: CB_COLORn_BASE/CMASK/FMASK, DB bases, HTILE */
+            for (unsigned k = 1; k < body; k++) {
+               const unsigned reg = b[0] + k - 1;
+               const bool base = (reg >= 0x318 && reg < 0x318 + 8 * 15 &&
+                                  ((reg - 0x318) % 15 == 0 || (reg - 0x318) % 15 == 7 ||
+                                   (reg - 0x318) % 15 == 9)) ||
+                                 (reg >= 0x12 && reg <= 0x15) || reg == 0x5;
+               if (!base || !b[k])
+                  continue;
+               struct amdgpu_bo *t = ps4_bo_at(dev, (uint64_t)b[k] << 8);
+               if (t && t->gpu_ro && ps4_bad_writes++ < 40)
+                  ps4_log("radv/ps4: submission %llu: %p: context reg %#x = %#x points into "
+                          "command buffer bo %u (va %#llx)\n", (unsigned long long)seq,
+                          (void *)&ib[i], 0xa000 + reg, b[k], t->handle,
+                          (unsigned long long)t->last_va);
+            }
+            break;
+         case 0x3f: { /* INDIRECT_BUFFER */
+            uint32_t *t = (uint32_t *)(uintptr_t)(b[0] | ((uint64_t)(b[1] & 0xffff) << 32));
+            if (body >= 3 && (b[2] & (1u << 20))) {
+               next = t;
+               next_dw = b[2] & 0xfffff;
+            } else if (body >= 3 && depth < 3) {
+               ps4_scan_writes(dev, t, b[2] & 0xfffff, seq, depth + 1);
+            }
+            break;
+         }
+         default:
+            break;
+         }
+         if (name) {
+            ps4_writes_checked++;
+            struct amdgpu_bo *t = ps4_bo_at(dev, dst);
+            struct amdgpu_bo *t_end = ps4_bo_at(dev, dst + len - 1);
+            const char *why = !t ? "outside every buffer"
+                              : t->gpu_ro ? "into a command buffer"
+                              : t_end != t ? "past the end of its buffer"
+                                           : NULL;
+            if (why) {
+               if (ps4_bad_writes++ < 40) {
+                  char words[160];
+                  int n = 0;
+                  for (unsigned k = 0; k <= body && k < 10; k++)
+                     n += snprintf(words + n, sizeof(words) - n, " %08x", ib[i + k]);
+                  ps4_log("radv/ps4: submission %llu: %p: %s to %#llx (%llu bytes) %s - "
+                          "disabled. packet:%s\n", (unsigned long long)seq, (void *)&ib[i], name,
+                          (unsigned long long)dst, (unsigned long long)len, why, words);
+                  if (t)
+                     ps4_log("radv/ps4:   target bo %u: va %#llx size %#llx heap %#x flags %#llx\n",
+                             t->handle, (unsigned long long)t->last_va,
+                             (unsigned long long)t->size, t->heap, (unsigned long long)t->flags);
+               }
+               ib[i] = (h & ~0xff00u) | (0x10u << 8); /* NOP, same length */
+            }
+         }
+         if (next)
+            break;
+         i += 1 + body;
+      }
+      if (!next)
+         return;
+      ib = next;
+      num_dw = next_dw;
+   }
+}
+
 /* Before submitting: does every IB of the chain still start with a packet header, and does every
  * chain link point into a live buffer? (A GPU hang showed a chained IB full of vertex-like float
  * data.) Follows only the chain link in each IB's last 4 dwords - a few reads per IB. On failure,
@@ -1520,6 +1678,13 @@ ac_drm_cs_submit_raw2(ac_drm_device *dev, uint32_t ctx_id, uint32_t bo_list_hand
          break;
       }
    }
+   /* Commands that would write where they mustn't: report and disable them. */
+   if (num_ibs) {
+      simple_mtx_lock(&dev->lock);
+      for (unsigned i = 0; i < num_ibs; i++)
+         ps4_scan_writes(dev, dcb[i], dcb_sizes[i] / 4, dev->last_seq + 1, 0);
+      simple_mtx_unlock(&dev->lock);
+   }
 
    simple_mtx_lock(&dev->lock);
    /* The fence IB slot for the next sequence number must be free (its previous user finished).
@@ -1554,9 +1719,10 @@ ac_drm_cs_submit_raw2(ac_drm_device *dev, uint32_t ctx_id, uint32_t bo_list_hand
    int r = dev->submit(num_ibs + 1, dcb, dcb_sizes, ccb, ccb_sizes);
    dev->submit_done();
    if (seq <= 40 || seq % 1000 == 0)
-      ps4_log("radv/ps4: submit %llu: %u IBs (first %p, %u bytes) = %#x, GPU completed %llu\n",
+      ps4_log("radv/ps4: submit %llu: %u IBs (first %p, %u bytes) = %#x, GPU completed %llu, "
+              "%llu memory writes checked, %u disabled\n",
               (unsigned long long)seq, num_ibs, dcb[0], dcb_sizes[0], r,
-              (unsigned long long)ps4_completed(dev));
+              (unsigned long long)ps4_completed(dev), ps4_writes_checked, ps4_bad_writes);
    if (r) {
       ps4_log("radv/ps4: sceGnmSubmitCommandBuffers(%u IBs) = %#x\n", num_ibs + 1, r);
       dev->last_seq--;
