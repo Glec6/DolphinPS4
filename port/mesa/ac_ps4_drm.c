@@ -106,6 +106,7 @@ struct amdgpu_bo {
 };
 
 struct amdgpu_va {
+   struct ac_drm_device *dev;
    struct util_vma_heap *heap;
    uint64_t addr;
    uint64_t size;
@@ -164,6 +165,21 @@ struct ac_drm_device {
    } recent[16];
    bool hang_reported;
 
+   /* Unmaps, frees and address-range frees wait here until the GPU has finished every submission
+    * made before them: the amdgpu kernel driver keeps a buffer alive while submissions use it,
+    * and RADV relies on that (e.g. a queue's scratch or preamble buffers are replaced while the
+    * GPU may still use the old ones). Freed at once, the GPU's late writes landed in whatever got
+    * the memory next - command buffers. Guarded by `lock`, in order. */
+   struct ps4_deferred {
+      uint64_t seq;
+      char op; /* 'U' unmap, 'F' free, 'V' address range free */
+      struct amdgpu_bo *bo;
+      uint32_t handle;
+      uint64_t addr, size;
+      struct amdgpu_va *va;
+   } *deferred;
+   unsigned num_deferred, deferred_cap;
+
    /* Recent unmaps and frees (GPU hang report: was a command buffer's memory reused?). */
    struct ps4_event {
       char what;
@@ -178,6 +194,13 @@ struct ac_drm_device {
 #define FENCE_IB_COUNT 512
 
 static void ps4_scan_tails(ac_drm_device *dev);
+struct ps4_deferred;
+static void ps4_defer(ac_drm_device *dev, struct ps4_deferred d);
+static void ps4_run_deferred(ac_drm_device *dev);
+static int ps4_do_unmap(ac_drm_device *dev, struct amdgpu_bo *b, uint32_t bo_handle, uint64_t addr,
+                        uint64_t size);
+static void ps4_do_free(ac_drm_device *dev, struct amdgpu_bo *b);
+static void ps4_do_va_free(amdgpu_va_handle va);
 
 /* Guards the address-space heaps (va_range_free has no device argument). */
 static simple_mtx_t ps4_va_lock = SIMPLE_MTX_INITIALIZER;
@@ -685,8 +708,20 @@ ac_drm_bo_alloc(ac_drm_device *dev, struct amdgpu_bo_alloc_request *req, ac_drm_
                        ? PS4_WC_GARLIC
                        : PS4_WB_ONION;
    const uint64_t align = MAX2(util_next_power_of_two64(MAX2(req->phys_alignment, 1)), PS4_PAGE);
+   simple_mtx_lock(&dev->lock);
+   ps4_run_deferred(dev);
+   simple_mtx_unlock(&dev->lock);
    int r = sceKernelAllocateDirectMemory(0, sceKernelGetDirectMemorySize(), bo->size + PS4_TAIL,
                                          align, type, &bo->phys);
+   if (r && dev->num_deferred) {
+      /* Memory still waiting for the GPU: let it finish, then try again. */
+      ps4_wait_seq(dev, dev->last_seq, INT64_MAX);
+      simple_mtx_lock(&dev->lock);
+      ps4_run_deferred(dev);
+      simple_mtx_unlock(&dev->lock);
+      r = sceKernelAllocateDirectMemory(0, sceKernelGetDirectMemorySize(), bo->size + PS4_TAIL,
+                                        align, type, &bo->phys);
+   }
    if (r) {
       ps4_log("radv/ps4: allocating %llu bytes of direct memory failed (%#x)\n",
               (unsigned long long)bo->size, r);
@@ -726,6 +761,14 @@ ac_drm_bo_free(ac_drm_device *dev, ac_drm_bo bo)
    struct amdgpu_bo *b = bo.abo;
    if (!b)
       return 0;
+   ps4_defer(dev, (struct ps4_deferred){.op = 'F', .bo = b});
+   return 0;
+}
+
+/* A deferred free (dev->lock held). */
+static void
+ps4_do_free(ac_drm_device *dev, struct amdgpu_bo *b)
+{
    if (b->cpu_owned)
       sceKernelMunmap(b->cpu, b->size);
    const int rr = sceKernelReleaseDirectMemory(b->phys, b->size + PS4_TAIL);
@@ -740,11 +783,8 @@ ac_drm_bo_free(ac_drm_device *dev, ac_drm_bo bo)
    if (b->pad_phys >= 0)
       sceKernelReleaseDirectMemory(b->pad_phys, PS4_PAGE);
    ps4_record(dev, 'F', b, b->last_va, b->size);
-   simple_mtx_lock(&dev->lock);
    dev->bos[b->handle] = NULL;
-   simple_mtx_unlock(&dev->lock);
    free(b);
-   return 0;
 }
 
 int
@@ -950,8 +990,22 @@ ps4_va_op(ac_drm_device *dev, uint32_t bo_handle, uint64_t offset, uint64_t size
    }
    case AMDGPU_VA_OP_UNMAP:
    case AMDGPU_VA_OP_CLEAR: {
-      struct amdgpu_bo *b = ps4_bo(dev, bo_handle);
-      simple_mtx_lock(&dev->lock); /* against ps4_scan_tails */
+      ps4_defer(dev, (struct ps4_deferred){.op = 'U', .bo = ps4_bo(dev, bo_handle),
+                                           .handle = bo_handle, .addr = addr, .size = size});
+      return 0;
+   }
+   default:
+      ps4_log("radv/ps4: va op %u unsupported\n", ops);
+      return -ENOSYS;
+   }
+}
+
+/* A deferred unmap (dev->lock held). */
+static int
+ps4_do_unmap(ac_drm_device *dev, struct amdgpu_bo *b, uint32_t bo_handle, uint64_t addr,
+             uint64_t size)
+{
+   {
       if (b && b->tail_mapped && addr == b->last_va) {
          ps4_check_tail(dev, b, "unmapped");
          b->tail_mapped = false;
@@ -959,7 +1013,6 @@ ps4_va_op(ac_drm_device *dev, uint32_t bo_handle, uint64_t offset, uint64_t size
       }
       if (b && b->cpu == (void *)(uintptr_t)addr && !b->cpu_owned)
          b->cpu = NULL;
-      simple_mtx_unlock(&dev->lock);
       ps4_record(dev, 'U', b, addr, size);
       /* Unmap explicitly, then put the reservation back so the window stays ours. (Reserving
        * over a live mapping isn't guaranteed to replace it; a mapping left behind would vanish
@@ -974,10 +1027,6 @@ ps4_va_op(ac_drm_device *dev, uint32_t bo_handle, uint64_t offset, uint64_t size
          return -EINVAL;
       }
       return 0;
-   }
-   default:
-      ps4_log("radv/ps4: va op %u unsupported\n", ops);
-      return -ENOSYS;
    }
 }
 
@@ -1040,6 +1089,7 @@ ac_drm_va_range_alloc(ac_drm_device *dev, enum amdgpu_gpu_va_range va_range_type
                (unsigned long long)size, (unsigned long long)flags);
 
    struct amdgpu_va *va = malloc(sizeof(*va));
+   va->dev = dev;
    va->heap = heap;
    va->addr = addr;
    va->size = size;
@@ -1053,11 +1103,58 @@ ac_drm_va_range_free(amdgpu_va_handle va)
 {
    if (!va)
       return 0;
+   ps4_defer(va->dev, (struct ps4_deferred){.op = 'V', .va = va});
+   return 0;
+}
+
+/* A deferred address range free. */
+static void
+ps4_do_va_free(amdgpu_va_handle va)
+{
    simple_mtx_lock(&ps4_va_lock);
    util_vma_heap_free(va->heap, va->addr, va->size);
    simple_mtx_unlock(&ps4_va_lock);
    free(va);
-   return 0;
+}
+
+/* Runs the deferred operations whose submissions have completed, in order. dev->lock held. */
+static void
+ps4_run_deferred(ac_drm_device *dev)
+{
+   const uint64_t done = ps4_completed(dev);
+   unsigned n = 0;
+   for (; n < dev->num_deferred && dev->deferred[n].seq <= done; n++) {
+      struct ps4_deferred *d = &dev->deferred[n];
+      switch (d->op) {
+      case 'U':
+         ps4_do_unmap(dev, d->bo, d->handle, d->addr, d->size);
+         break;
+      case 'F':
+         ps4_do_free(dev, d->bo);
+         break;
+      case 'V':
+         ps4_do_va_free(d->va);
+         break;
+      }
+   }
+   if (n) {
+      dev->num_deferred -= n;
+      memmove(dev->deferred, dev->deferred + n, dev->num_deferred * sizeof(*dev->deferred));
+   }
+}
+
+static void
+ps4_defer(ac_drm_device *dev, struct ps4_deferred d)
+{
+   simple_mtx_lock(&dev->lock);
+   d.seq = dev->last_seq;
+   if (dev->num_deferred == dev->deferred_cap) {
+      dev->deferred_cap = MAX2(dev->deferred_cap * 2, 256);
+      dev->deferred = realloc(dev->deferred, dev->deferred_cap * sizeof(*dev->deferred));
+   }
+   dev->deferred[dev->num_deferred++] = d;
+   ps4_run_deferred(dev);
+   simple_mtx_unlock(&dev->lock);
 }
 
 int
@@ -1445,6 +1542,7 @@ ac_drm_cs_submit_raw2(ac_drm_device *dev, uint32_t ctx_id, uint32_t bo_list_hand
 
    if (seq % 256 == 0)
       ps4_scan_tails(dev);
+   ps4_run_deferred(dev);
 
    if (signal_chunk) {
       const bool timeline = signal_chunk->chunk_id == AMDGPU_CHUNK_ID_SYNCOBJ_TIMELINE_SIGNAL;
