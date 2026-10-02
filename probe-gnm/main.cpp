@@ -20,16 +20,15 @@
 #include <orbis/VideoOut.h>
 #include <orbis/libkernel.h>
 
-extern "C" {
-// libSceGnmDriver (signatures from shadPS4's gnmdriver.h).
-int32_t sceGnmSubmitAndFlipCommandBuffers(uint32_t count, void* dcb_gpu_addrs[],
-                                          uint32_t* dcb_sizes_in_bytes, void* ccb_gpu_addrs[],
-                                          uint32_t* ccb_sizes_in_bytes, uint32_t vo_handle,
-                                          uint32_t buf_idx, uint32_t flip_mode, int64_t flip_arg);
-int32_t sceGnmSubmitDone(void);
-}
-
 namespace {
+
+// libSceGnmDriver (signatures from shadPS4's gnmdriver.h), resolved with sceKernelDlsym.
+int32_t (*sceGnmSubmitAndFlipCommandBuffers)(uint32_t count, void* dcb_gpu_addrs[],
+                                             uint32_t* dcb_sizes_in_bytes, void* ccb_gpu_addrs[],
+                                             uint32_t* ccb_sizes_in_bytes, uint32_t vo_handle,
+                                             uint32_t buf_idx, uint32_t flip_mode,
+                                             int64_t flip_arg);
+int32_t (*sceGnmSubmitDone)(void);
 
 int g_log = -1;
 
@@ -43,6 +42,60 @@ __attribute__((format(printf, 1, 2))) void Log(const char* fmt, ...) {
         write(g_log, line, static_cast<size_t>(n < 255 ? n : 255));
         fsync(g_log);  // the process may be killed right after: keep every line
     }
+}
+
+// Logs the loaded modules; returns the handle of the one named `want` (or -1).
+int32_t ListModules(const char* want) {
+    OrbisKernelModule handles[256];
+    size_t count = 0;
+    const int32_t r = sceKernelGetModuleList(handles, 256, &count);
+    Log("module list = %#x, %zu modules:", r, count);
+    int32_t found = -1;
+    for (size_t i = 0; i < count && i < 256; i++) {
+        OrbisKernelModuleInfo info;
+        memset(&info, 0, sizeof(info));
+        info.size = sizeof(info);
+        if (sceKernelGetModuleInfo(handles[i], &info) != 0)
+            continue;
+        Log(" %s(%#x)", info.name, handles[i]);
+        if (want && strstr(info.name, want))
+            found = static_cast<int32_t>(handles[i]);
+    }
+    Log("\n");
+    return found;
+}
+
+int32_t LoadGnmDriver() {
+    int32_t gnm = ListModules("libSceGnmDriver");
+    if (gnm >= 0) {
+        Log("libSceGnmDriver already loaded: %#x\n", gnm);
+        return gnm;
+    }
+    const char* word = sceKernelGetFsSandboxRandomWord();
+    Log("sandbox word %s\n", word ? word : "(null)");
+    char sandboxed[128];
+    snprintf(sandboxed, sizeof(sandboxed), "/%s/common/lib/libSceGnmDriver.sprx", word ? word : "");
+    const char* paths[] = {sandboxed, "libSceGnmDriver.sprx",
+                           "/system/common/lib/libSceGnmDriver.sprx"};
+    for (const char* path : paths) {
+        gnm = static_cast<int32_t>(
+            sceKernelLoadStartModule(path, 0, nullptr, 0, nullptr, nullptr));
+        Log("load %s = %#x\n", path, gnm);
+        if (gnm >= 0)
+            return gnm;
+    }
+    return -1;
+}
+
+bool ResolveGnm(int32_t gnm) {
+    const int32_t a = sceKernelDlsym(gnm, "sceGnmSubmitAndFlipCommandBuffers",
+                                     reinterpret_cast<void**>(&sceGnmSubmitAndFlipCommandBuffers));
+    const int32_t b =
+        sceKernelDlsym(gnm, "sceGnmSubmitDone", reinterpret_cast<void**>(&sceGnmSubmitDone));
+    Log("dlsym SubmitAndFlip = %#x (%p), SubmitDone = %#x (%p)\n", a,
+        reinterpret_cast<void*>(sceGnmSubmitAndFlipCommandBuffers), b,
+        reinterpret_cast<void*>(sceGnmSubmitDone));
+    return a == 0 && b == 0 && sceGnmSubmitAndFlipCommandBuffers && sceGnmSubmitDone;
 }
 
 constexpr uint32_t kWidth = 1920, kHeight = 1080;
@@ -148,13 +201,14 @@ int main() {
                    {"VideoOut", ORBIS_SYSMODULE_INTERNAL_VIDEO_OUT}};
     for (const auto& m : modules)
         Log("load module %s = %#x\n", m.name, sceSysmoduleLoadModuleInternal(m.id));
-    // GnmDriver has no sysmodule id: load the system prx directly.
-    int32_t gnm = sceKernelLoadStartModule("libSceGnmDriver.sprx", 0, nullptr, 0, nullptr, nullptr);
-    Log("load libSceGnmDriver.sprx = %#x\n", gnm);
-    if (gnm < 0) {
-        gnm = sceKernelLoadStartModule("/system/common/lib/libSceGnmDriver.sprx", 0, nullptr, 0,
-                                       nullptr, nullptr);
-        Log("load /system/common/lib/libSceGnmDriver.sprx = %#x\n", gnm);
+    // GnmDriver has no sysmodule id. v01.05: "libSceGnmDriver.sprx" and
+    // "/system/common/lib/..." both gave 0x80020002 (ENOENT) - the sandbox shows /system under a
+    // random directory name. Resolve its entry points with dlsym instead of import stubs, so a
+    // missing module logs instead of killing the process.
+    const int32_t gnm = LoadGnmDriver();
+    if (gnm < 0 || !ResolveGnm(gnm)) {
+        Log("no GNM driver, giving up\n");
+        return 1;
     }
     Log("calling sceUserServiceInitialize\n");
     Log("sceUserServiceInitialize = %#x\n", sceUserServiceInitialize(nullptr));
