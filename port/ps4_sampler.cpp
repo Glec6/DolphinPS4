@@ -186,6 +186,10 @@ constexpr int kMaxWatched = 16, kMaxFrames = 48;
 struct WatchedThread {
     std::atomic<pthread_t> thread{};
     char name[32] = {};  // copied: some callers pass temporaries
+    // Highest stack address the dump may read: the thread's stack position when it registered
+    // (plus its caller's frame). Reading a fixed amount above rsp ran off the top of small thread
+    // stacks (the Wiimote scanner's) and crashed the app in the middle of a hang dump.
+    uintptr_t stack_limit = 0;
     uint64_t rip = 0;
     uint64_t frames[kMaxFrames];
     int frame_count = 0;
@@ -205,10 +209,11 @@ void dumpHandler(int, siginfo_t*, void* context) {
             reinterpret_cast<const uint64_t*>(static_cast<char*>(context) + kMcontextOffset);
         t.rip = regs[kRipIndex];
         const auto* stack = reinterpret_cast<const uint64_t*>(regs[kRspIndex]);
+        const auto* limit = reinterpret_cast<const uint64_t*>(t.stack_limit);
         int n = 0;
-        for (int s = 0; s < 512 && n < kMaxFrames; s++) {
-            if (stack[s] >= text && stack[s] < text + kTextWindow)
-                t.frames[n++] = stack[s] - text;
+        for (const uint64_t* p = stack; p < limit && n < kMaxFrames; p++) {
+            if (*p >= text && *p < text + kTextWindow)
+                t.frames[n++] = *p - text;
         }
         t.frame_count = n;
         t.done.store(1, std::memory_order_release);
@@ -241,6 +246,7 @@ extern "C" void ps4_watch_thread(const char* name) {
     if (index >= kMaxWatched)
         return;
     snprintf(g_watched[index].name, sizeof(g_watched[index].name), "%s", name ? name : "?");
+    g_watched[index].stack_limit = reinterpret_cast<uintptr_t>(__builtin_frame_address(0)) + 256;
     g_watched[index].thread.store(self);
 }
 
