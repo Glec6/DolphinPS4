@@ -157,6 +157,26 @@ __attribute__((constructor(101))) void earlyInit() {
 
 }  // namespace
 
+// Appends "<what>: callers 0x.. 0x.." to the boot trace: code addresses found on the calling
+// thread's stack (ELF addresses, symbolize like crash.log). A cheap "who calls this" without
+// frame pointers; may include stale return addresses.
+extern "C" void ps4_boot_trace(const char* stage);
+extern "C" __attribute__((noinline)) void ps4_trace_callers(const char* what) {
+    uint64_t marker = 0;
+    const auto* stack = reinterpret_cast<const uint64_t*>(&marker);
+    char line[320];
+    int len = snprintf(line, sizeof(line), "%s: callers", what);
+    int found = 0;
+    for (int i = 0; i < 512 && found < 10 && len < 280; i++) {
+        if (isCode(stack[i])) {
+            len += snprintf(line + len, sizeof(line) - len, " 0x%llx",
+                            static_cast<unsigned long long>(toElf(stack[i])));
+            found++;
+        }
+    }
+    ps4_boot_trace(line);
+}
+
 // Appends a line to /data/DolphinPS4/boot-trace.log (startup milestones), prefixed with the
 // seconds since the first trace line.
 extern "C" void ps4_boot_trace(const char* stage) {

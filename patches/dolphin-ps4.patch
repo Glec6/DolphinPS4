@@ -3822,7 +3822,7 @@ index efbb826..73f3d03 100644
    const u32 m_buffertype;
    const u32 m_size;
 diff --git a/Source/Core/VideoBackends/OGL/OGLTexture.cpp b/Source/Core/VideoBackends/OGL/OGLTexture.cpp
-index 003a7ec..657369b 100644
+index 003a7ec..f6d0a8c 100644
 --- a/Source/Core/VideoBackends/OGL/OGLTexture.cpp
 +++ b/Source/Core/VideoBackends/OGL/OGLTexture.cpp
 @@ -2,6 +2,7 @@
@@ -3833,19 +3833,20 @@ index 003a7ec..657369b 100644
  
  #include "Common/Assert.h"
  #include "Common/CommonTypes.h"
-@@ -13,6 +14,11 @@
+@@ -13,6 +14,12 @@
  
  #include "VideoCommon/VideoConfig.h"
  
 +#ifdef __ORBIS__
 +#include <cstdio>
 +extern "C" void ps4_boot_trace(const char* stage);  // DolphinPS4 port/ps4_crashlog.cpp
++extern "C" void ps4_trace_callers(const char* what);  // DolphinPS4 port/ps4_crashlog.cpp
 +#endif
 +
  namespace OGL
  {
  GLenum OGLTexture::GetGLInternalFormatForTextureFormat(AbstractTextureFormat format, bool storage)
-@@ -128,7 +134,23 @@ OGLTexture::OGLTexture(const TextureConfig& tex_config, std::string_view name)
+@@ -128,7 +135,23 @@ OGLTexture::OGLTexture(const TextureConfig& tex_config, std::string_view name)
                     "OpenGL does not support multisampled textures with mip levels");
  
    const GLenum target = GetGLTarget();
@@ -3869,7 +3870,7 @@ index 003a7ec..657369b 100644
    glActiveTexture(GL_MUTABLE_TEXTURE_INDEX);
    glBindTexture(target, m_texId);
  
-@@ -140,6 +162,13 @@ OGLTexture::OGLTexture(const TextureConfig& tex_config, std::string_view name)
+@@ -140,6 +163,13 @@ OGLTexture::OGLTexture(const TextureConfig& tex_config, std::string_view name)
    glTexParameteri(target, GL_TEXTURE_MAX_LEVEL, m_config.levels - 1);
  
    GLenum gl_internal_format = GetGLInternalFormatForTextureFormat(m_config.format, true);
@@ -3883,7 +3884,7 @@ index 003a7ec..657369b 100644
    if (g_ogl_config.bSupportsTextureStorage && m_config.type == AbstractTextureType::Texture_CubeMap)
    {
      glTexStorage2D(target, m_config.levels, gl_internal_format, m_config.width, m_config.height);
-@@ -197,6 +226,24 @@ OGLTexture::OGLTexture(const TextureConfig& tex_config, std::string_view name)
+@@ -197,6 +227,24 @@ OGLTexture::OGLTexture(const TextureConfig& tex_config, std::string_view name)
      }
    }
  
@@ -3908,7 +3909,7 @@ index 003a7ec..657369b 100644
    if (m_config.IsRenderTarget())
    {
      // We can't render to compressed formats.
-@@ -216,8 +263,18 @@ OGLTexture::OGLTexture(const TextureConfig& tex_config, std::string_view name)
+@@ -216,8 +264,18 @@ OGLTexture::OGLTexture(const TextureConfig& tex_config, std::string_view name)
  
  OGLTexture::~OGLTexture()
  {
@@ -3927,7 +3928,7 @@ index 003a7ec..657369b 100644
  }
  
  void OGLTexture::CopyRectangleFromTexture(const AbstractTexture* src,
-@@ -279,6 +336,7 @@ void OGLTexture::ResolveFromTexture(const AbstractTexture* src,
+@@ -279,6 +337,7 @@ void OGLTexture::ResolveFromTexture(const AbstractTexture* src,
  void OGLTexture::Load(u32 level, u32 width, u32 height, u32 row_length, const u8* buffer,
                        size_t buffer_size, u32 layer)
  {
@@ -3935,7 +3936,7 @@ index 003a7ec..657369b 100644
    if (level >= m_config.levels)
      PanicAlertFmt("Texture only has {} levels, can't update level {}", m_config.levels, level);
  
-@@ -670,7 +728,11 @@ OGLFramebuffer::OGLFramebuffer(AbstractTexture* color_attachment, AbstractTextur
+@@ -670,7 +729,11 @@ OGLFramebuffer::OGLFramebuffer(AbstractTexture* color_attachment, AbstractTextur
  
  OGLFramebuffer::~OGLFramebuffer()
  {
@@ -3947,17 +3948,24 @@ index 003a7ec..657369b 100644
  }
  
  std::unique_ptr<OGLFramebuffer>
-@@ -692,6 +754,9 @@ OGLFramebuffer::Create(OGLTexture* color_attachment, OGLTexture* depth_attachmen
+@@ -692,6 +755,16 @@ OGLFramebuffer::Create(OGLTexture* color_attachment, OGLTexture* depth_attachmen
  
    GLuint fbo;
    glGenFramebuffers(1, &fbo);
 +#ifdef __ORBIS__
 +  ps4_gl_fbo_creations++;
++  // Port diagnostics: framebuffers were created 10 times per second for a whole run: who asks?
++  if (ps4_gl_fbo_creations <= 30 || ps4_gl_fbo_creations % 300 == 0)
++  {
++    char what[96];
++    snprintf(what, sizeof(what), "framebuffer #%d %ux%u", ps4_gl_fbo_creations, width, height);
++    ps4_trace_callers(what);
++  }
 +#endif
    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
  
    std::vector<GLenum> buffers;
-@@ -744,6 +809,25 @@ OGLFramebuffer::Create(OGLTexture* color_attachment, OGLTexture* depth_attachmen
+@@ -744,6 +817,25 @@ OGLFramebuffer::Create(OGLTexture* color_attachment, OGLTexture* depth_attachmen
  
    glDrawBuffers(static_cast<GLsizei>(buffers.size()), buffers.data());
  
