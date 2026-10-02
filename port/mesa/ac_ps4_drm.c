@@ -87,6 +87,7 @@ struct amdgpu_bo {
    uint32_t heap;
    uint64_t flags;
    off_t pad_phys; /* RADEON_FLAG_VM_PAD_1PAGE page, when it lies past the buffer (else -1) */
+   uint64_t last_va; /* last GPU address mapped at offset 0 (kept after unmap, for reports) */
 };
 
 struct amdgpu_va {
@@ -147,6 +148,15 @@ struct ac_drm_device {
       uint32_t bytes[8];
    } recent[16];
    bool hang_reported;
+
+   /* Recent unmaps and frees (GPU hang report: was a command buffer's memory reused?). */
+   struct ps4_event {
+      char what;
+      uint32_t handle;
+      uint64_t va, size, seq;
+      off_t phys;
+   } events[256];
+   unsigned num_events;
 };
 
 #define FENCE_IB_DW 16
@@ -202,6 +212,63 @@ ps4_completed(ac_drm_device *dev)
 /* Waits until submission `seq` has finished; returns false on timeout. */
 /* GPU addresses are CPU addresses: the IB parser can follow chained IBs directly. */
 static void
+ps4_record(ac_drm_device *dev, char what, struct amdgpu_bo *b, uint64_t va, uint64_t size)
+{
+   struct ps4_event *e = &dev->events[dev->num_events++ % ARRAY_SIZE(dev->events)];
+   e->what = what;
+   e->handle = b ? b->handle : 0;
+   e->va = va;
+   e->size = size;
+   e->phys = b ? b->phys : -1;
+   e->seq = dev->last_seq;
+}
+
+/* Which live buffer maps `va`, and what happened recently around it. */
+static void
+ps4_describe_va(ac_drm_device *dev, FILE *f, uint64_t va)
+{
+   fprintf(f, "  address %#llx:\n", (unsigned long long)va);
+   for (unsigned h = 1; h < dev->num_bos; h++) {
+      struct amdgpu_bo *b = dev->bos[h];
+      if (b && b->last_va && va >= b->last_va && va < b->last_va + b->size)
+         fprintf(f, "    live bo %u: va %#llx size %#llx phys %#llx heap %#x flags %#llx mapped %s\n",
+                 b->handle, (unsigned long long)b->last_va, (unsigned long long)b->size,
+                 (unsigned long long)b->phys, b->heap, (unsigned long long)b->flags,
+                 b->cpu ? "yes" : "NO");
+   }
+   for (unsigned i = 0; i < ARRAY_SIZE(dev->events) && i < dev->num_events; i++) {
+      const struct ps4_event *e = &dev->events[i];
+      if (va >= e->va && va < e->va + e->size)
+         fprintf(f, "    event %c bo %u va %#llx size %#llx phys %#llx at submission %llu\n", e->what,
+                 e->handle, (unsigned long long)e->va, (unsigned long long)e->size,
+                 (unsigned long long)e->phys, (unsigned long long)e->seq);
+   }
+}
+
+/* Live buffers sharing physical memory (with direct memory aliasing enabled for fastmem, a
+ * stale or double allocation wouldn't fail any more - it would silently share memory). */
+static void
+ps4_check_overlaps(ac_drm_device *dev, FILE *f)
+{
+   unsigned found = 0;
+   for (unsigned a = 1; a < dev->num_bos && found < 20; a++) {
+      struct amdgpu_bo *x = dev->bos[a];
+      if (!x)
+         continue;
+      for (unsigned c = a + 1; c < dev->num_bos && found < 20; c++) {
+         struct amdgpu_bo *y = dev->bos[c];
+         if (y && x->phys < y->phys + (off_t)y->size && y->phys < x->phys + (off_t)x->size) {
+            fprintf(f, "  PHYS OVERLAP: bo %u [%#llx+%#llx] and bo %u [%#llx+%#llx]\n", x->handle,
+                    (unsigned long long)x->phys, (unsigned long long)x->size, y->handle,
+                    (unsigned long long)y->phys, (unsigned long long)y->size);
+            found++;
+         }
+      }
+   }
+   fprintf(f, "  %u physical overlaps among %u buffer handles\n", found, dev->num_bos);
+}
+
+static void
 ps4_ib_addr(void *data, uint64_t addr, struct ac_addr_info *info)
 {
    ac_drm_device *dev = data;
@@ -234,6 +301,7 @@ ps4_walk_ib(ac_drm_device *dev, FILE *f, const uint32_t *ib, unsigned num_dw, in
       }
       if (type != 3) {
          fprintf(f, "%*s%p: non-type-3 header %#x, stop\n", depth * 2, "", (void *)&ib[i], h);
+         ps4_describe_va(dev, f, (uintptr_t)&ib[i]);
          return;
       }
       const unsigned op = (h >> 8) & 0xff;
@@ -301,6 +369,10 @@ ps4_report_hang(ac_drm_device *dev, uint64_t waited_seq)
    for (unsigned r = 0; r < ARRAY_SIZE(dev->recent); r++) {
       if (dev->recent[r].seq != completed + 1)
          continue;
+      fprintf(f, "==== buffers ====\n");
+      for (unsigned i = 0; i < dev->recent[r].num_ibs; i++)
+         ps4_describe_va(dev, f, dev->recent[r].va[i]);
+      ps4_check_overlaps(dev, f);
       fprintf(f, "==== execution check (memory writes the GPU did / didn't do) ====\n");
       for (unsigned i = 0; i < dev->recent[r].num_ibs; i++) {
          fprintf(f, "-- IB %u\n", i);
@@ -594,6 +666,7 @@ ac_drm_bo_free(ac_drm_device *dev, ac_drm_bo bo)
    __atomic_sub_fetch(&dev->bo_count, 1, __ATOMIC_RELAXED);
    if (b->pad_phys >= 0)
       sceKernelReleaseDirectMemory(b->pad_phys, PS4_PAGE);
+   ps4_record(dev, 'F', b, b->last_va, b->size);
    simple_mtx_lock(&dev->lock);
    dev->bos[b->handle] = NULL;
    simple_mtx_unlock(&dev->lock);
@@ -739,6 +812,9 @@ ps4_va_op(ac_drm_device *dev, uint32_t bo_handle, uint64_t offset, uint64_t size
       }
       if (offset == 0 && !b->cpu)
          b->cpu = a;
+      if (offset == 0)
+         b->last_va = addr;
+      ps4_record(dev, 'M', b, addr, size);
       PS4_VERBOSE("radv/ps4: map bo %u +%#llx at %#llx (%#llx bytes)\n", b->handle,
                   (unsigned long long)offset, (unsigned long long)addr, (unsigned long long)size);
       return 0;
@@ -748,6 +824,7 @@ ps4_va_op(ac_drm_device *dev, uint32_t bo_handle, uint64_t offset, uint64_t size
       struct amdgpu_bo *b = ps4_bo(dev, bo_handle);
       if (b && b->cpu == (void *)(uintptr_t)addr && !b->cpu_owned)
          b->cpu = NULL;
+      ps4_record(dev, 'U', b, addr, size);
       /* Put the reservation back so the window stays ours. */
       return ps4_reserve(addr, size) ? 0 : -EINVAL;
    }

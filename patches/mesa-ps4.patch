@@ -140,6 +140,20 @@ index 3696bad..ec3503d 100644
  
  if with_symbols_check
    test(
+diff --git a/src/amd/vulkan/meta/radv_meta_fast_clear.c b/src/amd/vulkan/meta/radv_meta_fast_clear.c
+index f5b0837..45768c3 100644
+--- a/src/amd/vulkan/meta/radv_meta_fast_clear.c
++++ b/src/amd/vulkan/meta/radv_meta_fast_clear.c
+@@ -375,6 +375,9 @@ radv_process_color_image(struct radv_cmd_buffer *cmd_buffer, struct radv_image *
+       pred_offset = 0;
+    }
+ 
++#ifdef __PS4__
++   pred_offset = 0; /* no SET_PREDICATION on the PS4 (radv_cmd_buffer.c): always run the pass */
++#endif
+    radv_meta_save(&saved_state, cmd_buffer, RADV_META_SAVE_GRAPHICS_PIPELINE | RADV_META_SAVE_RENDER);
+ 
+    if (pred_offset) {
 diff --git a/src/amd/vulkan/radv_cmd_buffer.c b/src/amd/vulkan/radv_cmd_buffer.c
 index 405023b..46373c4 100644
 --- a/src/amd/vulkan/radv_cmd_buffer.c
