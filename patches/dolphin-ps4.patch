@@ -1748,10 +1748,10 @@ index f4dc8a9..4e5ff67 100644
  
 diff --git a/Source/Core/DolphinNoGUI/PlatformPS4.cpp b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
 new file mode 100644
-index 0000000..a6db222
+index 0000000..d2e63b4
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
-@@ -0,0 +1,417 @@
+@@ -0,0 +1,419 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -1788,6 +1788,7 @@ index 0000000..a6db222
 +#include "VideoCommon/PS4Profile.h"
 +
 +extern "C" long long ps4_map_count, ps4_unmap_count, ps4_map_internal_bytes;  // MemArenaPS4
++extern "C" long long ps4_compile_internal_bytes, ps4_link_internal_bytes;  // ProgramShaderCache
 +#include "Core/System.h"
 +
 +extern "C" int sceSystemServiceLoadExec(const char* path, char* const argv[]);
@@ -1941,21 +1942,22 @@ index 0000000..a6db222
 +      const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(
 +                               std::chrono::steady_clock::now() - start)
 +                               .count();
-+      char line[480];
++      char line[560];
 +      // speed: emulated time per real time; max speed: what the CPU thread could reach if it
 +      // never waited (below 100% means the emulated CPU itself is the bottleneck).
 +      snprintf(line, sizeof(line),
 +               "monitor: %lld s, speed %.0f%% (max %.0f%%), %.1f FPS, %.1f VPS, %zu MiB flexible "
 +               "free, CPU core %d, %llu fastmem faults, GL shaders %d programs %d textures %d "
 +               "(created %d, reused %d) fbos created %d, internal memory %llu KiB free, maps %lld "
-+               "unmaps %lld costing %lld KiB",
++               "unmaps %lld costing %lld KiB, compiles %lld KiB, links %lld KiB",
 +               static_cast<long long>(seconds), perf.GetSpeed() * 100.0,
 +               perf.GetMaxSpeed() * 100.0, perf.GetFPS(), perf.GetVPS(),
 +               flexible / (1024 * 1024), static_cast<int>(Config::Get(Config::MAIN_CPU_CORE)),
 +               ps4_fault_count, ps4_gl_shaders, ps4_gl_programs, ps4_gl_textures,
 +               ps4_gl_texture_creations, ps4_gl_texture_reuses, ps4_gl_fbo_creations,
 +               ps4_internal_memory_free() / 1024, ps4_map_count, ps4_unmap_count,
-+               ps4_map_internal_bytes / 1024);
++               ps4_map_internal_bytes / 1024, ps4_compile_internal_bytes / 1024,
++               ps4_link_internal_bytes / 1024);
 +      BootTrace(line);
 +      LogProfile();
 +    }
@@ -2597,7 +2599,7 @@ index ce1b7a5..941b744 100644
    g_backend_info.bSupportsPipelineCacheData = supports_glsl_cache;
  
 diff --git a/Source/Core/VideoBackends/OGL/OGLGfx.cpp b/Source/Core/VideoBackends/OGL/OGLGfx.cpp
-index ff5402b..b674b6b 100644
+index ff5402b..538fa6c 100644
 --- a/Source/Core/VideoBackends/OGL/OGLGfx.cpp
 +++ b/Source/Core/VideoBackends/OGL/OGLGfx.cpp
 @@ -2,6 +2,7 @@
@@ -3329,7 +3331,7 @@ index ff5402b..b674b6b 100644
  }
  
  void OGLGfx::DispatchComputeShader(const AbstractShader* shader, u32 groupsize_x, u32 groupsize_y,
-@@ -415,8 +1083,81 @@ bool OGLGfx::BindBackbuffer(const ClearColor& clear_color)
+@@ -415,8 +1083,65 @@ bool OGLGfx::BindBackbuffer(const ClearColor& clear_color)
    return true;
  }
  
@@ -3364,22 +3366,7 @@ index ff5402b..b674b6b 100644
  {
 +  PS4_PROFILE(PS4_PROF_PRESENT);
 +#ifdef __ORBIS__
-+  // Port measurement: libkernel internal memory across the first presented frames.
-+  {
-+    static int s_presents = 0;
-+    static unsigned long long s_last = 0;
-+    const unsigned long long now = ps4_internal_memory_free();
-+    if (s_presents < 12 || s_presents % 600 == 0)
-+    {
-+      char line[128];
-+      snprintf(line, sizeof(line), "present #%d: internal memory %llu KiB (%+lld KiB since last)",
-+               s_presents, now / 1024,
-+               s_last ? (static_cast<long long>(now) - static_cast<long long>(s_last)) / 1024 : 0);
-+      ps4_boot_trace(line);
-+    }
-+    s_presents++;
-+    s_last = now;
-+  }
++  // (Internal memory is sampled by the DolphinNoGUI monitor only: the query is expensive.)
 +#endif
 +#ifdef __ORBIS__
 +  // Delete what was released at least 2 presented frames ago (see PS4DeferDelete): long
@@ -3392,10 +3379,9 @@ index ff5402b..b674b6b 100644
 +      glDeleteFramebuffers(1, &pending.framebuffer);
 +    if (pending.texture && pending.recycle)
 +    {
-+      // Keep up to 16 released textures for reuse: a live GL texture holds ~20 KiB of the
-+      // ~12.7 MiB libkernel internal memory; delete the oldest beyond that.
++      // Keep up to 96 released textures for reuse; delete the oldest beyond that.
 +      m_ps4_free_textures.emplace_back(pending.key, pending.texture);
-+      if (m_ps4_free_textures.size() > 16)
++      if (m_ps4_free_textures.size() > 96)
 +      {
 +        glDeleteTextures(1, &m_ps4_free_textures.front().second);
 +        m_ps4_free_textures.erase(m_ps4_free_textures.begin());
@@ -3411,7 +3397,7 @@ index ff5402b..b674b6b 100644
    if (g_ogl_config.bSupportsDebug)
    {
      if (Common::Log::LogManager::GetInstance()->IsEnabled(Common::Log::LogType::HOST_GPU,
-@@ -618,6 +1359,7 @@ void OGLGfx::ApplyBlendingState(const BlendingState state)
+@@ -618,6 +1343,7 @@ void OGLGfx::ApplyBlendingState(const BlendingState state)
  
  void OGLGfx::SetPipeline(const AbstractPipeline* pipeline)
  {
@@ -3419,7 +3405,7 @@ index ff5402b..b674b6b 100644
    if (m_current_pipeline == pipeline)
      return;
  
-@@ -733,3 +1475,133 @@ SurfaceInfo OGLGfx::GetSurfaceInfo() const
+@@ -733,3 +1459,133 @@ SurfaceInfo OGLGfx::GetSurfaceInfo() const
  }
  
  }  // namespace OGL
@@ -4252,7 +4238,7 @@ index 55a3ef1..457fed0 100644
  };
  }  // namespace OGL
 diff --git a/Source/Core/VideoBackends/OGL/ProgramShaderCache.cpp b/Source/Core/VideoBackends/OGL/ProgramShaderCache.cpp
-index 1dfd026..e36d997 100644
+index 1dfd026..d9f1150 100644
 --- a/Source/Core/VideoBackends/OGL/ProgramShaderCache.cpp
 +++ b/Source/Core/VideoBackends/OGL/ProgramShaderCache.cpp
 @@ -2,12 +2,14 @@
@@ -4270,7 +4256,7 @@ index 1dfd026..e36d997 100644
  
  #include <fmt/format.h>
  
-@@ -37,6 +39,18 @@
+@@ -37,6 +39,21 @@
  #include "VideoCommon/VideoBackendBase.h"
  #include "VideoCommon/VideoConfig.h"
  
@@ -4278,6 +4264,9 @@ index 1dfd026..e36d997 100644
 +#include <cstdio>
 +extern "C" void ps4_boot_trace(const char* stage);  // DolphinPS4 port/ps4_crashlog.cpp
 +extern "C" int ps4_render_diagnostics;  // OGLGfx.cpp, ps4.ini diagnostics=on
++// Internal memory taken by all shader compiles / program links so far (monitor line).
++extern "C" long long ps4_compile_internal_bytes, ps4_link_internal_bytes;
++long long ps4_compile_internal_bytes = 0, ps4_link_internal_bytes = 0;
 +// ps4.ini uniform_upload=subdata (default) or map, set by DolphinNoGUI.
 +extern "C" int ps4_uniform_upload_map;
 +int ps4_uniform_upload_map = 0;
@@ -4289,7 +4278,7 @@ index 1dfd026..e36d997 100644
  namespace OGL
  {
  u32 ProgramShaderCache::s_ubo_buffer_size;
-@@ -104,12 +118,46 @@ void SHADER::SetProgramVariables()
+@@ -104,12 +121,46 @@ void SHADER::SetProgramVariables()
      glUniformBlockBinding(glprogid, PSBlock_id, 1);
    if (VSBlock_id != -1)
      glUniformBlockBinding(glprogid, VSBlock_id, 2);
@@ -4336,7 +4325,7 @@ index 1dfd026..e36d997 100644
    for (int a = 0; a < 8; ++a)
    {
      // Still need to get sampler locations since we aren't binding them statically in the shaders
-@@ -221,12 +269,229 @@ u32 ProgramShaderCache::GetUniformBufferAlignment()
+@@ -221,12 +272,229 @@ u32 ProgramShaderCache::GetUniformBufferAlignment()
    return s_ubo_align;
  }
  
@@ -4566,7 +4555,7 @@ index 1dfd026..e36d997 100644
    if (pixel_shader_manager.dirty || vertex_shader_manager.dirty || geometry_shader_manager.dirty ||
        pixel_shader_manager.custom_constants_dirty)
    {
-@@ -280,6 +545,13 @@ void ProgramShaderCache::UploadConstants()
+@@ -280,6 +548,13 @@ void ProgramShaderCache::UploadConstants()
  
  void ProgramShaderCache::UploadConstants(const void* data, u32 data_size)
  {
@@ -4580,7 +4569,7 @@ index 1dfd026..e36d997 100644
    // allocate and copy
    const u32 alloc_size = Common::AlignUp(data_size, s_ubo_align);
    auto buffer = s_buffer->Map(alloc_size, s_ubo_align);
-@@ -328,8 +600,32 @@ bool ProgramShaderCache::CompileComputeShader(SHADER& shader, std::string_view c
+@@ -328,8 +603,32 @@ bool ProgramShaderCache::CompileComputeShader(SHADER& shader, std::string_view c
  
  GLuint ProgramShaderCache::CompileSingleShader(GLenum type, std::string_view code)
  {
@@ -4613,7 +4602,7 @@ index 1dfd026..e36d997 100644
    constexpr GLsizei num_strings = 2;
    const std::array<const char*, num_strings> src{
        s_glsl_header.data(),
-@@ -341,7 +637,51 @@ GLuint ProgramShaderCache::CompileSingleShader(GLenum type, std::string_view cod
+@@ -341,7 +640,53 @@ GLuint ProgramShaderCache::CompileSingleShader(GLenum type, std::string_view cod
    };
  
    glShaderSource(result, num_strings, src.data(), src_sizes.data());
@@ -4625,11 +4614,13 @@ index 1dfd026..e36d997 100644
 +  {
 +    // Port measurement: how much libkernel internal memory does a compile keep?
 +    static int s_logged = 0;
++    const unsigned long long after = ps4_internal_memory_free();
++    ps4_compile_internal_bytes += static_cast<long long>(ps4_free_before) -
++                                  static_cast<long long>(after);
 +    if (s_logged++ < 40)
 +    {
 +      GLint ok = 0;
 +      glGetShaderiv(result, GL_COMPILE_STATUS, &ok);
-+      const unsigned long long after = ps4_internal_memory_free();
 +      char line[160];
 +      snprintf(line, sizeof(line),
 +               "compile %s %zu bytes: internal memory %llu -> %llu KiB (%+lld KiB), status %d",
@@ -4665,7 +4656,7 @@ index 1dfd026..e36d997 100644
  
    if (!CheckShaderCompileResult(result, type, code))
    {
-@@ -571,6 +911,9 @@ PipelineProgram* ProgramShaderCache::GetPipelineProgram(const GLVertexFormat* ve
+@@ -571,6 +916,9 @@ PipelineProgram* ProgramShaderCache::GetPipelineProgram(const GLVertexFormat* ve
    std::unique_ptr<PipelineProgram> prog = std::make_unique<PipelineProgram>();
    prog->key = key;
    prog->shader.glprogid = glCreateProgram();
@@ -4675,7 +4666,7 @@ index 1dfd026..e36d997 100644
  
    // Use the cache data, if present. If this fails, we want to return an error, so the shader cache
    // doesn't attempt to use the same binary data in the future.
-@@ -620,7 +963,28 @@ PipelineProgram* ProgramShaderCache::GetPipelineProgram(const GLVertexFormat* ve
+@@ -620,7 +968,30 @@ PipelineProgram* ProgramShaderCache::GetPipelineProgram(const GLVertexFormat* ve
  
      // Link program.
      prog->shader.SetProgramBindings(false);
@@ -4688,11 +4679,13 @@ index 1dfd026..e36d997 100644
 +      glLinkProgram(prog->shader.glprogid);
 +#ifdef __ORBIS__
 +      static int s_logged = 0;
++      const unsigned long long after = ps4_internal_memory_free();
++      ps4_link_internal_bytes += static_cast<long long>(ps4_free_before) -
++                                 static_cast<long long>(after);
 +      if (s_logged++ < 40)
 +      {
 +        GLint ok = 0;
 +        glGetProgramiv(prog->shader.glprogid, GL_LINK_STATUS, &ok);
-+        const unsigned long long after = ps4_internal_memory_free();
 +        char line[160];
 +        snprintf(line, sizeof(line), "link: internal memory %llu -> %llu KiB (%+lld KiB), status %d",
 +                 ps4_free_before / 1024, after / 1024,
@@ -4705,7 +4698,7 @@ index 1dfd026..e36d997 100644
  
      // Restore VAO binding after linking.
      if (!s_is_shared_context && vao != s_last_VAO)
-@@ -849,6 +1213,10 @@ void ProgramShaderCache::CreateHeader()
+@@ -849,6 +1220,10 @@ void ProgramShaderCache::CreateHeader()
        "#define int4 ivec4\n"
        "#define frac fract\n"
        "#define lerp mix\n"
@@ -5354,7 +5347,7 @@ index 41d05f3..e1958ed 100644
    if (m_onscreen_ui)
    {
 diff --git a/Source/Core/VideoCommon/TextureCacheBase.cpp b/Source/Core/VideoCommon/TextureCacheBase.cpp
-index 4e4567d..beb1ff6 100644
+index 4e4567d..92d5dbb 100644
 --- a/Source/Core/VideoCommon/TextureCacheBase.cpp
 +++ b/Source/Core/VideoCommon/TextureCacheBase.cpp
 @@ -2,6 +2,7 @@
@@ -5365,20 +5358,7 @@ index 4e4567d..beb1ff6 100644
  
  #include <algorithm>
  #include <chrono>
-@@ -60,7 +61,12 @@
- 
- static const u64 TEXHASH_INVALID = 0;
- // Sonic the Fighters (inside Sonic Gems Collection) loops a 64 frames animation
-+#ifdef __ORBIS__
-+// PS4: every live texture costs ~20 KiB of a ~12.7 MiB system pool (Piglet); keep fewer around.
-+static const int TEXTURE_KILL_THRESHOLD = 32;
-+#else
- static const int TEXTURE_KILL_THRESHOLD = 64;
-+#endif
- static const int TEXTURE_POOL_KILL_THRESHOLD = 3;
- 
- static int xfb_count = 0;
-@@ -1241,6 +1247,7 @@ private:
+@@ -1241,6 +1242,7 @@ private:
  
  TCacheEntry* TextureCacheBase::Load(u32 stage)
  {
@@ -5386,7 +5366,7 @@ index 4e4567d..beb1ff6 100644
    if (auto entry = LoadImpl(stage, false))
    {
      if (!DidLinkedAssetsChange(*entry))
-@@ -2151,6 +2158,7 @@ void TextureCacheBase::CopyRenderTargetToTexture(
+@@ -2151,6 +2153,7 @@ void TextureCacheBase::CopyRenderTargetToTexture(
      float gamma, bool clamp_top, bool clamp_bottom,
      const CopyFilterCoefficients::Values& filter_coefficients)
  {
