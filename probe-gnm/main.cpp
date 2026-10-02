@@ -37,8 +37,10 @@ __attribute__((format(printf, 1, 2))) void Log(const char* fmt, ...) {
     va_start(args, fmt);
     const int n = vsnprintf(line, sizeof(line), fmt, args);
     va_end(args);
-    if (g_log >= 0 && n > 0)
+    if (g_log >= 0 && n > 0) {
         write(g_log, line, static_cast<size_t>(n < 255 ? n : 255));
+        fsync(g_log);  // the process may be killed right after: keep every line
+    }
 }
 
 constexpr uint32_t kWidth = 1920, kHeight = 1080;
@@ -104,6 +106,7 @@ struct CommandBuffer {
 };
 
 bool SubmitAndFlip(CommandBuffer& cb, int video, uint32_t buffer, const char* what) {
+    Log("%s: submitting\n", what);
     void* dcb[1] = {cb.base};
     uint32_t dcb_size[1] = {cb.Bytes()};
     void* ccb[1] = {nullptr};
@@ -131,6 +134,8 @@ int main() {
     g_log = open("/data/DolphinPS4/gnm-probe.log", O_WRONLY | O_CREAT | O_TRUNC, 0666);
     Log("GNM probe start\n");
 
+    Log("direct memory size %zu MiB\n", sceKernelGetDirectMemorySize() >> 20);
+    Log("calling sceVideoOutOpen\n");
     const int video = sceVideoOutOpen(0xFF, 0, 0, nullptr);
     Log("sceVideoOutOpen = %#x\n", video);
     if (video < 0)
@@ -145,6 +150,7 @@ int main() {
     OrbisVideoOutBufferAttribute attribute;
     sceVideoOutSetBufferAttribute(&attribute, ORBIS_VIDEO_OUT_PIXEL_FORMAT_A8B8G8R8_SRGB,
                                   ORBIS_VIDEO_OUT_TILING_MODE_LINEAR, 0, kWidth, kHeight, kWidth);
+    Log("calling sceVideoOutRegisterBuffers\n");
     const int32_t registered = sceVideoOutRegisterBuffers(video, 0, frames, 2, &attribute);
     Log("sceVideoOutRegisterBuffers = %#x\n", registered);
     if (registered < 0)

@@ -11,7 +11,8 @@ HOST="ftp://${PS4_HOST:-192.168.0.90}:${PS4_FTP_PORT:-2121}"
 
 rm -rf "$build"
 ps4_cmake -S "$HERE/../probe-gnm" -B "$build" -G "Unix Makefiles" \
-    -DCMAKE_TOOLCHAIN_FILE="$HERE/../toolchain/ps4-love-modern.cmake" >/dev/null
+    -DCMAKE_TOOLCHAIN_FILE="$HERE/../toolchain/ps4-love-modern.cmake" \
+    -DPS4_MALLOC_REPLACE=OFF >/dev/null
 make -C "$build" -j"${JOBS:-4}" 2>&1 | grep -E "error|check-oelf|Error" || true
 [ -f "$build/gnm_probe_eboot/eboot.bin" ] || { echo "gnm probe: build failed" >&2; exit 1; }
 
