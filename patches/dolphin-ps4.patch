@@ -728,10 +728,10 @@ index 1a3093c..24cbe83 100644
    void* m_reserved_region = nullptr;
 diff --git a/Source/Core/Common/MemArenaPS4.cpp b/Source/Core/Common/MemArenaPS4.cpp
 new file mode 100644
-index 0000000..8d1e0e0
+index 0000000..49ed2ff
 --- /dev/null
 +++ b/Source/Core/Common/MemArenaPS4.cpp
-@@ -0,0 +1,246 @@
+@@ -0,0 +1,266 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -752,6 +752,8 @@ index 0000000..8d1e0e0
 +#include <sys/mman.h>
 +#include <sys/types.h>
 +
++#include <cstdio>
++
 +#include "Common/Assert.h"
 +#include "Common/CommonTypes.h"
 +#include "Common/Logging/Log.h"
@@ -769,6 +771,9 @@ index 0000000..8d1e0e0
 +                                     size_t alignment);
 +int32_t sceKernelMunmap(void* address, size_t length);
 +int32_t sceKernelMprotect(const void* address, size_t length, int32_t protection);
++int32_t sceKernelEnableDmemAliasing();
++int32_t sceKernelEnableDmemAliasing2();
++void ps4_boot_trace(const char* line);  // DolphinPS4 port/ps4_crashlog.cpp
 +}
 +
 +namespace
@@ -798,6 +803,21 @@ index 0000000..8d1e0e0
 +
 +void MemArena::GrabSHMSegment(size_t size, std::string_view base_name)
 +{
++  // Fastmem maps the emulated RAM's direct memory a second time inside the fastmem region.
++  // Under the plain homebrew identity the kernel refuses that (EBUSY) until direct memory
++  // aliasing is enabled for the process.
++  static bool s_aliasing_enabled = false;
++  if (!s_aliasing_enabled)
++  {
++    s_aliasing_enabled = true;
++    const int32_t r1 = sceKernelEnableDmemAliasing();
++    const int32_t r2 = r1 == 0 ? 0 : sceKernelEnableDmemAliasing2();
++    char line[96];
++    snprintf(line, sizeof(line), "direct memory aliasing: %#x, aliasing2: %#x\n",
++             static_cast<u32>(r1), static_cast<u32>(r2));
++    ps4_boot_trace(line);
++  }
++
 +  const size_t aligned_size = AlignUp(size, PS4_PAGE_SIZE);
 +  off_t physical = 0;
 +  const int32_t result =
