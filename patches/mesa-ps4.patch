@@ -140,7 +140,7 @@ index 3696bad..ec3503d 100644
  if with_symbols_check
    test(
 diff --git a/src/amd/vulkan/radv_cmd_buffer.c b/src/amd/vulkan/radv_cmd_buffer.c
-index 405023b..9aa348a 100644
+index 405023b..46373c4 100644
 --- a/src/amd/vulkan/radv_cmd_buffer.c
 +++ b/src/amd/vulkan/radv_cmd_buffer.c
 @@ -1707,7 +1707,7 @@ radv_cmd_buffer_after_draw(struct radv_cmd_buffer *cmd_buffer, enum radv_cmd_flu
@@ -170,6 +170,23 @@ index 405023b..9aa348a 100644
        radv_cmd_buffer_trace_emit(cmd_buffer);
  
     if (cmd_buffer->state.flush_bits & RADV_CMD_FLAG_INV_L2)
+@@ -14927,6 +14927,16 @@ radv_emit_set_predication_state(struct radv_cmd_buffer *cmd_buffer, bool draw_vi
+    struct radv_cmd_stream *cs = cmd_buffer->cs;
+    uint32_t op = 0;
+ 
++#ifdef __PS4__
++   /* The PS4's CP firmware hangs on SET_PREDICATION BOOL64 (Dolphin's first frame stopped at
++    * the first one). Without predication the predicated passes (fast clear eliminate, etc.)
++    * always run, which is correct; VK_EXT_conditional_rendering isn't exposed. */
++   (void)pdev;
++   (void)cs;
++   (void)op;
++   return;
++#endif
++
+    radeon_check_space(device->ws, cs->b, 4);
+ 
+    if (va) {
 diff --git a/src/amd/vulkan/radv_device.c b/src/amd/vulkan/radv_device.c
 index 2323aba..39ab1f5 100644
 --- a/src/amd/vulkan/radv_device.c
@@ -376,7 +393,7 @@ index 796eb28..374a752 100644
  
     if (instance->debug_flags & RADV_DEBUG_STARTUP)
 diff --git a/src/amd/vulkan/radv_physical_device.c b/src/amd/vulkan/radv_physical_device.c
-index 86db276..3299481 100644
+index 86db276..411bd7f 100644
 --- a/src/amd/vulkan/radv_physical_device.c
 +++ b/src/amd/vulkan/radv_physical_device.c
 @@ -53,6 +53,13 @@ typedef void *drmDevicePtr;
@@ -393,7 +410,31 @@ index 86db276..3299481 100644
  static bool
  radv_perf_query_supported(const struct radv_physical_device *pdev)
  {
-@@ -2289,6 +2296,7 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
+@@ -738,7 +745,11 @@ radv_physical_device_get_supported_extensions(const struct radv_physical_device
+       .EXT_buffer_device_address = true,
+       .EXT_calibrated_timestamps = radv_calibrated_timestamps_enabled(pdev),
+       .EXT_color_write_enable = true,
++#ifdef __PS4__
++      .EXT_conditional_rendering = false, /* no SET_PREDICATION (radv_cmd_buffer.c) */
++#else
+       .EXT_conditional_rendering = true,
++#endif
+       .EXT_conservative_rasterization = pdev->info.gfx_level >= GFX9,
+       .EXT_custom_border_color = true,
+       .EXT_custom_resolve = true,
+@@ -1043,7 +1054,11 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
+       .pushDescriptor = true,
+ 
+       /* VK_EXT_conditional_rendering */
++#ifdef __PS4__
++      .conditionalRendering = false,
++#else
+       .conditionalRendering = true,
++#endif
+       .inheritedConditionalRendering = false,
+ 
+       /* VK_KHR_vertex_attribute_divisor */
+@@ -2289,6 +2304,7 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
     return VK_ERROR_INCOMPATIBLE_DRIVER;
  #else
     VkResult result;
@@ -401,7 +442,7 @@ index 86db276..3299481 100644
     int fd = -1;
     int master_fd = -1;
     bool is_virtio = false;
-@@ -2349,11 +2357,16 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
+@@ -2349,11 +2365,16 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
     vk_physical_device_dispatch_table_from_entrypoints(&dispatch_table, &wsi_physical_device_entrypoints, false);
  
     result = vk_physical_device_init(&pdev->vk, &instance->vk, NULL, NULL, NULL, &dispatch_table);
@@ -418,7 +459,7 @@ index 86db276..3299481 100644
        result = radv_amdgpu_winsys_create(fd, instance->debug_flags, instance->perftest_flags, is_virtio, &pdev->ws);
  
        if (result != VK_SUCCESS) {
-@@ -2364,7 +2377,7 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
+@@ -2364,7 +2385,7 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
        pdev->vk.supported_sync_types = pdev->ws->get_sync_types(pdev->ws);
        pdev->ws->query_info(pdev->ws, &pdev->info);
  
@@ -427,7 +468,7 @@ index 86db276..3299481 100644
           master_fd = open(drm_device->nodes[DRM_NODE_PRIMARY], O_RDWR | O_CLOEXEC);
           if (master_fd >= 0) {
              uint32_t accel_working = 0;
-@@ -2590,19 +2603,24 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
+@@ -2590,19 +2611,24 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
     return VK_SUCCESS;
  
  fail_perfcounters:
