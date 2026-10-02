@@ -9,6 +9,7 @@
 // PM4 formats: AMD CIK (GCN 1.1) as used by Mesa's radeonsi; GNM signatures: shadPS4.
 
 #include <fcntl.h>
+#include <signal.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -157,11 +158,22 @@ struct CommandBuffer {
             addr += chunk;
         }
     }
+    // Gnm's prepareFlip: sceGnmSubmitAndFlipCommandBuffers requires the last 64 dwords of the
+    // last DCB to be a NOP (0xC03E1000) with a label (0x68750777 = plain flip), which it rewrites
+    // into the flip's end-of-pipe write (disassembly of libSceGnmDriver; it reads
+    // dcb[size_dwords - 64] unchecked, so a shorter DCB faults - v01.06's crash).
+    void PrepareFlip() {
+        *cur++ = Pm4(kOpNop, 64 - 1);
+        *cur++ = 0x68750777;
+        for (int i = 0; i < 62; i++)
+            *cur++ = 0;
+    }
     uint32_t Bytes() const { return static_cast<uint32_t>((cur - base) * 4); }
 };
 
 bool SubmitAndFlip(CommandBuffer& cb, int video, uint32_t buffer, const char* what) {
-    Log("%s: submitting\n", what);
+    cb.PrepareFlip();
+    Log("%s: submitting %u bytes\n", what, cb.Bytes());
     void* dcb[1] = {cb.base};
     uint32_t dcb_size[1] = {cb.Bytes()};
     void* ccb[1] = {nullptr};
@@ -169,9 +181,8 @@ bool SubmitAndFlip(CommandBuffer& cb, int video, uint32_t buffer, const char* wh
     const int32_t r = sceGnmSubmitAndFlipCommandBuffers(1, dcb, dcb_size, ccb, ccb_size,
                                                         static_cast<uint32_t>(video), buffer,
                                                         1 /* VSYNC */, 0);
-    const int32_t done = sceGnmSubmitDone();
-    Log("%s: submit+flip %u bytes to buffer %u = %#x, SubmitDone = %#x\n", what, cb.Bytes(),
-        buffer, r, done);
+    Log("%s: submit+flip to buffer %u = %#x\n", what, buffer, r);
+    Log("%s: SubmitDone = %#x\n", what, sceGnmSubmitDone());
     return r == 0;
 }
 
@@ -181,6 +192,35 @@ void Wait(int seconds) {
         usleep(100 * 1000);
         sceGnmSubmitDone();
     }
+}
+
+uintptr_t g_gnm_base = 0;
+
+// Logs a fault's address and rip (rip also relative to libSceGnmDriver's text, to match the
+// disassembly). PS4 ucontext: mcontext at word 8, rip word 28.
+void OnFault(int sig, siginfo_t* info, void* context) {
+    const uint64_t rip = static_cast<uint64_t*>(context)[28];
+    Log("signal %d at address %p, rip %#llx (gnm +%#llx)\n", sig, info->si_addr,
+        static_cast<unsigned long long>(rip),
+        static_cast<unsigned long long>(rip - g_gnm_base));
+    _exit(1);
+}
+
+void InstallFaultHandler(int32_t gnm) {
+    OrbisKernelModuleInfo module;
+    memset(&module, 0, sizeof(module));
+    module.size = sizeof(module);
+    if (sceKernelGetModuleInfo(static_cast<OrbisKernelModule>(gnm), &module) == 0) {
+        g_gnm_base = reinterpret_cast<uintptr_t>(module.segmentInfo[0].address);
+        Log("libSceGnmDriver text at %#llx\n", static_cast<unsigned long long>(g_gnm_base));
+    }
+    struct sigaction action;
+    memset(&action, 0, sizeof(action));
+    action.__sa_handler.__sa_sigaction = OnFault;  // OpenOrbis signal.h: sa_sigaction misdefined
+    action.sa_flags = SA_SIGINFO;
+    const int signals[] = {SIGSEGV, SIGBUS, SIGILL, SIGFPE};
+    for (int sig : signals)
+        sigaction(sig, &action, nullptr);
 }
 
 }  // namespace
@@ -210,6 +250,7 @@ int main() {
         Log("no GNM driver, giving up\n");
         return 1;
     }
+    InstallFaultHandler(gnm);
     Log("calling sceUserServiceInitialize\n");
     Log("sceUserServiceInitialize = %#x\n", sceUserServiceInitialize(nullptr));
     int32_t user = -1;
