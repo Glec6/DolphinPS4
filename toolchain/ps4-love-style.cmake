@@ -28,6 +28,22 @@ execute_process(
 if(NOT _ps4_crt1_result EQUAL 0)
   message(FATAL_ERROR "patch-crt1.sh failed: ${_ps4_crt1_result}")
 endif()
+# That had no effect on hardware. Instead (PS4_MALLOC_REPLACE, default ON) link port/ps4_crt1.S,
+# a copy of crt1.o whose libc malloc-replacement table sends every malloc of the process -
+# system modules included - to our heap (ps4_replace_* in port/ps4_runtime.cpp).
+option(PS4_MALLOC_REPLACE "Route all mallocs, system modules included, to the app heap" ON)
+if(PS4_MALLOC_REPLACE)
+  set(PS4_CRT1 ${CMAKE_BINARY_DIR}/ps4-crt1-malloc-replace.o)
+  execute_process(
+    COMMAND ${CMAKE_C_COMPILER} -target x86_64-pc-freebsd12-elf -c
+            ${CMAKE_CURRENT_LIST_DIR}/../port/ps4_crt1.S -o ${PS4_CRT1}
+    RESULT_VARIABLE _ps4_crt1_result)
+  if(NOT _ps4_crt1_result EQUAL 0)
+    message(FATAL_ERROR "assembling port/ps4_crt1.S failed: ${_ps4_crt1_result}")
+  endif()
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+               ${CMAKE_CURRENT_LIST_DIR}/../port/ps4_crt1.S)
+endif()
 foreach(_lang C CXX)
   string(REPLACE "${OPENORBIS}/lib/crt1.o" "${PS4_CRT1}" CMAKE_${_lang}_LINK_EXECUTABLE
                  "${CMAKE_${_lang}_LINK_EXECUTABLE}")

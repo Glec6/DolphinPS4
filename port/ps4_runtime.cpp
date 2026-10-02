@@ -45,6 +45,10 @@ void mspace_free(mspace msp, void* mem);
 void* mspace_calloc(mspace msp, size_t n_elements, size_t elem_size);
 void* mspace_realloc(mspace msp, void* mem, size_t newsize);
 void* mspace_memalign(mspace msp, size_t alignment, size_t bytes);
+size_t mspace_usable_size(const void* mem);
+size_t mspace_footprint(mspace msp);
+size_t mspace_max_footprint(mspace msp);
+void* memcpy(void* dst, const void* src, size_t n);
 
 // port/ps4_crashlog.cpp (weak: a program may link without it).
 __attribute__((weak)) void ps4_boot_trace(const char* stage);
@@ -356,6 +360,62 @@ void* __wrap_memalign(size_t alignment, size_t size) {
 
 // posix_memalign and aligned_alloc in libc.a are built on __memalign.
 void* __wrap___memalign(size_t alignment, size_t size) { return __wrap_memalign(alignment, size); }
+
+// System libc malloc replacement (port/ps4_crt1.S, _sceLibcMallocReplace): the system libc
+// forwards every malloc of the process here - Sony's system modules too (Piglet, its shader
+// compiler) - instead of serving it from its own ~12.7 MiB heap, which they exhausted.
+int ps4_replace_malloc_init(void) {
+    getHeap();
+    return 0;
+}
+int ps4_replace_malloc_finalize(void) { return 0; }
+void* ps4_replace_malloc(size_t size) { return __wrap_malloc(size); }
+void ps4_replace_free(void* ptr) { __wrap_free(ptr); }
+void* ps4_replace_calloc(size_t nelem, size_t size) { return __wrap_calloc(nelem, size); }
+void* ps4_replace_realloc(void* ptr, size_t size) { return __wrap_realloc(ptr, size); }
+void* ps4_replace_memalign(size_t boundary, size_t size) { return __wrap_memalign(boundary, size); }
+void* ps4_replace_reallocalign(void* ptr, size_t size, size_t boundary) {
+    if (!ptr)
+        return __wrap_memalign(boundary, size);
+    if (size == 0) {
+        __wrap_free(ptr);
+        return nullptr;
+    }
+    void* p = __wrap_memalign(boundary, size);
+    if (!p)
+        return nullptr;
+    const size_t old_size = mspace_usable_size(ptr);
+    memcpy(p, ptr, old_size < size ? old_size : size);
+    __wrap_free(ptr);
+    return p;
+}
+int ps4_replace_posix_memalign(void** out, size_t boundary, size_t size) {
+    void* p = __wrap_memalign(boundary, size);
+    if (!p)
+        return 12;  // ENOMEM
+    *out = p;
+    return 0;
+}
+// SceLibcMallocManagedSize: u16 size, u16 version, u32 reserved, then 4 sizes. Report the heap.
+struct MallocManagedSize {
+    uint16_t size;
+    uint16_t version;
+    uint32_t reserved;
+    size_t max_system_size, current_system_size, max_inuse_size, current_inuse_size;
+};
+int ps4_replace_malloc_stats(void* out) {
+    auto* stats = static_cast<MallocManagedSize*>(out);
+    if (!stats)
+        return 0x80020016;  // EINVAL
+    const size_t footprint = mspace_footprint(getHeap());
+    stats->max_system_size = mspace_max_footprint(getHeap());
+    stats->current_system_size = footprint;
+    stats->max_inuse_size = footprint;
+    stats->current_inuse_size = footprint;
+    return 0;
+}
+int ps4_replace_malloc_stats_fast(void* out) { return ps4_replace_malloc_stats(out); }
+size_t ps4_replace_malloc_usable_size(void* ptr) { return ptr ? mspace_usable_size(ptr) : 0; }
 
 // Large anonymous mmaps (--wrap=mmap): Dolphin's JIT code buffers, DSP ARAM, FIFO, ... would
 // otherwise come out of the regular flexible memory pool (255 MiB), which Piglet (OpenGL ES)
