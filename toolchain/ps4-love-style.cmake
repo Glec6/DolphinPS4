@@ -95,6 +95,24 @@ string(APPEND CMAKE_EXE_LINKER_FLAGS " --wrap=mmap")
 set(PS4_PAID "0x3100000000000002" CACHE STRING "Program authority ID of eboot.bin")
 set(PS4_AUTH_INFO "000000000000000000000000001C004000FF000000000080000000000000000000000000000000000000008000400040000000000000008000000000000000080040FFFF000000F000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000")
 
+# Mesa's RADV Vulkan driver on GNM (scripts/build-mesa.sh), linked into <target>. Whole archives,
+# as Mesa's own shared-library link does: the dispatch tables refer to entry points through weak
+# symbols, which don't pull archive members (they'd silently be NULL). libvulkan_radeon.a
+# already contains the Vulkan runtime and WSI objects.
+set(PS4_MESA_BUILD "$ENV{HOME}/dolphinps4-build/build/mesa" CACHE PATH "Mesa PS4 build directory")
+function(ps4_link_mesa target)
+    set(libs
+        src/amd/vulkan/libvulkan_radeon.a src/amd/common/libamd_common.a
+        src/amd/compiler/libaco.a src/amd/addrlib/libaddrlib.a src/vulkan/util/libvulkan_util.a
+        src/compiler/spirv/libvtn.a src/compiler/nir/libnir.a src/compiler/libcompiler.a
+        src/util/libxmlconfig.a src/util/libmesa_util.a src/util/libmesa_util_simd.a
+        src/util/libmesa_util_clflush.a src/util/libmesa_util_clflushopt.a src/util/libparson.a
+        src/util/blake3/libblake3.a src/c11/impl/libmesa_util_c11.a)
+    list(TRANSFORM libs PREPEND "${PS4_MESA_BUILD}/")
+    # ps4.cmake links with ld.lld directly: raw linker flags.
+    target_link_libraries(${target} PRIVATE --whole-archive ${libs} --no-whole-archive)
+endfunction()
+
 # ELF -> <binary dir>/<target>_eboot/eboot.bin (fake SELF), then check the result: PacBrew's
 # create-fself (Nov 2024) predates OpenOrbis create-fself 626d440, and depending on the size of
 # .data.rel.ro it emits the data PT_LOAD twice, which the console rejects at launch
