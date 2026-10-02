@@ -125,8 +125,10 @@ struct ac_drm_device {
    /* Statistics for the app's monitor (ac_ps4_get_stats). */
    uint64_t bo_bytes, bo_count;
 
+   /* Handle table. ps4_bo() reads it without the lock (from any thread, e.g. Dolphin's shader
+    * compiler threads), so a full table is copied, never reallocated: old tables stay valid. */
    struct amdgpu_bo **bos;
-   unsigned num_bos;
+   unsigned num_bos, bos_cap;
 
    struct ps4_syncobj *syncobjs;
    unsigned num_syncobjs;
@@ -522,7 +524,9 @@ ac_drm_device_get_fd(ac_drm_device *dev)
 static struct amdgpu_bo *
 ps4_bo(ac_drm_device *dev, uint32_t handle)
 {
-   return handle && handle < dev->num_bos ? dev->bos[handle] : NULL;
+   const unsigned num = __atomic_load_n(&dev->num_bos, __ATOMIC_ACQUIRE);
+   struct amdgpu_bo **bos = __atomic_load_n(&dev->bos, __ATOMIC_ACQUIRE);
+   return handle && handle < num ? __atomic_load_n(&bos[handle], __ATOMIC_ACQUIRE) : NULL;
 }
 
 int
@@ -552,14 +556,20 @@ ac_drm_bo_alloc(ac_drm_device *dev, struct amdgpu_bo_alloc_request *req, ac_drm_
    }
 
    simple_mtx_lock(&dev->lock);
-   if ((dev->num_bos & (dev->num_bos - 1)) == 0 || dev->num_bos == 0) {
-      unsigned cap = MAX2(dev->num_bos * 2, 64);
-      dev->bos = realloc(dev->bos, cap * sizeof(*dev->bos));
+   if (dev->num_bos + 1 >= dev->bos_cap) {
+      const unsigned cap = MAX2(dev->bos_cap * 2, 1024);
+      struct amdgpu_bo **bigger = calloc(cap, sizeof(*bigger));
+      if (dev->num_bos)
+         memcpy(bigger, dev->bos, dev->num_bos * sizeof(*bigger));
+      /* The old table is deliberately kept (see struct ac_drm_device). */
+      __atomic_store_n(&dev->bos, bigger, __ATOMIC_RELEASE);
+      dev->bos_cap = cap;
    }
    if (dev->num_bos == 0)
-      dev->bos[dev->num_bos++] = NULL; /* handle 0 is invalid */
+      dev->num_bos = 1; /* handle 0 is invalid */
    bo->handle = dev->num_bos;
-   dev->bos[dev->num_bos++] = bo;
+   dev->bos[bo->handle] = bo;
+   __atomic_store_n(&dev->num_bos, bo->handle + 1, __ATOMIC_RELEASE);
    simple_mtx_unlock(&dev->lock);
 
    out->abo = bo;

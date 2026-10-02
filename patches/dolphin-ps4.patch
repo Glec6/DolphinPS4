@@ -4971,6 +4971,31 @@ index c82417e..c6cc3b0 100644
    // Do we have a swap chain to present?
    if (present_swap_chain != VK_NULL_HANDLE)
    {
+diff --git a/Source/Core/VideoBackends/Vulkan/VKMain.cpp b/Source/Core/VideoBackends/Vulkan/VKMain.cpp
+index 6338e52..8b389ce 100644
+--- a/Source/Core/VideoBackends/Vulkan/VKMain.cpp
++++ b/Source/Core/VideoBackends/Vulkan/VKMain.cpp
+@@ -16,6 +16,7 @@
+ #include "VideoBackends/Vulkan/VKVertexManager.h"
+ #include "VideoBackends/Vulkan/VulkanContext.h"
+ 
++#include "VideoCommon/ShaderCache.h"
+ #include "VideoCommon/TextureCacheBase.h"
+ #include "VideoCommon/VideoConfig.h"
+ 
+@@ -189,6 +190,12 @@ bool VideoBackend::Initialize(const WindowSystemInfo& wsi)
+ 
+   // Remaining classes are also dependent on object cache.
+   g_object_cache = std::make_unique<ObjectCache>();
++#ifdef __ORBIS__
++  VideoCommon::ShaderCache::s_ps4_save_backend_cache = [] {
++    if (g_object_cache)
++      g_object_cache->SavePipelineCache();
++  };
++#endif
+   if (!g_object_cache->Initialize())
+   {
+     PanicAlertFmt("Failed to initialize Vulkan object cache.");
 diff --git a/Source/Core/VideoBackends/Vulkan/VKSwapChain.cpp b/Source/Core/VideoBackends/Vulkan/VKSwapChain.cpp
 index 370e22d..b687963 100644
 --- a/Source/Core/VideoBackends/Vulkan/VKSwapChain.cpp
@@ -5866,20 +5891,22 @@ index 92f7c1f..3378a49 100644
      m_default_pixel_shader = g_gfx->CreateShaderFromSource(
          ShaderStage::Pixel, GetHeader(false) + default_pixel_shader_code + GetFooter(), nullptr,
 diff --git a/Source/Core/VideoCommon/Present.cpp b/Source/Core/VideoCommon/Present.cpp
-index 41d05f3..12e6ec3 100644
+index 41d05f3..9a0a8ac 100644
 --- a/Source/Core/VideoCommon/Present.cpp
 +++ b/Source/Core/VideoCommon/Present.cpp
-@@ -3,6 +3,9 @@
+@@ -3,6 +3,11 @@
  
  #include "VideoCommon/Present.h"
  
++#include "VideoCommon/ShaderCache.h"
++
 +#include <algorithm>
 +#include <cstdio>
 +#include <cstring>
  #include "Common/ChunkFile.h"
  #include "Core/Config/GraphicsSettings.h"
  #include "Core/Config/MainSettings.h"
-@@ -10,6 +13,7 @@
+@@ -10,6 +15,7 @@
  #include "Core/HW/VideoInterface.h"
  #include "Core/Host.h"
  #include "Core/System.h"
@@ -5887,7 +5914,7 @@ index 41d05f3..12e6ec3 100644
  
  #include "InputCommon/ControllerInterface/ControllerInterface.h"
  
-@@ -124,9 +128,12 @@ bool Presenter::Initialize()
+@@ -124,9 +130,12 @@ bool Presenter::Initialize()
      if (!m_post_processor->Initialize(m_backbuffer_format))
        return false;
  
@@ -5900,7 +5927,7 @@ index 41d05f3..12e6ec3 100644
  
      // Draw a blank frame (and complete OnScreenUI initialization)
      g_gfx->BindBackbuffer({{0.0f, 0.0f, 0.0f, 1.0f}});
-@@ -903,10 +910,84 @@ void Presenter::RenderXFBToScreen(const MathUtil::Rectangle<int>& target_rc,
+@@ -903,10 +912,84 @@ void Presenter::RenderXFBToScreen(const MathUtil::Rectangle<int>& target_rc,
    }
  }
  
@@ -5985,7 +6012,7 @@ index 41d05f3..12e6ec3 100644
    if (g_gfx->IsHeadless() || (!m_onscreen_ui && !m_xfb_entry))
      return;
  
-@@ -934,7 +1015,18 @@ void Presenter::Present(PresentInfo* present_info)
+@@ -934,7 +1017,18 @@ void Presenter::Present(PresentInfo* present_info)
    UpdateDrawRectangle();
  
    g_gfx->BeginUtilityDrawing();
@@ -6004,7 +6031,7 @@ index 41d05f3..12e6ec3 100644
  
    // Render the XFB to the screen.
    if (backbuffer_bound && m_xfb_entry)
-@@ -945,7 +1037,34 @@ void Presenter::Present(PresentInfo* present_info)
+@@ -945,7 +1039,39 @@ void Presenter::Present(PresentInfo* present_info)
      AdjustRectanglesToFitBounds(&render_target_rc, &render_source_rc, m_backbuffer_width,
                                  m_backbuffer_height);
      RenderXFBToScreen(render_target_rc, m_xfb_entry->texture.get(), render_source_rc);
@@ -6024,6 +6051,11 @@ index 41d05f3..12e6ec3 100644
 +#ifdef __ORBIS__
 +  // The seven-segment counter is drawn with GL scissored clears (OGLGfx.cpp); other backends
 +  // use Dolphin's own on-screen FPS/speed display (MainNoGUI.cpp).
++  // Save the shader caches every ~30 s (PS4 apps are killed, not exited).
++  static u32 s_ps4_presents = 0;
++  if (++s_ps4_presents % 1800 == 0 && g_shader_cache)
++    g_shader_cache->PS4FlushDiskCaches();
++
 +  if (backbuffer_bound && ps4_show_fps)
 +  {
 +    // Refreshed by the DolphinNoGUI monitor (PerformanceMetrics::UpdateStats) every 2 s.
@@ -6039,6 +6071,65 @@ index 41d05f3..12e6ec3 100644
  
    if (m_onscreen_ui)
    {
+diff --git a/Source/Core/VideoCommon/ShaderCache.cpp b/Source/Core/VideoCommon/ShaderCache.cpp
+index 2627656..6f0217f 100644
+--- a/Source/Core/VideoCommon/ShaderCache.cpp
++++ b/Source/Core/VideoCommon/ShaderCache.cpp
+@@ -865,6 +865,35 @@ void ShaderCache::LoadPipelineUIDCache()
+   INFO_LOG_FMT(VIDEO, "Read {} pipeline UIDs from {}", m_gx_pipeline_cache.size(), filename);
+ }
+ 
++#ifdef __ORBIS__
++void ShaderCache::PS4FlushDiskCaches()
++{
++  if (!g_ActiveConfig.bShaderCache)
++    return;
++  // Only when something new was compiled since the last flush.
++  static size_t s_last_count = 0;
++  const size_t count = m_vs_cache.shader_map.size() + m_gs_cache.shader_map.size() +
++                      m_ps_cache.shader_map.size() + m_uber_vs_cache.shader_map.size() +
++                      m_uber_ps_cache.shader_map.size() + m_gx_pipeline_cache.size() +
++                      m_gx_uber_pipeline_cache.size();
++  if (count == s_last_count)
++    return;
++  s_last_count = count;
++  m_vs_cache.disk_cache.Sync();
++  m_gs_cache.disk_cache.Sync();
++  m_ps_cache.disk_cache.Sync();
++  m_uber_vs_cache.disk_cache.Sync();
++  m_uber_ps_cache.disk_cache.Sync();
++  m_gx_pipeline_disk_cache.Sync();
++  m_gx_uber_pipeline_disk_cache.Sync();
++  if (m_gx_pipeline_uid_cache_file.IsOpen())
++    m_gx_pipeline_uid_cache_file.Flush();
++  if (s_ps4_save_backend_cache)
++    s_ps4_save_backend_cache();
++  INFO_LOG_FMT(VIDEO, "PS4: flushed shader caches ({} shaders and pipelines)", count);
++}
++#endif
++
+ void ShaderCache::ClosePipelineUIDCache()
+ {
+   // This is left as a method in case we need to append extra data to the file in the future.
+diff --git a/Source/Core/VideoCommon/ShaderCache.h b/Source/Core/VideoCommon/ShaderCache.h
+index c76f7da..f8afd04 100644
+--- a/Source/Core/VideoCommon/ShaderCache.h
++++ b/Source/Core/VideoCommon/ShaderCache.h
+@@ -114,6 +114,14 @@ public:
+   const AbstractShader* GetTextureDecodingShader(TextureFormat format,
+                                                  std::optional<TLUTFormat> palette_format);
+ 
++#ifdef __ORBIS__
++  // PS4: apps are killed rather than exited, so the disk caches (normally written out at
++  // shutdown) are flushed periodically while running; plus the backend's own pipeline cache
++  // (Vulkan: VkPipelineCache, i.e. RADV's compiled code). Call on the video thread.
++  void PS4FlushDiskCaches();
++  static inline void (*s_ps4_save_backend_cache)() = nullptr;
++#endif
++
+ private:
+   static constexpr size_t NUM_PALETTE_CONVERSION_SHADERS = 3;
+ 
 diff --git a/Source/Core/VideoCommon/TextureCacheBase.cpp b/Source/Core/VideoCommon/TextureCacheBase.cpp
 index 4e4567d..92d5dbb 100644
 --- a/Source/Core/VideoCommon/TextureCacheBase.cpp
