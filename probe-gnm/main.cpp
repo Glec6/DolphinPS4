@@ -15,6 +15,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#include <orbis/UserService.h>
 #include <orbis/VideoOut.h>
 #include <orbis/libkernel.h>
 
@@ -135,6 +136,13 @@ int main() {
     Log("GNM probe start\n");
 
     Log("direct memory size %zu MiB\n", sceKernelGetDirectMemorySize() >> 20);
+    // Newer firmware: video out for the system user needs the user service initialized (v01.03
+    // crashed inside sceVideoOutOpen without it).
+    Log("calling sceUserServiceInitialize\n");
+    Log("sceUserServiceInitialize = %#x\n", sceUserServiceInitialize(nullptr));
+    int32_t user = -1;
+    Log("sceUserServiceGetInitialUser = %#x, user %#x\n", sceUserServiceGetInitialUser(&user),
+        user);
     Log("calling sceVideoOutOpen\n");
     const int video = sceVideoOutOpen(0xFF, 0, 0, nullptr);
     Log("sceVideoOutOpen = %#x\n", video);
