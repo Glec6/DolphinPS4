@@ -164,7 +164,7 @@ struct ac_drm_device {
       uint32_t handle;
       uint64_t va, size, seq;
       off_t phys;
-   } events[256];
+   } events[8192];
    unsigned num_events;
 };
 
@@ -1058,6 +1058,123 @@ static void ps4_add_point(struct ps4_syncobj *s, uint64_t point, uint64_t seq);
 
 /* EVENT_WRITE_EOP: flush and invalidate CB/DB and the texture caches, then write a 64-bit value
  * at end of pipe. */
+static bool
+ps4_mapped(const void *p, uint64_t len)
+{
+   struct ps4_vq_info vq;
+   memset(&vq, 0, sizeof(vq));
+   return ps4_vq_ok && !sceKernelVirtualQuery(p, 0, &vq, sizeof(vq)) && vq.is_direct &&
+          (uintptr_t)vq.end >= (uintptr_t)p + len;
+}
+
+/* Who wrote into a buffer? Lists the live buffers mapped next to `target`, and every reference in
+ * the recent submissions' command streams to [lo, hi): 64-bit addresses in any packet, and
+ * 256-byte-aligned base registers (render target / depth / CMASK / FMASK / HTILE bases). */
+static unsigned ps4_scan_hits;
+static void
+ps4_scan_ib(ac_drm_device *dev, FILE *f, const uint32_t *ib, unsigned num_dw, uint64_t lo,
+            uint64_t hi, int depth)
+{
+   for (unsigned link = 0; link < 64; link++) {
+      if (!ps4_mapped(ib, num_dw * 4ull)) {
+         fprintf(f, "      IB %p (%u dwords) no longer mapped\n", (void *)ib, num_dw);
+         return;
+      }
+      const uint32_t *next = NULL;
+      unsigned next_dw = 0;
+      for (unsigned i = 0; i < num_dw && ps4_scan_hits < 300;) {
+         const uint32_t h = ib[i];
+         if (h >> 30 == 2) {
+            i++;
+            continue;
+         }
+         if (h >> 30 != 3) {
+            fprintf(f, "      %p: non-type-3 header %#x, stop\n", (void *)&ib[i], h);
+            return;
+         }
+         const unsigned op = (h >> 8) & 0xff;
+         const unsigned body = ((h >> 16) & 0x3fff) + 1;
+         if (i + 1 + body > num_dw)
+            break;
+         const uint32_t *b = &ib[i + 1];
+         for (unsigned k = 0; k + 1 < body; k++) {
+            const uint64_t a = b[k] | ((uint64_t)(b[k + 1] & 0xffff) << 32);
+            if (a >= lo && a < hi) {
+               fprintf(f, "      %p: op %#x (%u dwords) dword %u: address %#llx\n", (void *)&ib[i],
+                       op, body, k, (unsigned long long)a);
+               ps4_scan_hits++;
+            }
+         }
+         if (op == 0x69 && body >= 2) { /* SET_CONTEXT_REG */
+            for (unsigned k = 1; k < body; k++) {
+               const uint64_t a = (uint64_t)b[k] << 8;
+               if (a >= lo && a < hi) {
+                  fprintf(f, "      %p: context reg %#x = %#x (base %#llx)\n", (void *)&ib[i],
+                          0xa000 + b[0] + k - 1, b[k], (unsigned long long)a);
+                  ps4_scan_hits++;
+               }
+            }
+         }
+         if ((op == 0x3f || op == 0x33) && body >= 3) { /* INDIRECT_BUFFER */
+            const uint32_t *t = (const uint32_t *)(uintptr_t)(b[0] | ((uint64_t)(b[1] & 0xffff) << 32));
+            if (b[2] & (1u << 20)) {
+               next = t;
+               next_dw = b[2] & 0xfffff;
+               break;
+            }
+            if (depth < 2)
+               ps4_scan_ib(dev, f, t, b[2] & 0xfffff, lo, hi, depth + 1);
+         }
+         i += 1 + body;
+      }
+      if (!next)
+         return;
+      ib = next;
+      num_dw = next_dw;
+   }
+}
+
+static void
+ps4_find_writer(ac_drm_device *dev, FILE *f, uint64_t target)
+{
+   struct amdgpu_bo *below = NULL, *above = NULL;
+   for (unsigned h = 1; h < dev->num_bos; h++) {
+      struct amdgpu_bo *b = dev->bos[h];
+      if (!b || !b->last_va || !b->cpu)
+         continue;
+      if (b->last_va + b->size <= target && (!below || b->last_va > below->last_va))
+         below = b;
+      if (b->last_va > target && (!above || b->last_va < above->last_va))
+         above = b;
+   }
+   fprintf(f, "  neighbours:\n");
+   if (below) {
+      fprintf(f, "    below: bo %u va %#llx size %#llx (ends %#llx) phys %#llx heap %#x flags %#llx\n",
+              below->handle, (unsigned long long)below->last_va, (unsigned long long)below->size,
+              (unsigned long long)(below->last_va + below->size), (unsigned long long)below->phys,
+              below->heap, (unsigned long long)below->flags);
+      ps4_describe_va(dev, f, below->last_va + below->size - 4);
+   }
+   if (above)
+      fprintf(f, "    above: bo %u va %#llx size %#llx phys %#llx heap %#x flags %#llx\n",
+              above->handle, (unsigned long long)above->last_va, (unsigned long long)above->size,
+              (unsigned long long)above->phys, above->heap, (unsigned long long)above->flags);
+
+   /* References into [start of the buffer below, end of the target's first page). */
+   const uint64_t lo = below ? below->last_va : target - 0x100000, hi = target + PS4_PAGE;
+   fprintf(f, "  references to [%#llx, %#llx) in recent submissions (GPU completed %llu):\n",
+           (unsigned long long)lo, (unsigned long long)hi, (unsigned long long)ps4_completed(dev));
+   for (unsigned n = 0; n < ARRAY_SIZE(dev->recent); n++) {
+      const unsigned r = (dev->last_seq + 1 + n) % ARRAY_SIZE(dev->recent);
+      if (!dev->recent[r].seq)
+         continue;
+      fprintf(f, "    submission %llu:\n", (unsigned long long)dev->recent[r].seq);
+      for (unsigned i = 0; i < dev->recent[r].num_ibs; i++)
+         ps4_scan_ib(dev, f, (const uint32_t *)(uintptr_t)dev->recent[r].va[i],
+                     dev->recent[r].bytes[i] / 4, lo, hi, 0);
+   }
+}
+
 /* Before submitting: does every IB of the chain still start with a packet header, and does every
  * chain link point into a live buffer? (A GPU hang showed a chained IB full of vertex-like float
  * data.) Follows only the chain link in each IB's last 4 dwords - a few reads per IB. On failure,
@@ -1107,6 +1224,7 @@ ps4_check_ib_chain(ac_drm_device *dev, const uint32_t *ib, unsigned num_dw, uint
                              "'%.32s'\n", vq.start, vq.end, (unsigned long long)vq.offset,
                           vq.protection, vq.memory_type, vq.is_direct, vq.is_flexible, vq.name);
                ps4_check_overlaps(dev, f);
+               ps4_find_writer(dev, f, (uintptr_t)ib);
                fclose(f);
             }
          }
