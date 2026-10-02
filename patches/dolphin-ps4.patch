@@ -1250,6 +1250,34 @@ index 0de434b..0b3cc7e 100644
    SetGatherPipeCount(pipe_count);
  }
  
+diff --git a/Source/Core/Core/HW/Memmap.cpp b/Source/Core/Core/HW/Memmap.cpp
+index 054596e..9b72b50 100644
+--- a/Source/Core/Core/HW/Memmap.cpp
++++ b/Source/Core/Core/HW/Memmap.cpp
+@@ -348,6 +348,13 @@ void MemoryManager::AddPageTableMapping(u32 logical_address, u32 translated_addr
+   }
+ }
+ 
++#ifdef __ORBIS__
++// PS4 port measurement: 16 KiB host pages hold four 4 KiB guest pages; a host page can only be
++// fast-mapped when all four map contiguously. Counts the outcomes (DolphinNoGUI monitor).
++extern "C" long long ps4_pt_groups_mapped, ps4_pt_groups_refused;
++long long ps4_pt_groups_mapped = 0, ps4_pt_groups_refused = 0;
++#endif
++
+ void MemoryManager::TryAddLargePageTableMapping(u32 logical_address, u32 translated_address,
+                                                 bool writeable)
+ {
+@@ -363,6 +370,9 @@ void MemoryManager::TryAddLargePageTableMapping(u32 logical_address, u32 transla
+     AddHostPageTableMapping(logical_address & ~(m_page_size - 1),
+                             translated_address & ~(m_page_size - 1), add_writeable, m_page_size);
+   }
++#ifdef __ORBIS__
++  ++((add_readable || add_writeable) ? ps4_pt_groups_mapped : ps4_pt_groups_refused);
++#endif
+ }
+ 
+ bool MemoryManager::TryAddLargePageTableMapping(u32 logical_address, u32 translated_address,
 diff --git a/Source/Core/Core/MemTools.cpp b/Source/Core/Core/MemTools.cpp
 index a7919fb..8de7f4d 100644
 --- a/Source/Core/Core/MemTools.cpp
@@ -1871,10 +1899,10 @@ index f4dc8a9..4e5ff67 100644
  
 diff --git a/Source/Core/DolphinNoGUI/PlatformPS4.cpp b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
 new file mode 100644
-index 0000000..663211e
+index 0000000..b4e2319
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
-@@ -0,0 +1,533 @@
+@@ -0,0 +1,540 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -1913,6 +1941,7 @@ index 0000000..663211e
 +#include "VideoCommon/PS4Profile.h"
 +
 +extern "C" long long ps4_map_count, ps4_unmap_count, ps4_map_internal_bytes;  // MemArenaPS4
++extern "C" long long ps4_pt_groups_mapped, ps4_pt_groups_refused;              // Memmap.cpp
 +extern "C" long long ps4_compile_internal_bytes, ps4_link_internal_bytes;  // ProgramShaderCache
 +#include "Core/System.h"
 +
@@ -2146,7 +2175,7 @@ index 0000000..663211e
 +      const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(
 +                               std::chrono::steady_clock::now() - start)
 +                               .count();
-+      char line[700];
++      char line[1024];
 +      // speed: emulated time per real time; max speed: what the CPU thread could reach if it
 +      // never waited (below 100% means the emulated CPU itself is the bottleneck).
 +      snprintf(line, sizeof(line),
@@ -2176,6 +2205,12 @@ index 0000000..663211e
 +                 static_cast<unsigned long long>(bo_count));
 +      }
 +#endif
++      {
++        // Page table fastmem: 16 KiB host pages that could / couldn't be fast-mapped.
++        const size_t used = strlen(line);
++        snprintf(line + used, sizeof(line) - used, ", page groups mapped %lld refused %lld",
++                 ps4_pt_groups_mapped, ps4_pt_groups_refused);
++      }
 +      BootTrace(line);
 +      LogProfile();
 +
