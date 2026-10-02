@@ -1748,10 +1748,10 @@ index f4dc8a9..4e5ff67 100644
  
 diff --git a/Source/Core/DolphinNoGUI/PlatformPS4.cpp b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
 new file mode 100644
-index 0000000..d2e63b4
+index 0000000..7bb6d87
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
-@@ -0,0 +1,419 @@
+@@ -0,0 +1,488 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -1775,6 +1775,7 @@ index 0000000..d2e63b4
 +#include <orbis/libkernel.h>
 +#include <fcntl.h>
 +#include <sys/stat.h>
++#include <pthread.h>
 +#include <unistd.h>
 +
 +#include "Common/Logging/LogManager.h"
@@ -1862,9 +1863,77 @@ index 0000000..d2e63b4
 +  return true;
 +}
 +
++// Port measurement: which allocations draw from libkernel's internal memory, the pool Piglet's
++// program links and shader compiles exhaust? (1) the system C library's own malloc, (2) pthread
++// mutexes. If (1) does, the system malloc-replacement table could move Piglet's allocations
++// into our heap.
++static void ProbeInternalMemory()
++{
++  const auto free_now = [] { return static_cast<long long>(ps4_internal_memory_free()); };
++  char line[192];
++
++  int libc = static_cast<int>(sceKernelLoadStartModule("libSceLibcInternal.sprx", 0, nullptr, 0, nullptr,
++                                            nullptr));
++  if (libc <= 0)
++  {
++    libc = static_cast<int>(sceKernelLoadStartModule("/system/common/lib/libSceLibcInternal.sprx", 0,
++                                                     nullptr, 0, nullptr, nullptr));
++  }
++  void* (*sys_malloc)(size_t) = nullptr;
++  void (*sys_free)(void*) = nullptr;
++  if (libc > 0)
++  {
++    sceKernelDlsym(libc, "malloc", reinterpret_cast<void**>(&sys_malloc));
++    sceKernelDlsym(libc, "free", reinterpret_cast<void**>(&sys_free));
++  }
++  if (sys_malloc && sys_free)
++  {
++    long long before = free_now();
++    void* small[64];
++    for (void*& block : small)
++      block = sys_malloc(16 * 1024);
++    const long long after_small = free_now();
++    void* big = sys_malloc(4 * 1024 * 1024);
++    const long long after_big = free_now();
++    snprintf(line, sizeof(line),
++             "probe: system malloc 64 x 16 KiB -> internal memory %+lld KiB, 4 MiB -> %+lld KiB",
++             (after_small - before) / 1024, (after_big - after_small) / 1024);
++    Platform::BootTrace(line);
++    sys_free(big);
++    for (void* block : small)
++      sys_free(block);
++    snprintf(line, sizeof(line), "probe: after free, internal memory %+lld KiB vs start",
++             (free_now() - before) / 1024);
++    Platform::BootTrace(line);
++  }
++  else
++  {
++    snprintf(line, sizeof(line), "probe: libSceLibcInternal malloc not found (module %#x)",
++             static_cast<unsigned>(libc));
++    Platform::BootTrace(line);
++  }
++
++  const long long before = free_now();
++  static pthread_mutex_t mutexes[200];
++  for (pthread_mutex_t& mutex : mutexes)
++  {
++    pthread_mutex_init(&mutex, nullptr);
++    pthread_mutex_lock(&mutex);
++    pthread_mutex_unlock(&mutex);
++  }
++  const long long after = free_now();
++  for (pthread_mutex_t& mutex : mutexes)
++    pthread_mutex_destroy(&mutex);
++  snprintf(line, sizeof(line),
++           "probe: 200 pthread mutexes -> internal memory %+lld KiB (%+lld after destroy)",
++           (after - before) / 1024, (free_now() - before) / 1024);
++  Platform::BootTrace(line);
++}
++
 +bool PlatformPS4::Init()
 +{
 +  BootTrace("platform init");
++  ProbeInternalMemory();
 +  LoadSystemModules();
 +  Common::RegisterMsgAlertHandler(LogMessageAlert);
 +  return true;
