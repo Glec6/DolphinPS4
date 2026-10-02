@@ -59,16 +59,12 @@ void profHandler(int, siginfo_t*, void* context) {
         const int n = t.count.load(std::memory_order_relaxed);
         if (n < kMaxSamples) {
             uint64_t sample = regs[kRipIndex];
-            if (sample >= kSystemLibs) {
-                const uintptr_t text = reinterpret_cast<uintptr_t>(__text_start);
-                const auto* stack = reinterpret_cast<const uint64_t*>(regs[kRspIndex]);
-                for (int i = 0; i < 256; i++) {
-                    if (stack[i] >= text && stack[i] < text + kTextWindow) {
-                        sample = kCallerTag | (stack[i] - text);
-                        break;
-                    }
-                }
-            }
+            // Inside a system module: keep the exact address (tagged). The module list at the
+            // top of samples.log maps it to a module offset, which the decrypted modules' symbol
+            // tables name. (Blaming "the first eboot address on the stack" picked up stale
+            // values and named the wrong callers.)
+            if (sample >= kSystemLibs && sample < 2 * kSystemLibs)
+                sample |= kCallerTag;
             t.samples[n] = sample;
             t.count.store(n + 1, std::memory_order_release);
         }
@@ -102,7 +98,7 @@ void report(int fd, ThreadSamples& t, double window_start) {
     // Elsewhere (JIT code, modules): 1 MiB regions.
     for (int i = 0; i < n; i++) {
         if (s[i] & kCallerTag) {
-            s[i] &= ~0xFULL;  // system library, attributed to its eboot caller
+            s[i] &= ~0xFULL;  // system module address (see the module list)
             continue;
         }
         const bool eboot = s[i] >= text && s[i] < text + kTextWindow;
@@ -135,7 +131,7 @@ void report(int fd, ThreadSamples& t, double window_start) {
             snprintf(line, sizeof(line), "  %5.1f%% region 0x%llx\n", 100.0 * entries[i].count / n,
                      static_cast<unsigned long long>(entries[i].key & ~(1ULL << 63)));
         else if (entries[i].key & kCallerTag)
-            snprintf(line, sizeof(line), "  %5.1f%% syscall from elf 0x%llx\n",
+            snprintf(line, sizeof(line), "  %5.1f%% sys 0x%llx\n",
                      100.0 * entries[i].count / n,
                      static_cast<unsigned long long>(entries[i].key & ~kCallerTag));
         else
@@ -151,10 +147,50 @@ double now() {
     return static_cast<double>(ts.tv_sec) + static_cast<double>(ts.tv_nsec) / 1e9;
 }
 
+// Loaded modules and their segments, so "sys" samples can be mapped to module offsets.
+struct ModuleSegment {
+    void* address;
+    uint32_t size;
+    int32_t prot;
+};
+struct ModuleInfo {
+    size_t size;
+    char name[256];
+    ModuleSegment segments[4];
+    uint32_t segment_count;
+    uint8_t fingerprint[20];
+};
+extern "C" int32_t sceKernelGetModuleList(int32_t* handles, size_t count, size_t* available);
+extern "C" int32_t sceKernelGetModuleInfo(int32_t handle, ModuleInfo* info);
+
+void writeModuleList(int fd) {
+    int32_t handles[256];
+    size_t count = 0;
+    static size_t s_listed = 0;  // relisted when modules get loaded (e.g. RADV's GnmDriver)
+    if (sceKernelGetModuleList(handles, 256, &count) != 0 || count == s_listed)
+        return;
+    s_listed = count;
+    char line[512];
+    for (size_t m = 0; m < count && m < 256; m++) {
+        ModuleInfo info;
+        memset(&info, 0, sizeof(info));
+        info.size = sizeof(info);
+        if (sceKernelGetModuleInfo(handles[m], &info) != 0)
+            continue;
+        int len = snprintf(line, sizeof(line), "module %s", info.name);
+        for (uint32_t g = 0; g < info.segment_count && g < 4; g++)
+            len += snprintf(line + len, sizeof(line) - len, " seg %p+0x%x/%d",
+                            info.segments[g].address, info.segments[g].size, info.segments[g].prot);
+        snprintf(line + len, sizeof(line) - len, "\n");
+        writeLine(fd, line);
+    }
+}
+
 void* samplerThread(void*) {
     const int fd = open("/data/DolphinPS4/samples.log", O_WRONLY | O_CREAT | O_TRUNC, 0666);
     if (fd < 0)
         return nullptr;
+    writeModuleList(fd);
     const double start = now();
     double window_start = start;
     const timespec period = {0, 1000000};
@@ -164,6 +200,7 @@ void* samplerThread(void*) {
         for (int i = 0; i < threads; i++)
             pthread_kill(g_threads[i].thread.load(std::memory_order_relaxed), kSigProf);
         if (now() - window_start >= 10.0) {
+            writeModuleList(fd);
             for (int i = 0; i < threads; i++)
                 report(fd, g_threads[i], window_start - start);
             window_start = now();
