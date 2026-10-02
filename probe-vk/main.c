@@ -16,6 +16,7 @@
 #include <vulkan/vulkan_core.h>
 
 int sceKernelDebugOutText(int channel, const char* text);
+void ac_ps4_trace(const char* fmt, ...);  // Mesa PS4 layer (port/mesa/ac_ps4_drm.c)
 int sceSystemServiceLoadExec(const char* path, char* const argv[]);
 int sceSysmoduleLoadModuleInternal(uint32_t id);
 
@@ -72,6 +73,7 @@ int main(void) {
   setenv("MESA_LOG_FILE", "/data/DolphinPS4/mesa.log", 1);
   setenv("MESA_DEBUG", "1", 1);
   fprintf(stderr, "stderr works\n");
+  ac_ps4_trace("probe: trace test\n");
   Log("Vulkan probe start\n");
   // System modules used by the runtime (see probe-gnm): load before any call into them.
   sceSysmoduleLoadModuleInternal(0x80000010);  // SystemService
