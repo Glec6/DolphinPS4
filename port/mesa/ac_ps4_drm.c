@@ -140,7 +140,15 @@ struct ac_drm_device {
 
    /* GPU end-of-pipe interrupts (sceGnmAddEqEvent): fence waits sleep on this queue. */
    int (*add_eq_event)(void *eq, uint64_t id, void *udata);
+   int (*submit_and_flip)(uint32_t count, void *dcb[], uint32_t *dcb_sizes, void *ccb[],
+                          uint32_t *ccb_sizes, uint32_t video, uint32_t buffer, uint32_t mode,
+                          int64_t arg);
    int gnm_module;
+   /* ac_ps4_submit_flip: small IBs ending in Gnm's prepareFlip packet, and the submission each
+    * last used (a slot is reused once that has completed). */
+   uint32_t *flip_ibs;
+   uint64_t flip_seq[16];
+   unsigned flip_count;
    void *eop_queue;
 
    /* Statistics for the app's monitor (ac_ps4_get_stats). */
@@ -504,6 +512,8 @@ ps4_load_gnm(ac_drm_device *dev)
    }
    if (sceKernelDlsym(module, "sceGnmAddEqEvent", (void **)&dev->add_eq_event))
       dev->add_eq_event = NULL;
+   if (sceKernelDlsym(module, "sceGnmSubmitAndFlipCommandBuffers", (void **)&dev->submit_and_flip))
+      dev->submit_and_flip = NULL;
    if (sceKernelDlsym(module, "sceGnmSubmitCommandBuffers", (void **)&dev->submit) ||
        sceKernelDlsym(module, "sceGnmSubmitDone", (void **)&dev->submit_done)) {
       ps4_log("radv/ps4: libSceGnmDriver symbols missing\n");
@@ -941,6 +951,7 @@ ac_drm_device_initialize(int fd, bool is_virtio, uint32_t *major_version, uint32
          dev->eop_queue = eq;
    }
    dev->fence_ibs = (uint32_t *)(page + 256);
+   dev->flip_ibs = ps4_map_new(PS4_PAGE, PS4_WB_ONION, PS4_PROT_CPU_RW | PS4_PROT_GPU_RW, NULL);
    STATIC_ASSERT(256 + FENCE_IB_COUNT * FENCE_IB_DW * 4 <= PS4_PAGE * 4);
 
    ps4_sync_provider_init(dev);
@@ -2058,6 +2069,68 @@ ac_drm_cs_submit_raw2(ac_drm_device *dev, uint32_t ctx_id, uint32_t bo_list_hand
    simple_mtx_unlock(&dev->lock);
    *seq_no = seq;
    return 0;
+}
+
+/* Present without the CPU waiting: queues a flip of VideoOut buffer `buffer` behind everything
+ * submitted so far (sceGnmSubmitAndFlipCommandBuffers: the flip happens when the GPU gets there).
+ * `arg` comes back in sceVideoOutGetFlipStatus().flipArg once the flip is done. */
+int ac_ps4_submit_flip(int video, unsigned buffer, unsigned mode, int64_t arg);
+int
+ac_ps4_submit_flip(int video, unsigned buffer, unsigned mode, int64_t arg)
+{
+   ac_drm_device *dev = ps4_fault_dev;
+   if (!dev || !dev->submit_and_flip || !dev->flip_ibs)
+      return -1;
+   enum { FLIP_IB_DW = 128 };
+   STATIC_ASSERT(ARRAY_SIZE(dev->flip_seq) * FLIP_IB_DW * 4 <= PS4_PAGE);
+
+   simple_mtx_lock(&dev->lock);
+   const unsigned slot = dev->flip_count % ARRAY_SIZE(dev->flip_seq);
+   /* The slot's previous flip IB, and the fence IB slot for the next sequence number, must be
+    * free - waited for before taking the number, as in ac_drm_cs_submit_raw2. */
+   while (ps4_completed(dev) < dev->flip_seq[slot] ||
+          (dev->last_seq + 1 > FENCE_IB_COUNT &&
+           ps4_completed(dev) < dev->last_seq + 1 - FENCE_IB_COUNT)) {
+      const uint64_t wait = MAX2(dev->flip_seq[slot], dev->last_seq + 1 > FENCE_IB_COUNT
+                                                         ? dev->last_seq + 1 - FENCE_IB_COUNT
+                                                         : 0);
+      simple_mtx_unlock(&dev->lock);
+      ps4_wait_seq(dev, wait, INT64_MAX);
+      simple_mtx_lock(&dev->lock);
+   }
+   const uint64_t seq = ++dev->last_seq;
+   uint32_t *ib = dev->flip_ibs + slot * FLIP_IB_DW, *cs = ib;
+   cs = ps4_emit_eop(cs, (uintptr_t)dev->fence, seq, dev->eop_queue != NULL);
+   while ((cs - ib) % 8)
+      *cs++ = 0xFFFF1000;
+   /* Gnm's prepareFlip: a 64-dword NOP with the flip label, rewritten by the driver. */
+   *cs++ = 0xC03E1000;
+   *cs++ = 0x68750777;
+   for (int i = 0; i < 62; i++)
+      *cs++ = 0;
+   void *dcb[1] = {ib};
+   uint32_t dcb_size[1] = {(uint32_t)(cs - ib) * 4};
+   void *ccb[1] = {NULL};
+   uint32_t ccb_size[1] = {0};
+   const int r = dev->submit_and_flip(1, dcb, dcb_size, ccb, ccb_size, video, buffer, mode, arg);
+   dev->submit_done();
+   if (r) {
+      dev->last_seq--;
+      static unsigned logged;
+      if (logged++ < 8)
+         ps4_log("radv/ps4: sceGnmSubmitAndFlipCommandBuffers(buffer %u) = %#x\n", buffer, r);
+   } else {
+      dev->flip_seq[slot] = seq;
+      dev->flip_count++;
+      const unsigned rs = seq % ARRAY_SIZE(dev->recent);
+      dev->recent[rs].seq = seq;
+      dev->recent[rs].num_ibs = 1;
+      dev->recent[rs].va[0] = (uintptr_t)ib;
+      dev->recent[rs].bytes[0] = dcb_size[0];
+      ps4_run_deferred(dev);
+   }
+   simple_mtx_unlock(&dev->lock);
+   return r;
 }
 
 /* ---------------------------------------------------------------------------------------------

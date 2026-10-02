@@ -4931,7 +4931,7 @@ index 6657f34..b45d76e 100644
      it = m_cache.emplace(state, sampler).first;
    }
 diff --git a/Source/Core/VideoBackends/Vulkan/CommandBufferManager.cpp b/Source/Core/VideoBackends/Vulkan/CommandBufferManager.cpp
-index c82417e..c6cc3b0 100644
+index c82417e..e72527d 100644
 --- a/Source/Core/VideoBackends/Vulkan/CommandBufferManager.cpp
 +++ b/Source/Core/VideoBackends/Vulkan/CommandBufferManager.cpp
 @@ -9,6 +9,7 @@
@@ -4946,7 +4946,7 @@ index c82417e..c6cc3b0 100644
      submit_info.waitSemaphoreCount = 1;
    }
  
-+#ifndef __ORBIS__  // the PS4 swap chain waits for the fence instead (PS4PresentSwapChainImage)
++#ifndef __ORBIS__  // the PS4 flip is queued behind the GPU work (PS4PresentSwapChainImage)
    if (present_swap_chain != VK_NULL_HANDLE)
    {
      submit_info.signalSemaphoreCount = 1;
@@ -4997,7 +4997,7 @@ index 6338e52..8b389ce 100644
    {
      PanicAlertFmt("Failed to initialize Vulkan object cache.");
 diff --git a/Source/Core/VideoBackends/Vulkan/VKSwapChain.cpp b/Source/Core/VideoBackends/Vulkan/VKSwapChain.cpp
-index 370e22d..b687963 100644
+index 370e22d..b31c24e 100644
 --- a/Source/Core/VideoBackends/Vulkan/VKSwapChain.cpp
 +++ b/Source/Core/VideoBackends/Vulkan/VKSwapChain.cpp
 @@ -4,8 +4,10 @@
@@ -5011,7 +5011,7 @@ index 370e22d..b687963 100644
  #include "Common/Assert.h"
  #include "Common/Contains.h"
  #include "Common/Logging/Log.h"
-@@ -21,8 +23,99 @@
+@@ -21,8 +23,118 @@
  #include <X11/Xlib.h>
  #endif
  
@@ -5022,6 +5022,8 @@ index 370e22d..b687963 100644
 +#include <orbis/libkernel.h>
 +
 +extern "C" void ps4_boot_trace(const char* line);  // port/ps4_crashlog.cpp
++// port/mesa/ac_ps4_drm.c: queues a VideoOut flip behind the submitted GPU work (GPU-side flip).
++extern "C" int ac_ps4_submit_flip(int video, unsigned buffer, unsigned mode, int64_t arg);
 +#endif
 +
  namespace Vulkan
@@ -5071,39 +5073,56 @@ index 370e22d..b687963 100644
 +}
 +}  // namespace
 +
++// Flips submitted so far; each flip's number is its flipArg, which sceVideoOutGetFlipStatus
++// reports once that flip is on screen.
++static u64 s_flips_submitted = 0;
++
 +void PS4PresentSwapChainImage(u32 image_index, VkFence fence)
 +{
 +  static int s_traced = 0;
-+  const bool trace = s_traced < 5;
-+  char line[160];
-+  if (trace)
++  const int mode = s_vsync ? ORBIS_VIDEO_OUT_FLIP_VSYNC : ORBIS_VIDEO_OUT_FLIP_HSYNC;
++  const s64 arg = static_cast<s64>(s_flips_submitted + 1);
++  // The flip is queued behind the frame's GPU work: no CPU wait for the GPU or for vblank (those
++  // waits blocked the submit thread, and through it the GPU thread, every frame).
++  int r = ac_ps4_submit_flip(s_video, image_index, mode, arg);
++  const bool gpu_flip = r == 0;
++  if (!gpu_flip)
 +  {
-+    snprintf(line, sizeof(line), "vk present %d: image %u, waiting for the frame's fence\n",
-+             s_traced, image_index);
-+    ps4_boot_trace(line);
++    vkWaitForFences(g_vulkan_context->GetDevice(), 1, &fence, VK_TRUE, UINT64_MAX);
++    r = sceVideoOutSubmitFlip(s_video, static_cast<int>(image_index), mode, arg);
 +  }
-+  const VkResult wait = vkWaitForFences(g_vulkan_context->GetDevice(), 1, &fence, VK_TRUE, UINT64_MAX);
-+  const int r = sceVideoOutSubmitFlip(
-+      s_video, static_cast<int>(image_index),
-+      s_vsync ? ORBIS_VIDEO_OUT_FLIP_VSYNC : ORBIS_VIDEO_OUT_FLIP_HSYNC, 0);
 +  if (r < 0)
 +  {
-+    ERROR_LOG_FMT(VIDEO, "sceVideoOutSubmitFlip failed: {:#x}", static_cast<u32>(r));
++    ERROR_LOG_FMT(VIDEO, "flip failed: {:#x}", static_cast<u32>(r));
 +    return;
 +  }
-+  // Wait for the flip, so that the image after next (3 images) is off screen when reused. With a
-+  // timeout: a missed flip event mustn't stall the GPU thread for good.
-+  OrbisKernelEvent ev;
-+  int count = 0;
-+  OrbisKernelUseconds timeout = 100000;
-+  const int waited = sceKernelWaitEqueue(s_flip_queue, &ev, 1, &count, &timeout);
-+  if (trace)
++  s_flips_submitted++;
++  if (s_traced < 5)
 +  {
-+    snprintf(line, sizeof(line), "vk present %d: fence %d, flip %#x, flip event %#x (%d)\n",
-+             s_traced, static_cast<int>(wait), static_cast<u32>(r), static_cast<u32>(waited),
-+             count);
++    char line[128];
++    snprintf(line, sizeof(line), "vk present %d: image %u, %s flip %llu\n", s_traced, image_index,
++             gpu_flip ? "GPU-side" : "CPU", static_cast<unsigned long long>(s_flips_submitted));
 +    ps4_boot_trace(line);
 +    s_traced++;
++  }
++}
++
++// Before rendering into the next image: it must be off screen. With 3 images in rotation it was
++// shown by flip n-2 and is replaced on screen by flip n-1 (n = flips submitted).
++static void PS4WaitForNextImageOffScreen()
++{
++  if (s_flips_submitted < 2)
++    return;
++  const s64 needed = static_cast<s64>(s_flips_submitted - 1);
++  for (int tries = 0; tries < 40; tries++)
++  {
++    OrbisVideoOutFlipStatus status = {};
++    if (sceVideoOutGetFlipStatus(s_video, &status) < 0 || status.flipArg >= needed)
++      return;
++    OrbisKernelEvent ev;
++    int count = 0;
++    OrbisKernelUseconds timeout = 5000;
++    sceKernelWaitEqueue(s_flip_queue, &ev, 1, &count, &timeout);
 +  }
 +}
 +#endif
@@ -5111,7 +5130,7 @@ index 370e22d..b687963 100644
  SwapChain::SwapChain(const WindowSystemInfo& wsi, VkSurfaceKHR surface, bool vsync)
      : m_wsi(wsi), m_surface(surface), m_vsync_enabled(vsync),
        m_fullscreen_supported(g_vulkan_context->SupportsExclusiveFullscreen(wsi, surface))
-@@ -38,6 +131,11 @@ SwapChain::~SwapChain()
+@@ -38,6 +150,11 @@ SwapChain::~SwapChain()
  
  VkSurfaceKHR SwapChain::CreateVulkanSurface(VkInstance instance, const WindowSystemInfo& wsi)
  {
@@ -5123,7 +5142,7 @@ index 370e22d..b687963 100644
  #if defined(VK_USE_PLATFORM_WIN32_KHR)
    if (wsi.type == WindowSystemType::Windows)
    {
-@@ -273,6 +371,18 @@ bool SwapChain::SelectPresentMode()
+@@ -273,6 +390,18 @@ bool SwapChain::SelectPresentMode()
  
  bool SwapChain::CreateSwapChain()
  {
@@ -5142,7 +5161,7 @@ index 370e22d..b687963 100644
    // Look up surface properties to determine image count and dimensions
    VkSurfaceCapabilitiesKHR surface_capabilities;
    VkResult res = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(g_vulkan_context->GetPhysicalDevice(),
-@@ -407,6 +517,87 @@ bool SwapChain::CreateSwapChain()
+@@ -407,6 +536,87 @@ bool SwapChain::CreateSwapChain()
  bool SwapChain::SetupSwapChainImages()
  {
    ASSERT(m_swap_chain_images.empty());
@@ -5230,7 +5249,7 @@ index 370e22d..b687963 100644
  
    uint32_t image_count;
    VkResult res =
-@@ -464,6 +655,22 @@ bool SwapChain::SetupSwapChainImages()
+@@ -464,6 +674,22 @@ bool SwapChain::SetupSwapChainImages()
  
  void SwapChain::DestroySwapChainImages()
  {
@@ -5253,7 +5272,7 @@ index 370e22d..b687963 100644
    for (auto& it : m_swap_chain_images)
    {
      // Images themselves are cleaned up by the swap chain object
-@@ -477,6 +684,10 @@ void SwapChain::DestroySwapChain()
+@@ -477,6 +703,10 @@ void SwapChain::DestroySwapChain()
  {
    if (m_swap_chain == VK_NULL_HANDLE)
      return;
@@ -5264,12 +5283,13 @@ index 370e22d..b687963 100644
  
    // Release exclusive fullscreen before destroying.
    if (m_current_fullscreen_state)
-@@ -488,6 +699,13 @@ void SwapChain::DestroySwapChain()
+@@ -488,6 +718,14 @@ void SwapChain::DestroySwapChain()
  
  VkResult SwapChain::AcquireNextImage()
  {
 +#ifdef __ORBIS__
-+  // Round robin; PS4PresentSwapChainImage waits for each flip, so the next image is free.
++  // Round robin, once the next image is off screen.
++  PS4WaitForNextImageOffScreen();
 +  m_current_swap_chain_image_index =
 +      (m_current_swap_chain_image_index + 1) % static_cast<u32>(m_swap_chain_images.size());
 +  m_current_swap_chain_image_is_valid = true;
@@ -5278,7 +5298,7 @@ index 370e22d..b687963 100644
    VkResult res = vkAcquireNextImageKHR(g_vulkan_context->GetDevice(), m_swap_chain, UINT64_MAX,
                                         g_command_buffer_mgr->GetCurrentCommandBufferSemaphore(),
                                         VK_NULL_HANDLE, &m_current_swap_chain_image_index);
-@@ -612,6 +830,10 @@ bool SwapChain::RecreateSurface(void* native_handle)
+@@ -612,6 +850,10 @@ bool SwapChain::RecreateSurface(void* native_handle)
  
  void SwapChain::DestroySurface()
  {
