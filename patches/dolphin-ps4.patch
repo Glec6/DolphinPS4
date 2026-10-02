@@ -1482,7 +1482,7 @@ index 51c3fff..8e91ab7 100644
 +  ps4_add_eboot(dolphin-nogui)
 +endif()
 diff --git a/Source/Core/DolphinNoGUI/MainNoGUI.cpp b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
-index 3bf40ea..5bf87ad 100644
+index 3bf40ea..73a6950 100644
 --- a/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 +++ b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 @@ -5,7 +5,9 @@
@@ -1571,7 +1571,7 @@ index 3bf40ea..5bf87ad 100644
  #endif
        });
  
-@@ -270,7 +309,130 @@ int main(const int argc, char* argv[])
+@@ -270,7 +309,135 @@ int main(const int argc, char* argv[])
  
    UICommon::SetUserDirectory(user_directory);
    UICommon::Init();
@@ -1669,6 +1669,11 @@ index 3bf40ea..5bf87ad 100644
 +    }
 +    // show_fps=off hides the FPS / speed counter in the top-left corner.
 +    ps4_show_fps = Platform::GetPS4Option("show_fps", "on") == "on";
++    if (video != "opengl")
++    {
++      Config::SetBase(Config::GFX_SHOW_FPS, ps4_show_fps != 0);
++      Config::SetBase(Config::GFX_SHOW_SPEED, ps4_show_fps != 0);
++    }
 +    // uniform_merge=auto|on|off: one upload for pixel + vertex constants per draw (auto: when
 +    // Piglet passes the range test at startup).
 +    {
@@ -1702,7 +1707,7 @@ index 3bf40ea..5bf87ad 100644
  
    Common::ScopeGuard ui_common_guard([] {
      UICommon::ShutdownControllers();
-@@ -284,6 +446,12 @@ int main(const int argc, char* argv[])
+@@ -284,6 +451,12 @@ int main(const int argc, char* argv[])
    }
  
    auto core_state_changed_hook = Core::AddOnStateChangedCallback([](const Core::State state) {
@@ -1715,7 +1720,7 @@ index 3bf40ea..5bf87ad 100644
      if (state == Core::State::Uninitialized)
        s_platform->Stop();
    });
-@@ -303,6 +471,9 @@ int main(const int argc, char* argv[])
+@@ -303,6 +476,9 @@ int main(const int argc, char* argv[])
  
    DolphinAnalytics::Instance().ReportDolphinStart("nogui");
  
@@ -5762,7 +5767,7 @@ index 92f7c1f..3378a49 100644
      m_default_pixel_shader = g_gfx->CreateShaderFromSource(
          ShaderStage::Pixel, GetHeader(false) + default_pixel_shader_code + GetFooter(), nullptr,
 diff --git a/Source/Core/VideoCommon/Present.cpp b/Source/Core/VideoCommon/Present.cpp
-index 41d05f3..e1958ed 100644
+index 41d05f3..c952a67 100644
 --- a/Source/Core/VideoCommon/Present.cpp
 +++ b/Source/Core/VideoCommon/Present.cpp
 @@ -10,6 +10,7 @@
@@ -5843,7 +5848,7 @@ index 41d05f3..e1958ed 100644
  
    // Render the XFB to the screen.
    if (backbuffer_bound && m_xfb_entry)
-@@ -945,7 +987,28 @@ void Presenter::Present(PresentInfo* present_info)
+@@ -945,7 +987,30 @@ void Presenter::Present(PresentInfo* present_info)
      AdjustRectanglesToFitBounds(&render_target_rc, &render_source_rc, m_backbuffer_width,
                                  m_backbuffer_height);
      RenderXFBToScreen(render_target_rc, m_xfb_entry->texture.get(), render_source_rc);
@@ -5861,7 +5866,9 @@ index 41d05f3..e1958ed 100644
 +  }
 +
 +#ifdef __ORBIS__
-+  if (backbuffer_bound && ps4_show_fps)
++  // The seven-segment counter is drawn with GL scissored clears (OGLGfx.cpp); other backends
++  // use Dolphin's own on-screen FPS/speed display (MainNoGUI.cpp).
++  if (backbuffer_bound && ps4_show_fps && Config::Get(Config::MAIN_GFX_BACKEND) == "OGL")
 +  {
 +    // Refreshed by the DolphinNoGUI monitor (PerformanceMetrics::UpdateStats) every 2 s.
 +    const auto& perf = Core::System::GetInstance().GetPerfMetrics();
