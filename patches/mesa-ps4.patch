@@ -139,6 +139,180 @@ index 3696bad..ec3503d 100644
  
  if with_symbols_check
    test(
+diff --git a/src/amd/vulkan/radv_device.c b/src/amd/vulkan/radv_device.c
+index 2323aba..4113b96 100644
+--- a/src/amd/vulkan/radv_device.c
++++ b/src/amd/vulkan/radv_device.c
+@@ -68,6 +68,13 @@ typedef void *drmDevicePtr;
+ #include "ac_descriptors.h"
+ #include "ac_formats.h"
+ 
++#ifdef __PS4__
++void ac_ps4_trace(const char *fmt, ...);
++#define PS4_FAIL(label) do { ac_ps4_trace("radv: %s:%d -> " #label "\n", __FILE__, __LINE__); goto label; } while (0)
++#else
++#define PS4_FAIL(label) goto label
++#endif
++
+ static bool
+ radv_trap_handler_enabled()
+ {
+@@ -318,7 +325,7 @@ radv_device_init_vrs_state(struct radv_device *device)
+ 
+    result = radv_create_buffer(device, &buffer_create_info, &device->meta_state.alloc, &buffer, true);
+    if (result != VK_SUCCESS)
+-      goto fail_create;
++      PS4_FAIL(fail_create);
+ 
+    VkDeviceBufferMemoryRequirements buffer_mem_req_info = {
+       .sType = VK_STRUCTURE_TYPE_DEVICE_BUFFER_MEMORY_REQUIREMENTS,
+@@ -337,7 +344,7 @@ radv_device_init_vrs_state(struct radv_device *device)
+ 
+    result = radv_alloc_memory(device, &alloc_info, &device->meta_state.alloc, &mem, true);
+    if (result != VK_SUCCESS)
+-      goto fail_alloc;
++      PS4_FAIL(fail_alloc);
+ 
+    VkBindBufferMemoryInfo bind_info = {.sType = VK_STRUCTURE_TYPE_BIND_BUFFER_MEMORY_INFO,
+                                        .buffer = buffer,
+@@ -346,7 +353,7 @@ radv_device_init_vrs_state(struct radv_device *device)
+ 
+    result = radv_BindBufferMemory2(radv_device_to_handle(device), 1, &bind_info);
+    if (result != VK_SUCCESS)
+-      goto fail_bind;
++      PS4_FAIL(fail_bind);
+ 
+    device->vrs.image = radv_image_from_handle(image);
+    device->vrs.buffer = radv_buffer_from_handle(buffer);
+@@ -481,11 +488,11 @@ radv_device_init_notifier(struct radv_device *device)
+ 
+    notifier->watch = inotify_add_watch(notifier->fd, file, IN_MODIFY | IN_DELETE_SELF);
+    if (notifier->watch < 0)
+-      goto fail_watch;
++      PS4_FAIL(fail_watch);
+ 
+    ret = thrd_create(&notifier->thread, radv_notifier_thread_run, device);
+    if (ret)
+-      goto fail_thread;
++      PS4_FAIL(fail_thread);
+ 
+    return true;
+ 
+@@ -910,13 +917,13 @@ radv_create_gfx_preamble(struct radv_device *device)
+       RADEON_FLAG_CPU_ACCESS | RADEON_FLAG_NO_INTERPROCESS_SHARING | RADEON_FLAG_READ_ONLY | RADEON_FLAG_GTT_WC,
+       RADV_BO_PRIORITY_CS, 0, true, &device->gfx_init);
+    if (result != VK_SUCCESS)
+-      goto fail;
++      PS4_FAIL(fail);
+ 
+    void *map = radv_buffer_map(device->ws, device->gfx_init);
+    if (!map) {
+       radv_bo_destroy(device, NULL, device->gfx_init);
+       device->gfx_init = NULL;
+-      goto fail;
++      PS4_FAIL(fail);
+    }
+    memcpy(map, cs->b->buf, cs->b->cdw * 4);
+ 
+@@ -1203,7 +1210,7 @@ radv_CreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCr
+    if (!device->vk.disable_internal_cache) {
+       result = radv_device_init_memory_cache(device);
+       if (result != VK_SUCCESS)
+-         goto fail;
++         PS4_FAIL(fail);
+    }
+ 
+    if (pdev->info.gfx_level == GFX10_3) {
+@@ -1297,7 +1304,7 @@ radv_CreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCr
+ 
+       result = device->ws->ctx_create(device->ws, priority, &device->hw_ctx[priority]);
+       if (result != VK_SUCCESS)
+-         goto fail;
++         PS4_FAIL(fail);
+    }
+ 
+    /* Use extra context to allow use of both VCN instances for transcoding. */
+@@ -1317,7 +1324,7 @@ radv_CreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCr
+                                       VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
+       if (!device->queues[qfi]) {
+          result = VK_ERROR_OUT_OF_HOST_MEMORY;
+-         goto fail;
++         PS4_FAIL(fail);
+       }
+ 
+       device->queue_count[qfi] = queue_create->queueCount;
+@@ -1325,7 +1332,7 @@ radv_CreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCr
+       for (unsigned q = 0; q < queue_create->queueCount; q++) {
+          result = radv_queue_init(device, &device->queues[qfi][q], q, queue_create, global_priority);
+          if (result != VK_SUCCESS)
+-            goto fail;
++            PS4_FAIL(fail);
+       }
+    }
+    device->private_sdma_queue = VK_NULL_HANDLE;
+@@ -1335,7 +1342,7 @@ radv_CreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCr
+                                        pdev->info.gfx_level >= GFX7;
+    result = radv_init_shader_upload_queue(device);
+    if (result != VK_SUCCESS)
+-      goto fail;
++      PS4_FAIL(fail);
+ 
+    device->pbb_allowed = pdev->info.gfx_level >= GFX9 && !(instance->debug_flags & RADV_DEBUG_NOBINNING);
+ 
+@@ -1381,11 +1388,11 @@ radv_CreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCr
+ 
+    result = radv_device_init_tools(device);
+    if (result != VK_SUCCESS)
+-      goto fail;
++      PS4_FAIL(fail);
+ 
+    result = radv_device_init_meta(device);
+    if (result != VK_SUCCESS)
+-      goto fail;
++      PS4_FAIL(fail);
+ 
+    radv_device_init_msaa(device);
+ 
+@@ -1393,14 +1400,14 @@ radv_CreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCr
+    if (device->vk.enabled_features.customBorderColors) {
+       result = radv_device_init_border_color(device);
+       if (result != VK_SUCCESS)
+-         goto fail;
++         PS4_FAIL(fail);
+    }
+ 
+    if (device->vk.enabled_features.vertexInputDynamicState || device->vk.enabled_features.graphicsPipelineLibrary ||
+        device->vk.enabled_features.shaderObject) {
+       result = radv_device_init_vs_prologs(device);
+       if (result != VK_SUCCESS)
+-         goto fail;
++         PS4_FAIL(fail);
+    }
+ 
+    if (device->vk.enabled_features.graphicsPipelineLibrary || device->vk.enabled_features.shaderObject ||
+@@ -1416,11 +1423,11 @@ radv_CreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCr
+                                  RADEON_FLAG_ZERO_VRAM | RADEON_FLAG_32BIT,
+                               RADV_BO_PRIORITY_VIRTUAL, 0, true, &device->zero_bo);
+       if (result != VK_SUCCESS)
+-         goto fail;
++         PS4_FAIL(fail);
+ 
+       result = device->ws->buffer_make_resident(device->ws, device->zero_bo, true);
+       if (result != VK_SUCCESS)
+-         goto fail;
++         PS4_FAIL(fail);
+    }
+ 
+    if (pdev->info.has_graphics && !(instance->debug_flags & RADV_DEBUG_NO_IB_CHAINING))
+@@ -1429,7 +1436,7 @@ radv_CreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCr
+    if (device->vk.enabled_features.performanceCounterQueryPools) {
+       result = radv_device_init_perf_counter(device);
+       if (result != VK_SUCCESS)
+-         goto fail;
++         PS4_FAIL(fail);
+    }
+ 
+    if (device->vk.enabled_features.rayTracingPipelineShaderGroupHandleCaptureReplay) {
 diff --git a/src/amd/vulkan/radv_instance.c b/src/amd/vulkan/radv_instance.c
 index 796eb28..374a752 100644
 --- a/src/amd/vulkan/radv_instance.c
@@ -232,6 +406,298 @@ index 86db276..3299481 100644
     if (fd != -1)
        close(fd);
     if (master_fd != -1)
+diff --git a/src/amd/vulkan/radv_queue.c b/src/amd/vulkan/radv_queue.c
+index 564a8d8..671d481 100644
+--- a/src/amd/vulkan/radv_queue.c
++++ b/src/amd/vulkan/radv_queue.c
+@@ -34,6 +34,13 @@ radv_get_queue_global_priority(const VkDeviceQueueGlobalPriorityCreateInfo *pObj
+    return vk_to_radeon_priority(pObj->globalPriority);
+ }
+ 
++#ifdef __PS4__
++void ac_ps4_trace(const char *fmt, ...);
++#define PS4_FAIL(label) do { ac_ps4_trace("radv: %s:%d -> " #label "\n", __FILE__, __LINE__); goto label; } while (0)
++#else
++#define PS4_FAIL(label) goto label
++#endif
++
+ static VkResult
+ radv_sparse_buffer_bind_memory(struct radv_device *device, const VkSparseBufferMemoryBindInfo *bind)
+ {
+@@ -888,7 +895,7 @@ radv_update_preamble_cs(struct radv_queue_state *queue, struct radv_device *devi
+       result = radv_bo_create(device, NULL, scratch_size, 4096, RADEON_DOMAIN_VRAM, ring_bo_flags,
+                               RADV_BO_PRIORITY_SCRATCH, 0, true, &scratch_bo);
+       if (result != VK_SUCCESS)
+-         goto fail;
++         PS4_FAIL(fail);
+       radv_rmv_log_command_buffer_bo_create(device, scratch_bo, 0, 0, scratch_size);
+    }
+ 
+@@ -899,7 +906,7 @@ radv_update_preamble_cs(struct radv_queue_state *queue, struct radv_device *devi
+       result = radv_bo_create(device, NULL, compute_scratch_size, 4096, RADEON_DOMAIN_VRAM, ring_bo_flags,
+                               RADV_BO_PRIORITY_SCRATCH, 0, true, &compute_scratch_bo);
+       if (result != VK_SUCCESS)
+-         goto fail;
++         PS4_FAIL(fail);
+       radv_rmv_log_command_buffer_bo_create(device, compute_scratch_bo, 0, 0, compute_scratch_size);
+    }
+ 
+@@ -907,7 +914,7 @@ radv_update_preamble_cs(struct radv_queue_state *queue, struct radv_device *devi
+       result = radv_bo_create(device, NULL, needs->esgs_ring_size, 4096, RADEON_DOMAIN_VRAM, ring_bo_flags,
+                               RADV_BO_PRIORITY_SCRATCH, 0, true, &esgs_ring_bo);
+       if (result != VK_SUCCESS)
+-         goto fail;
++         PS4_FAIL(fail);
+       radv_rmv_log_command_buffer_bo_create(device, esgs_ring_bo, 0, 0, needs->esgs_ring_size);
+    }
+ 
+@@ -915,7 +922,7 @@ radv_update_preamble_cs(struct radv_queue_state *queue, struct radv_device *devi
+       result = radv_bo_create(device, NULL, needs->gsvs_ring_size, 4096, RADEON_DOMAIN_VRAM, ring_bo_flags,
+                               RADV_BO_PRIORITY_SCRATCH, 0, true, &gsvs_ring_bo);
+       if (result != VK_SUCCESS)
+-         goto fail;
++         PS4_FAIL(fail);
+       radv_rmv_log_command_buffer_bo_create(device, gsvs_ring_bo, 0, 0, needs->gsvs_ring_size);
+    }
+ 
+@@ -923,7 +930,7 @@ radv_update_preamble_cs(struct radv_queue_state *queue, struct radv_device *devi
+       result = radv_bo_create(device, NULL, pdev->info.total_tess_ring_size, 256, RADEON_DOMAIN_VRAM, ring_bo_flags,
+                               RADV_BO_PRIORITY_SCRATCH, 0, true, &tess_rings_bo);
+       if (result != VK_SUCCESS)
+-         goto fail;
++         PS4_FAIL(fail);
+       radv_rmv_log_command_buffer_bo_create(device, tess_rings_bo, 0, 0, pdev->info.total_tess_ring_size);
+    }
+ 
+@@ -939,12 +946,12 @@ radv_update_preamble_cs(struct radv_queue_state *queue, struct radv_device *devi
+       result = radv_bo_create(device, NULL, pdev->task_info.bo_size_bytes, 256, RADEON_DOMAIN_VRAM, task_rings_bo_flags,
+                               RADV_BO_PRIORITY_SCRATCH, 0, true, &task_rings_bo);
+       if (result != VK_SUCCESS)
+-         goto fail;
++         PS4_FAIL(fail);
+       radv_rmv_log_command_buffer_bo_create(device, task_rings_bo, 0, 0, pdev->task_info.bo_size_bytes);
+ 
+       result = radv_initialise_task_control_buffer(device, task_rings_bo);
+       if (result != VK_SUCCESS)
+-         goto fail;
++         PS4_FAIL(fail);
+    }
+ 
+    if (!queue->ring_info.mesh_scratch_ring && needs->mesh_scratch_ring) {
+@@ -954,7 +961,7 @@ radv_update_preamble_cs(struct radv_queue_state *queue, struct radv_device *devi
+                         RADEON_DOMAIN_VRAM, ring_bo_flags, RADV_BO_PRIORITY_SCRATCH, 0, true, &mesh_scratch_ring_bo);
+ 
+       if (result != VK_SUCCESS)
+-         goto fail;
++         PS4_FAIL(fail);
+       radv_rmv_log_command_buffer_bo_create(device, mesh_scratch_ring_bo, 0, 0,
+                                             AC_MESH_SCRATCH_NUM_ENTRIES * AC_MESH_SCRATCH_ENTRY_BYTES);
+    }
+@@ -965,7 +972,7 @@ radv_update_preamble_cs(struct radv_queue_state *queue, struct radv_device *devi
+                               RADEON_DOMAIN_VRAM, RADEON_FLAG_32BIT | RADEON_FLAG_DISCARDABLE | ring_bo_flags,
+                               RADV_BO_PRIORITY_SCRATCH, 0, true, &ge_rings_bo);
+       if (result != VK_SUCCESS)
+-         goto fail;
++         PS4_FAIL(fail);
+       radv_rmv_log_command_buffer_bo_create(device, ge_rings_bo, 0, 0, pdev->info.total_attribute_pos_prim_ring_size);
+    }
+ 
+@@ -978,14 +985,14 @@ radv_update_preamble_cs(struct radv_queue_state *queue, struct radv_device *devi
+       result = radv_bo_create(device, NULL, 256, 4, RADEON_DOMAIN_GDS, ring_bo_flags, RADV_BO_PRIORITY_SCRATCH, 0, true,
+                               &gds_bo);
+       if (result != VK_SUCCESS)
+-         goto fail;
++         PS4_FAIL(fail);
+ 
+       /* Add the GDS BO to our global BO list to prevent the kernel to emit a GDS switch and reset
+        * the state when a compute queue is used.
+        */
+       result = device->ws->buffer_make_resident(ws, gds_bo, true);
+       if (result != VK_SUCCESS)
+-         goto fail;
++         PS4_FAIL(fail);
+    }
+ 
+    if (!queue->ring_info.gds_oa && needs->gds_oa) {
+@@ -994,14 +1001,14 @@ radv_update_preamble_cs(struct radv_queue_state *queue, struct radv_device *devi
+       result = radv_bo_create(device, NULL, 1, 1, RADEON_DOMAIN_OA, ring_bo_flags, RADV_BO_PRIORITY_SCRATCH, 0, true,
+                               &gds_oa_bo);
+       if (result != VK_SUCCESS)
+-         goto fail;
++         PS4_FAIL(fail);
+ 
+       /* Add the GDS OA BO to our global BO list to prevent the kernel to emit a GDS switch and
+        * reset the state when a compute queue is used.
+        */
+       result = device->ws->buffer_make_resident(ws, gds_oa_bo, true);
+       if (result != VK_SUCCESS)
+-         goto fail;
++         PS4_FAIL(fail);
+    }
+ 
+    /* Re-initialize the descriptor BO when any ring BOs changed.
+@@ -1021,14 +1028,14 @@ radv_update_preamble_cs(struct radv_queue_state *queue, struct radv_device *devi
+                               RADEON_FLAG_CPU_ACCESS | RADEON_FLAG_NO_INTERPROCESS_SHARING | RADEON_FLAG_READ_ONLY,
+                               RADV_BO_PRIORITY_DESCRIPTOR, 0, true, &descriptor_bo);
+       if (result != VK_SUCCESS)
+-         goto fail;
++         PS4_FAIL(fail);
+    }
+ 
+    if (descriptor_bo != queue->descriptor_bo) {
+       uint32_t *map = (uint32_t *)radv_buffer_map(ws, descriptor_bo);
+       if (!map) {
+          result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
+-         goto fail;
++         PS4_FAIL(fail);
+       }
+ 
+       radv_fill_shader_rings(device, map, scratch_bo, needs->esgs_ring_size, esgs_ring_bo, needs->gsvs_ring_size,
+@@ -1045,7 +1052,7 @@ radv_update_preamble_cs(struct radv_queue_state *queue, struct radv_device *devi
+ 
+       result = radv_create_cmd_stream(device, hw_ip, false, &cs);
+       if (result != VK_SUCCESS)
+-         goto fail;
++         PS4_FAIL(fail);
+ 
+       radeon_check_space(ws, cs->b, 512);
+       dest_cs[i] = cs;
+@@ -1113,7 +1120,7 @@ radv_update_preamble_cs(struct radv_queue_state *queue, struct radv_device *devi
+ 
+       result = radv_finalize_cmd_stream(device, cs);
+       if (result != VK_SUCCESS)
+-         goto fail;
++         PS4_FAIL(fail);
+    }
+ 
+    if (queue->initial_full_flush_preamble_cs)
+@@ -1388,19 +1395,19 @@ radv_create_gang_wait_preambles_postambles(struct radv_queue *queue)
+ 
+    r = radv_create_cmd_stream(device, ip, false, &leader_pre_cs);
+    if (r != VK_SUCCESS)
+-      goto fail;
++      PS4_FAIL(fail);
+ 
+    radv_create_cmd_stream(device, ip, false, &leader_post_cs);
+    if (r != VK_SUCCESS)
+-      goto fail;
++      PS4_FAIL(fail);
+ 
+    radv_create_cmd_stream(device, AMD_IP_COMPUTE, false, &ace_pre_cs);
+    if (r != VK_SUCCESS)
+-      goto fail;
++      PS4_FAIL(fail);
+ 
+    radv_create_cmd_stream(device, AMD_IP_COMPUTE, false, &ace_post_cs);
+    if (r != VK_SUCCESS)
+-      goto fail;
++      PS4_FAIL(fail);
+ 
+    radeon_check_space(ws, leader_pre_cs->b, 256);
+    radeon_check_space(ws, leader_post_cs->b, 256);
+@@ -1439,16 +1446,16 @@ radv_create_gang_wait_preambles_postambles(struct radv_queue *queue)
+ 
+    r = radv_finalize_cmd_stream(device, leader_pre_cs);
+    if (r != VK_SUCCESS)
+-      goto fail;
++      PS4_FAIL(fail);
+    r = radv_finalize_cmd_stream(device, leader_post_cs);
+    if (r != VK_SUCCESS)
+-      goto fail;
++      PS4_FAIL(fail);
+    r = radv_finalize_cmd_stream(device, ace_pre_cs);
+    if (r != VK_SUCCESS)
+-      goto fail;
++      PS4_FAIL(fail);
+    r = radv_finalize_cmd_stream(device, ace_post_cs);
+    if (r != VK_SUCCESS)
+-      goto fail;
++      PS4_FAIL(fail);
+ 
+    queue->gang_sem_bo = gang_sem_bo;
+    queue->state.gang_wait_preamble_cs = leader_pre_cs;
+@@ -1640,7 +1647,7 @@ radv_queue_submit_normal(struct radv_queue *queue, struct vk_queue_submit *submi
+       struct vk_sync_wait *new_waits = malloc(sizeof(struct vk_sync_wait) * (wait_count + 1));
+       if (!new_waits) {
+          result = VK_ERROR_OUT_OF_HOST_MEMORY;
+-         goto fail;
++         PS4_FAIL(fail);
+       }
+ 
+       memcpy(new_waits, submission->waits, sizeof(struct vk_sync_wait) * submission->wait_count);
+@@ -1679,7 +1686,7 @@ radv_queue_submit_normal(struct radv_queue *queue, struct vk_queue_submit *submi
+ 
+          if (!perf_ctr_lock_cs || !perf_ctr_unlock_cs) {
+             result = VK_ERROR_OUT_OF_HOST_MEMORY;
+-            goto fail;
++            PS4_FAIL(fail);
+          }
+ 
+          initial_preambles[num_initial_preambles++] = perf_ctr_lock_cs->b;
+@@ -1779,7 +1786,7 @@ radv_queue_submit_normal(struct radv_queue *queue, struct vk_queue_submit *submi
+                                      last_submit ? submission->signal_count : 0, submission->signals);
+ 
+       if (result != VK_SUCCESS)
+-         goto fail;
++         PS4_FAIL(fail);
+ 
+       if (radv_device_fault_detection_enabled(device)) {
+          result = radv_check_gpu_hangs(queue, &submit);
+@@ -1829,21 +1836,21 @@ radv_queue_sparse_submit(struct vk_queue *vqueue, struct vk_queue_submit *submis
+ 
+    result = radv_queue_submit_bind_sparse_memory(device, submission);
+    if (result != VK_SUCCESS)
+-      goto fail;
++      PS4_FAIL(fail);
+ 
+    /* We do a CPU wait here, in part to avoid more winsys mechanisms. In the likely kernel explicit
+     * sync mechanism, we'd need to do a CPU wait anyway. Haven't seen this be a perf issue yet, but
+     * we have to make sure the queue always has its submission thread enabled. */
+    result = vk_sync_wait_many(&device->vk, submission->wait_count, submission->waits, 0, UINT64_MAX);
+    if (result != VK_SUCCESS)
+-      goto fail;
++      PS4_FAIL(fail);
+ 
+    /* Ignore all the commandbuffers. They're necessarily empty anyway. */
+ 
+    for (unsigned i = 0; i < submission->signal_count; ++i) {
+       result = vk_sync_signal(&device->vk, submission->signals[i].sync, submission->signals[i].signal_value);
+       if (result != VK_SUCCESS)
+-         goto fail;
++         PS4_FAIL(fail);
+    }
+ 
+ fail:
+@@ -1869,7 +1876,7 @@ radv_queue_submit(struct vk_queue *vqueue, struct vk_queue_submit *submission)
+ 
+    VkResult result = radv_queue_submit_bind_sparse_memory(device, submission);
+    if (result != VK_SUCCESS)
+-      goto fail;
++      PS4_FAIL(fail);
+ 
+    if (!submission->command_buffer_count && !submission->wait_count && !submission->signal_count)
+       return VK_SUCCESS;
+@@ -1937,17 +1944,17 @@ radv_queue_init(struct radv_device *device, struct radv_queue *queue, int idx,
+    if (queue->state.uses_shadow_regs) {
+       result = radv_create_shadow_regs_preamble(device, &queue->state);
+       if (result != VK_SUCCESS)
+-         goto fail;
++         PS4_FAIL(fail);
+       result = radv_init_shadowed_regs_buffer_state(device, queue);
+       if (result != VK_SUCCESS)
+-         goto fail;
++         PS4_FAIL(fail);
+    }
+ 
+    if (pdev->info.gfx_level <= GFX7 &&
+        (queue->state.qf == RADV_QUEUE_GENERAL || queue->state.qf == RADV_QUEUE_COMPUTE)) {
+       result = radv_create_flush_postamble(queue);
+       if (result != VK_SUCCESS)
+-         goto fail;
++         PS4_FAIL(fail);
+    }
+ 
+    if (queue->state.qf == RADV_QUEUE_SPARSE) {
 diff --git a/src/amd/vulkan/winsys/amdgpu/radv_amdgpu_winsys.c b/src/amd/vulkan/winsys/amdgpu/radv_amdgpu_winsys.c
 index 438b434..c836a6e 100644
 --- a/src/amd/vulkan/winsys/amdgpu/radv_amdgpu_winsys.c
