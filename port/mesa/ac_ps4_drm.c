@@ -63,6 +63,10 @@ int sceKernelVirtualQuery(const void *addr, int flags, struct ps4_vq_info *info,
 #define PS4_WB_ONION 0
 #define PS4_WC_GARLIC 3
 #define PS4_PAGE 0x4000ull /* direct memory and mapping granularity */
+/* Every buffer gets this much zeroed memory of its own mapped right after it: something wrote
+ * past the end of a buffer into the next one (a command buffer) and the system killed the app.
+ * Writes past the end now land here, harmlessly, and are reported (ps4_check_tail). */
+#define PS4_TAIL 0x10000ull
 
 /* GPU virtual address windows: ranges of the process address space reserved at startup (the
  * kernel picks free ones - fixed addresses collided with the app heap), below the GPU's 40-bit
@@ -97,6 +101,8 @@ struct amdgpu_bo {
    uint64_t flags;
    off_t pad_phys; /* RADEON_FLAG_VM_PAD_1PAGE page, when it lies past the buffer (else -1) */
    uint64_t last_va; /* last GPU address mapped at offset 0 (kept after unmap, for reports) */
+   bool tail_mapped;   /* the overflow tail is mapped after the buffer (see PS4_TAIL) */
+   bool tail_reported;
 };
 
 struct amdgpu_va {
@@ -170,6 +176,8 @@ struct ac_drm_device {
 
 #define FENCE_IB_DW 16
 #define FENCE_IB_COUNT 512
+
+static void ps4_scan_tails(ac_drm_device *dev);
 
 /* Guards the address-space heaps (va_range_free has no device argument). */
 static simple_mtx_t ps4_va_lock = SIMPLE_MTX_INITIALIZER;
@@ -382,6 +390,9 @@ ps4_report_hang(ac_drm_device *dev, uint64_t waited_seq)
       for (unsigned i = 0; i < dev->recent[r].num_ibs; i++)
          ps4_describe_va(dev, f, dev->recent[r].va[i]);
       ps4_check_overlaps(dev, f);
+      simple_mtx_lock(&dev->lock);
+      ps4_scan_tails(dev); /* logs to radv-ps4.log */
+      simple_mtx_unlock(&dev->lock);
       fprintf(f, "==== execution check (memory writes the GPU did / didn't do) ====\n");
       for (unsigned i = 0; i < dev->recent[r].num_ibs; i++) {
          fprintf(f, "-- IB %u\n", i);
@@ -674,8 +685,8 @@ ac_drm_bo_alloc(ac_drm_device *dev, struct amdgpu_bo_alloc_request *req, ac_drm_
                        ? PS4_WC_GARLIC
                        : PS4_WB_ONION;
    const uint64_t align = MAX2(util_next_power_of_two64(MAX2(req->phys_alignment, 1)), PS4_PAGE);
-   int r = sceKernelAllocateDirectMemory(0, sceKernelGetDirectMemorySize(), bo->size, align, type,
-                                         &bo->phys);
+   int r = sceKernelAllocateDirectMemory(0, sceKernelGetDirectMemorySize(), bo->size + PS4_TAIL,
+                                         align, type, &bo->phys);
    if (r) {
       ps4_log("radv/ps4: allocating %llu bytes of direct memory failed (%#x)\n",
               (unsigned long long)bo->size, r);
@@ -717,7 +728,7 @@ ac_drm_bo_free(ac_drm_device *dev, ac_drm_bo bo)
       return 0;
    if (b->cpu_owned)
       sceKernelMunmap(b->cpu, b->size);
-   const int rr = sceKernelReleaseDirectMemory(b->phys, b->size);
+   const int rr = sceKernelReleaseDirectMemory(b->phys, b->size + PS4_TAIL);
    if (rr) {
       static unsigned logged;
       if (logged++ < 16)
@@ -814,6 +825,54 @@ ac_drm_bo_wait_for_idle(ac_drm_device *dev, ac_drm_bo bo, uint64_t timeout_ns, b
    return 0;
 }
 
+/* Was anything written past the end of the buffer? `full`: look at the whole tail, else at the
+ * first 64 bytes of each 4 KiB of it. Logs a buffer once. Called with dev->lock held. */
+static void
+ps4_check_tail(ac_drm_device *dev, struct amdgpu_bo *b, const char *when)
+{
+   if (!b->tail_mapped || b->tail_reported)
+      return;
+   const volatile uint32_t *t = (const volatile uint32_t *)(uintptr_t)(b->last_va + b->size);
+   bool dirty = false;
+   for (unsigned page = 0; page < PS4_TAIL / 4096 && !dirty; page++)
+      for (unsigned i = 0; i < 16 && !dirty; i++)
+         dirty = t[page * 1024 + i] != 0;
+   if (!dirty)
+      return;
+   b->tail_reported = true;
+   unsigned count = 0, first = ~0u, last = 0;
+   char sample[512];
+   int len = 0;
+   for (unsigned i = 0; i < PS4_TAIL / 4; i++) {
+      const uint32_t v = t[i];
+      if (!v)
+         continue;
+      if (count < 24 && len < (int)sizeof(sample) - 24)
+         len += snprintf(sample + len, sizeof(sample) - len, " +%#x:%08x", i * 4, v);
+      count++;
+      first = MIN2(first, i * 4);
+      last = i * 4;
+   }
+   ps4_log("radv/ps4: WRITE PAST THE END of bo %u (%s): va %#llx size %#llx heap %#x flags %#llx "
+           "phys %#llx, after submission %llu (GPU completed %llu): %u dwords written at "
+           "+%#x..+%#x past the end:%s\n",
+           b->handle, when, (unsigned long long)b->last_va, (unsigned long long)b->size, b->heap,
+           (unsigned long long)b->flags, (unsigned long long)b->phys,
+           (unsigned long long)dev->last_seq, (unsigned long long)ps4_completed(dev), count, first,
+           last, sample);
+}
+
+/* All live buffers' tails (every 256 submissions; dev->lock held). */
+static void
+ps4_scan_tails(ac_drm_device *dev)
+{
+   for (unsigned h = 1; h < dev->num_bos; h++) {
+      struct amdgpu_bo *b = dev->bos[h];
+      if (b)
+         ps4_check_tail(dev, b, "live");
+   }
+}
+
 static int
 ps4_va_op(ac_drm_device *dev, uint32_t bo_handle, uint64_t offset, uint64_t size, uint64_t addr,
           uint64_t flags, uint32_t ops)
@@ -843,7 +902,7 @@ ps4_va_op(ac_drm_device *dev, uint32_t bo_handle, uint64_t offset, uint64_t size
          /* Starting inside the buffer's mapping: the pad page RADV wants (4 KiB) is covered;
           * the length has been rounded to the 16 KiB system page by then (getpagesize). */
          (void)exact_size;
-         if (addr >= cpu && addr < cpu + b->size)
+         if (addr >= cpu && addr < cpu + b->size + (b->tail_mapped ? PS4_TAIL : 0))
             return 0;
          if (addr != cpu + b->size || size != PS4_PAGE || b->pad_phys >= 0) {
             ps4_log("radv/ps4: unsupported alias mapping of bo %u at %#llx (+%#llx, %#llx bytes)\n",
@@ -864,9 +923,16 @@ ps4_va_op(ac_drm_device *dev, uint32_t bo_handle, uint64_t offset, uint64_t size
          b->pad_phys = pad;
          return 0;
       }
-      ps4_check_va_free(addr, size, "map");
-      int r = sceKernelMapDirectMemory(&a, size, PS4_PROT_CPU_RW | PS4_PROT_GPU_RW, PS4_MAP_FIXED,
-                                       b->phys + offset, PS4_PAGE);
+      /* The whole buffer: map its overflow tail too. */
+      const bool whole = offset == 0 && size == b->size && !b->cpu;
+      const uint64_t map_size = whole ? size + PS4_TAIL : size;
+      ps4_check_va_free(addr, map_size, "map");
+      int r = sceKernelMapDirectMemory(&a, map_size, PS4_PROT_CPU_RW | PS4_PROT_GPU_RW,
+                                       PS4_MAP_FIXED, b->phys + offset, PS4_PAGE);
+      if (!r && whole && a == (void *)(uintptr_t)addr) {
+         memset((uint8_t *)a + size, 0, PS4_TAIL);
+         b->tail_mapped = true;
+      }
       if (r || a != (void *)(uintptr_t)addr) {
          ps4_log("radv/ps4: mapping %#llx+%#llx at %#llx failed (%#x)\n",
                  (unsigned long long)b->phys, (unsigned long long)offset,
@@ -885,8 +951,15 @@ ps4_va_op(ac_drm_device *dev, uint32_t bo_handle, uint64_t offset, uint64_t size
    case AMDGPU_VA_OP_UNMAP:
    case AMDGPU_VA_OP_CLEAR: {
       struct amdgpu_bo *b = ps4_bo(dev, bo_handle);
+      simple_mtx_lock(&dev->lock); /* against ps4_scan_tails */
+      if (b && b->tail_mapped && addr == b->last_va) {
+         ps4_check_tail(dev, b, "unmapped");
+         b->tail_mapped = false;
+         size = MAX2(size, b->size + PS4_TAIL);
+      }
       if (b && b->cpu == (void *)(uintptr_t)addr && !b->cpu_owned)
          b->cpu = NULL;
+      simple_mtx_unlock(&dev->lock);
       ps4_record(dev, 'U', b, addr, size);
       /* Unmap explicitly, then put the reservation back so the window stays ours. (Reserving
        * over a live mapping isn't guaranteed to replace it; a mapping left behind would vanish
@@ -945,7 +1018,7 @@ ac_drm_va_range_alloc(ac_drm_device *dev, enum amdgpu_gpu_va_range va_range_type
                       uint64_t flags)
 {
    struct util_vma_heap *heap = flags & AMDGPU_VA_RANGE_32_BIT ? &dev->va32_heap : &dev->va_heap;
-   size = align64(size, PS4_PAGE);
+   size = align64(size, PS4_PAGE) + PS4_TAIL;
    const uint64_t align = MAX2(util_next_power_of_two64(MAX2(va_base_alignment, 1)), PS4_PAGE);
 
    simple_mtx_lock(&ps4_va_lock);
@@ -1227,6 +1300,9 @@ ps4_check_ib_chain(ac_drm_device *dev, const uint32_t *ib, unsigned num_dw, uint
                ps4_find_writer(dev, f, (uintptr_t)ib);
                fclose(f);
             }
+            simple_mtx_lock(&dev->lock);
+            ps4_scan_tails(dev);
+            simple_mtx_unlock(&dev->lock);
          }
          return false;
       }
@@ -1366,6 +1442,9 @@ ac_drm_cs_submit_raw2(ac_drm_device *dev, uint32_t ctx_id, uint32_t bo_list_hand
       simple_mtx_unlock(&dev->lock);
       return -EINVAL;
    }
+
+   if (seq % 256 == 0)
+      ps4_scan_tails(dev);
 
    if (signal_chunk) {
       const bool timeline = signal_chunk->chunk_id == AMDGPU_CHUNK_ID_SYNCOBJ_TIMELINE_SIGNAL;
