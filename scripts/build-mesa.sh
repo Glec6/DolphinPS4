@@ -17,7 +17,8 @@ export PATH="$ROOT/mesa-venv/bin:$ROOT/host-tools/bin:$PATH"
 # Header-only libdrm / libdrm_amdgpu packages for meson's dependency() checks.
 pc="$ROOT/mesa-pkgconfig"
 mkdir -p "$pc"
-for name in libdrm libdrm_amdgpu; do
+rm -f "$pc/libdrm.pc"
+for name in libdrm_amdgpu; do
     cat > "$pc/$name.pc" <<EOF
 Name: $name
 Description: libdrm headers only (PS4 has no DRM)
@@ -30,7 +31,7 @@ done
 flags="'-target', 'x86_64-pc-freebsd12-elf', '-D_GNU_SOURCE', '-D__PS4__', '-D__OPENORBIS__',
   '-D__ORBIS__', '-DPS4', '-D__BSD_VISIBLE', '-D_BSD_SOURCE', '-fPIC', '-funwind-tables',
   '-march=btver2', '-isysroot', '$OPENORBIS', '-isystem', '$SYSROOT/libc-overlay',
-  '-isystem', '$HERE/../port/mesa-overlay',
+  '-isystem', '$HERE/../port/mesa-overlay', '-I$ROOT/src/libdrm', '-I$ROOT/src/libdrm/include/drm',
   '-isystem', '$OPENORBIS/include', '-I$OPENORBIS/usr/include'"
 link="'-fuse-ld=$OPENORBIS/bin/ld.lld', '-nostdlib', '-Wl,-m,elf_x86_64', '-Wl,-pie',
   '-Wl,--eh-frame-hdr', '-Wl,--script,$OPENORBIS/link.x', '-L$OPENORBIS/lib',
@@ -61,6 +62,9 @@ cpu_family = 'x86_64'
 cpu = 'x86_64'
 endian = 'little'
 EOF
+
+# The PS4 implementation of the amdgpu kernel interface lives in this repo.
+tr -d '\015' < "$HERE/../port/mesa/ac_ps4_drm.c" > "$MESA/src/amd/common/ac_ps4_drm.c"
 
 if [ "${1:-}" = setup ] || [ ! -f "$build/build.ninja" ]; then
     rm -rf "$build"
