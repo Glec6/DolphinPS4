@@ -2581,7 +2581,7 @@ index 51c3fff..8e91ab7 100644
 +  ps4_add_eboot(dolphin-nogui)
 +endif()
 diff --git a/Source/Core/DolphinNoGUI/MainNoGUI.cpp b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
-index 3bf40ea..7e0f3ec 100644
+index 3bf40ea..70b5eae 100644
 --- a/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 +++ b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 @@ -5,7 +5,9 @@
@@ -2616,7 +2616,7 @@ index 3bf40ea..7e0f3ec 100644
  #include "UICommon/CommandLineParse.h"
  #ifdef USE_DISCORD_PRESENCE
  #include "UICommon/DiscordPresence.h"
-@@ -31,6 +40,30 @@
+@@ -31,6 +40,35 @@
  
  static std::unique_ptr<Platform> s_platform;
  
@@ -2633,6 +2633,11 @@ index 3bf40ea..7e0f3ec 100644
 +extern "C" int ps4_gp_fuse;     // Core/PowerPC/Jit64/Jit.cpp
 +extern "C" int ps4_tex_hash_once;  // VideoCommon/TextureCacheBase.cpp
 +extern "C" int ps4_lazy_lfs;       // Core/PowerPC/Jit64/Jit.cpp
++// libkernel: console model and CPU clock (startup log).
++extern "C" uint64_t sceKernelGetCpuFrequency(void);
++extern "C" int sceKernelHasNeoMode(void);
++extern "C" int sceKernelIsNeoMode(void);
++extern "C" int sceKernelIsAuthenticNeo(void);
 +extern "C" int ps4_vk_thread, ps4_vk_thread_core;  // VideoBackends/Vulkan/PS4CommandRecorder.cpp
 +extern "C" int ps4_auto_clock, ps4_auto_clock_min, ps4_auto_clock_max;  // PlatformPS4.cpp
 +extern "C" size_t sceKernelGetDirectMemorySize();  // libkernel
@@ -2647,7 +2652,7 @@ index 3bf40ea..7e0f3ec 100644
  static void signal_handler(int)
  {
    constexpr char message[] = "A signal was received. A second signal will force Dolphin to stop.\n";
-@@ -173,6 +206,10 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
+@@ -173,6 +211,10 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
    if (platform_name == "macos" || platform_name.empty())
      return Platform::CreateMacOSPlatform();
  #endif
@@ -2658,7 +2663,7 @@ index 3bf40ea..7e0f3ec 100644
  
    if (platform_name == "headless" || platform_name.empty())
      return Platform::CreateHeadlessPlatform();
-@@ -184,8 +221,17 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
+@@ -184,8 +226,17 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
  #define main app_main
  #endif
  
@@ -2677,7 +2682,7 @@ index 3bf40ea..7e0f3ec 100644
    const auto parser =
        CommandLineParse::CreateParser(CommandLineParse::ParserOptions::OmitGUIOptions);
    parser->add_option("-p", "--platform")
-@@ -207,6 +253,10 @@ int main(const int argc, char* argv[])
+@@ -207,6 +258,10 @@ int main(const int argc, char* argv[])
  #ifdef __APPLE__
                  ,
                  "macos"
@@ -2688,7 +2693,7 @@ index 3bf40ea..7e0f3ec 100644
  #endif
        });
  
-@@ -270,7 +320,198 @@ int main(const int argc, char* argv[])
+@@ -270,7 +325,223 @@ int main(const int argc, char* argv[])
  
    UICommon::SetUserDirectory(user_directory);
    UICommon::Init();
@@ -2851,6 +2856,31 @@ index 3bf40ea..7e0f3ec 100644
 +    {
 +      const std::string cpu = cpu_info.Summarize();
 +      Platform::BootTrace(("host CPU: " + cpu).c_str());
++      // Which PS4 and how fast its CPU really runs: a PS4 Pro runs its CPU at 2.13 GHz instead of
++      // 1.6 GHz in Pro mode or with Boost Mode on - ~1.33x for the emulated CPU, which limits most
++      // games. Measured with a chain of dependent adds (1 cycle each on Jaguar).
++      timespec t0, t1;
++      clock_gettime(CLOCK_MONOTONIC, &t0);
++      u64 chain = 0;
++      u64 iterations = 12500000;  // 8 adds each: 100M cycles
++      asm volatile("1:\n\t"
++                   "add $1, %0\n\tadd $1, %0\n\tadd $1, %0\n\tadd $1, %0\n\t"
++                   "add $1, %0\n\tadd $1, %0\n\tadd $1, %0\n\tadd $1, %0\n\t"
++                   "dec %1\n\tjnz 1b"
++                   : "+r"(chain), "+r"(iterations)
++                   :
++                   : "cc");
++      clock_gettime(CLOCK_MONOTONIC, &t1);
++      const double seconds =
++          static_cast<double>(t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) / 1e9;
++      char line[256];
++      snprintf(line, sizeof(line),
++               "host CPU clock: measured %.0f MHz (%llu adds); sceKernelGetCpuFrequency %llu, "
++               "HasNeoMode %d, IsNeoMode %d, IsAuthenticNeo %d",
++               static_cast<double>(chain) / seconds / 1e6, static_cast<unsigned long long>(chain),
++               static_cast<unsigned long long>(sceKernelGetCpuFrequency()), sceKernelHasNeoMode(),
++               sceKernelIsNeoMode(), sceKernelIsAuthenticNeo());
++      Platform::BootTrace(line);
 +    }
 +    // show_fps=off hides the FPS / speed counter in the top-left corner.
 +    ps4_show_fps = Platform::GetPS4Option("show_fps", "on") == "on";
@@ -2887,7 +2917,7 @@ index 3bf40ea..7e0f3ec 100644
  
    Common::ScopeGuard ui_common_guard([] {
      UICommon::ShutdownControllers();
-@@ -284,6 +525,12 @@ int main(const int argc, char* argv[])
+@@ -284,6 +555,12 @@ int main(const int argc, char* argv[])
    }
  
    auto core_state_changed_hook = Core::AddOnStateChangedCallback([](const Core::State state) {
@@ -2900,7 +2930,7 @@ index 3bf40ea..7e0f3ec 100644
      if (state == Core::State::Uninitialized)
        s_platform->Stop();
    });
-@@ -303,6 +550,9 @@ int main(const int argc, char* argv[])
+@@ -303,6 +580,9 @@ int main(const int argc, char* argv[])
  
    DolphinAnalytics::Instance().ReportDolphinStart("nogui");
  
