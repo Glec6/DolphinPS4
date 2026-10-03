@@ -319,7 +319,10 @@ extern "C" void ps4_watch_thread(const char* name) {
     if (index >= kMaxWatched)
         return;
     snprintf(g_watched[index].name, sizeof(g_watched[index].name), "%s", name ? name : "?");
-    g_watched[index].stack_limit = reinterpret_cast<uintptr_t>(__builtin_frame_address(0)) + 256;
+    // Up to and including this function's own return address (frame + 16): threads that register
+    // first thing (e.g. the analytics reporter) sit within 256 bytes of their stack's top, and a
+    // larger margin read past it. Where a thread is stuck lies deeper than this anyway.
+    g_watched[index].stack_limit = reinterpret_cast<uintptr_t>(__builtin_frame_address(0)) + 16;
     g_watched[index].tid = pthread_getthreadid_np();
     g_watched[index].thread.store(self);
 }
