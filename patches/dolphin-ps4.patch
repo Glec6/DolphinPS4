@@ -3815,10 +3815,10 @@ index f4dc8a9..4e5ff67 100644
  
 diff --git a/Source/Core/DolphinNoGUI/PlatformPS4.cpp b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
 new file mode 100644
-index 0000000..25bcab0
+index 0000000..16b9fa1
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
-@@ -0,0 +1,658 @@
+@@ -0,0 +1,735 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -4289,6 +4289,73 @@ index 0000000..25bcab0
 +  return wsi;
 +}
 +
++// Multi-disc games: "Name (Disc 1).rvz", "Name (Disc 2).rvz" (the usual naming). Finds the disc
++// number in a file name: position and length of its digits, or false.
++bool FindDiscNumber(const std::string& name, size_t* digits, size_t* length, int* number)
++{
++  std::string lower = name;
++  std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
++  for (size_t at = lower.find("(disc "); at != std::string::npos;
++       at = lower.find("(disc ", at + 1))
++  {
++    size_t end = at + 6;
++    while (end < lower.size() && std::isdigit(static_cast<unsigned char>(lower[end])))
++      end++;
++    if (end > at + 6 && end < lower.size() && lower[end] == ')')
++    {
++      *digits = at + 6;
++      *length = end - (at + 6);
++      *number = std::atoi(lower.substr(at + 6, *length).c_str());
++      return true;
++    }
++  }
++  return false;
++}
++
++// All discs of the game `path` belongs to, `path` first, then the others in disc order (wrapping
++// around). Dolphin switches between them when the game asks for another disc, so players never
++// have to write an .m3u playlist.
++std::vector<std::string> FindAllDiscs(const std::string& path)
++{
++  const std::filesystem::path chosen(path);
++  const std::string name = chosen.filename().string();
++  size_t digits, length;
++  int number;
++  if (!FindDiscNumber(name, &digits, &length, &number))
++    return {path};
++  const std::string prefix = name.substr(0, digits);
++  const std::string suffix = name.substr(digits + length);
++  std::vector<std::pair<int, std::string>> discs;
++  std::error_code error;
++  for (const auto& entry : std::filesystem::directory_iterator(chosen.parent_path(), error))
++  {
++    const std::string other = entry.path().filename().string();
++    size_t other_digits, other_length;
++    int other_number;
++    if (FindDiscNumber(other, &other_digits, &other_length, &other_number) &&
++        other.substr(0, other_digits) == prefix &&
++        other.substr(other_digits + other_length) == suffix)
++    {
++      discs.emplace_back(other_number, entry.path().string());
++    }
++  }
++  std::sort(discs.begin(), discs.end());
++  std::vector<std::string> ordered;
++  for (const auto& [disc, file] : discs)
++  {
++    if (disc >= number)
++      ordered.push_back(file);
++  }
++  for (const auto& [disc, file] : discs)
++  {
++    if (disc < number)
++      ordered.push_back(file);
++  }
++  if (ordered.empty() || ordered.front() != chosen.string())
++    return {path};  // the chosen file wasn't found by the scan (odd path): just boot it
++  return ordered;
++}
++
 +std::string FindGame()
 +{
 +  // /data/DolphinPS4/boot.txt: path of the game to start (first line).
@@ -4305,14 +4372,20 @@ index 0000000..25bcab0
 +  }
 +
 +  // Otherwise the first game in /data/DolphinPS4/games, in name order.
-+  const std::array<std::string, 11> extensions = {".iso", ".gcm", ".ciso", ".gcz", ".wbfs",
-+                                                  ".wia", ".rvz", ".dol", ".elf", ".wad", ".nkit.iso"};
++  const std::array<std::string, 12> extensions = {".iso", ".gcm", ".ciso", ".gcz", ".wbfs",
++                                                  ".wia", ".rvz", ".dol", ".elf", ".wad", ".nkit.iso",
++                                                  ".m3u"};
 +  std::vector<std::string> games;
 +  std::error_code error;
 +  for (const auto& entry :
 +       std::filesystem::directory_iterator(std::string(PS4_DATA_DIR_PATH) + "/games", error))
 +  {
 +    std::string name = entry.path().filename().string();
++    // Only the first disc of a multi-disc game is a game to start (the others come with it).
++    size_t disc_digits, disc_length;
++    int disc_number;
++    if (FindDiscNumber(name, &disc_digits, &disc_length, &disc_number) && disc_number != 1)
++      continue;
 +    std::string lower = name;
 +    std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
 +    for (const std::string& extension : extensions)
@@ -4472,8 +4545,12 @@ index 0000000..25bcab0
 +  }
 +  else
 +  {
-+    fprintf(stderr, "[dolphin] booting %s\n", game.c_str());
-+    args.push_back("--exec=" + game);
++    for (const std::string& disc : FindAllDiscs(game))
++    {
++      fprintf(stderr, "[dolphin] booting %s\n", disc.c_str());
++      BootTrace(("boot: " + disc).c_str());
++      args.push_back("--exec=" + disc);
++    }
 +  }
 +  return args;
 +}
