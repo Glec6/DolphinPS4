@@ -3881,10 +3881,10 @@ index f4dc8a9..4e5ff67 100644
  
 diff --git a/Source/Core/DolphinNoGUI/PlatformPS4.cpp b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
 new file mode 100644
-index 0000000..728ce65
+index 0000000..623709b
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
-@@ -0,0 +1,894 @@
+@@ -0,0 +1,904 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -3934,6 +3934,7 @@ index 0000000..728ce65
 +int ps4_auto_clock = 0, ps4_auto_clock_min = 60, ps4_auto_clock_max = 100;
 +extern "C" unsigned long long ps4_scene_stats[8];       // VideoCommon/Statistics.cpp
 +extern "C" long long ps4_wait_total(int slot);            // port/ps4_sampler.cpp
++extern "C" unsigned long long ps4_clock_reads;            // port/ps4_runtime.cpp
 +extern "C" unsigned long long ps4_soft_tlb_hits, ps4_soft_tlb_misses;           // MMU.cpp
 +extern "C" long long ps4_compile_internal_bytes, ps4_link_internal_bytes;  // ProgramShaderCache
 +#include "Core/System.h"
@@ -4326,6 +4327,15 @@ index 0000000..728ce65
 +                   ", waits ms/s: cpu-for-gpu %lld gpu-idle %lld vk-drain %lld fences %lld, "
 +                   "compiles %lld/s %lld ms/s",
 +                   ms[0], ms[1], ms[2], ms[3], ms[5], ms[4]);
++        }
++        {
++          // Monotonic clock reads served from the time stamp counter (port/ps4_runtime.cpp).
++          static unsigned long long s_last_reads = 0;
++          const unsigned long long reads = ps4_clock_reads;
++          const size_t used4 = strlen(line);
++          snprintf(line + used4, sizeof(line) - used4, ", clock reads %llu/s",
++                   static_cast<unsigned long long>((reads - s_last_reads) / period));
++          s_last_reads = reads;
 +        }
 +        const size_t used2 = strlen(line);
 +        snprintf(line + used2, sizeof(line) - used2,

@@ -21,6 +21,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <time.h>
 
 #include <atomic>
 #include <sys/types.h>
@@ -507,6 +508,46 @@ void* __wrap_mmap(void* addr, size_t len, int prot, int flags, int fd, off_t off
                 len / 1024, prot, result, elf(__builtin_return_address(0)), available / MB);
     }
     return result;
+}
+
+// clock_gettime for every caller (--wrap): CLOCK_MONOTONIC from the CPU's time stamp counter.
+// The kernel's clock_gettime is a system call (FreeBSD 9 has no user-space time page), and
+// Dolphin reads the monotonic clock thousands of times a second on both emulation threads
+// (CoreTiming's throttle, std::chrono timeouts, the port's wait timers): ~6-9% of each thread in
+// FIFA Street 2. The counter is invariant on the PS4's Jaguar cores; it is anchored to the
+// kernel's clock on first use, so absolute times from both agree. Other clocks go to the kernel.
+int __real_clock_gettime(clockid_t id, struct timespec* ts);
+uint64_t sceKernelGetTscFrequency_ps4() __asm__("sceKernelGetTscFrequency");
+unsigned long long ps4_clock_reads;  // DolphinNoGUI monitor (approximate, unsynchronised)
+
+int __wrap_clock_gettime(clockid_t id, struct timespec* ts) {
+    if (id != CLOCK_MONOTONIC)
+        return __real_clock_gettime(id, ts);
+    struct Anchor {
+        uint64_t tsc = 0, ns = 0, mult = 0;  // ns per tick as 32.32 fixed point
+        bool ok = false;
+    };
+    static const Anchor anchor = [] {
+        Anchor a;
+        const uint64_t freq = static_cast<uint64_t>(sceKernelGetTscFrequency_ps4());
+        struct timespec now;
+        if (freq < 1000000 || __real_clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+            return a;
+        a.tsc = __builtin_ia32_rdtsc();
+        a.ns = static_cast<uint64_t>(now.tv_sec) * 1000000000ull + static_cast<uint64_t>(now.tv_nsec);
+        a.mult = (1000000000ull << 32) / freq;
+        a.ok = true;
+        return a;
+    }();
+    if (!anchor.ok)
+        return __real_clock_gettime(id, ts);
+    ps4_clock_reads++;
+    const uint64_t ticks = __builtin_ia32_rdtsc() - anchor.tsc;
+    const uint64_t ns =
+        anchor.ns + static_cast<uint64_t>((static_cast<unsigned __int128>(ticks) * anchor.mult) >> 32);
+    ts->tv_sec = static_cast<time_t>(ns / 1000000000ull);
+    ts->tv_nsec = static_cast<long>(ns % 1000000000ull);
+    return 0;
 }
 
 // pthread_once for every caller (--wrap): the kernel's (FreeBSD) version treats pthread_once_t
