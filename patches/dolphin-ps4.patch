@@ -253,6 +253,29 @@ index 97d8ad8..eec1c4a 100644
  elseif(ENABLE_X11 AND X11_FOUND)
    target_sources(common PRIVATE
      GL/GLX11Window.cpp
+diff --git a/Source/Core/Common/Event.h b/Source/Core/Common/Event.h
+index 67dbd1e..3f5baed 100644
+--- a/Source/Core/Common/Event.h
++++ b/Source/Core/Common/Event.h
+@@ -48,7 +48,18 @@ public:
+       return;
+ 
+     std::unique_lock<std::mutex> lk(m_mutex);
++#ifdef __ORBIS__
++    // PS4: a notification can get lost when a signal interrupts the wait (the port's sampling
++    // profiler and hang watchdog use signals): SADX froze with the CPU thread waiting here for the
++    // GPU loop's "done" (BlockingLoop) that had already been set. Re-check every 100 ms rather
++    // than wait forever.
++    while (!m_condvar.wait_for(lk, std::chrono::milliseconds(100),
++                               [&] { return m_flag.TestAndClear(); }))
++    {
++    }
++#else
+     m_condvar.wait(lk, [&] { return m_flag.TestAndClear(); });
++#endif
+   }
+ 
+   template <class Rep, class Period>
 diff --git a/Source/Core/Common/FileUtil.cpp b/Source/Core/Common/FileUtil.cpp
 index 053614f..a9e4a49 100644
 --- a/Source/Core/Common/FileUtil.cpp
@@ -2198,10 +2221,10 @@ index f4dc8a9..4e5ff67 100644
  
 diff --git a/Source/Core/DolphinNoGUI/PlatformPS4.cpp b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
 new file mode 100644
-index 0000000..19c4264
+index 0000000..018599b
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
-@@ -0,0 +1,553 @@
+@@ -0,0 +1,554 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -2536,7 +2559,8 @@ index 0000000..19c4264
 +      }
 +      watchdog_ticks = ticks;
 +      // One self-test dump during normal play, so a broken dump shows up long before a real hang.
-+      static bool s_dump_tested = false;
++      // (Self-test off: it signals every thread, and signals can make waits miss notifications.)
++      static bool s_dump_tested = true;
 +      if (!s_dump_tested && seconds >= 60)
 +      {
 +        s_dump_tested = true;
