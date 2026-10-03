@@ -1236,6 +1236,41 @@ index fc614fd..25a840f 100644
    if (Config::Get(Config::MAIN_CPU_CORE) != PowerPC::CPUCore::Interpreter)
    {
      system.GetPowerPC().SetMode(PowerPC::CoreMode::JIT);
+diff --git a/Source/Core/Core/CoreTiming.cpp b/Source/Core/Core/CoreTiming.cpp
+index 1fa39d7..4122fa1 100644
+--- a/Source/Core/Core/CoreTiming.cpp
++++ b/Source/Core/Core/CoreTiming.cpp
+@@ -21,6 +21,7 @@
+ #include "Core/CPUThreadConfigCallback.h"
+ #include "Core/Config/MainSettings.h"
+ #include "Core/Core.h"
++#include "Core/HW/GPFifo.h"
+ #include "Core/HW/SystemTimers.h"
+ #include "Core/PowerPC/PowerPC.h"
+ #include "Core/System.h"
+@@ -32,6 +33,10 @@
+ #include "VideoCommon/VideoConfig.h"
+ #include "VideoCommon/VideoEvents.h"
+ 
++#ifdef __ORBIS__
++extern "C" int ps4_fifo_defer;  // VideoCommon/Fifo.cpp (ps4.ini fifo_defer)
++#endif
++
+ namespace CoreTiming
+ {
+ static constexpr int MAX_SLICE_LENGTH = 20000;
+@@ -346,6 +351,11 @@ void CoreTimingManager::MoveEvents()
+ 
+ void CoreTimingManager::Advance()
+ {
++#ifdef __ORBIS__
++  // fifo_defer: bursts left in the gather pipe by JIT blocks reach the GPU at least once per slice.
++  if (ps4_fifo_defer)
++    m_system.GetGPFifo().FastCheckGatherPipe();
++#endif
+   CPUThreadConfigCallback::CheckForConfigChanges();
+ 
+   MoveEvents();
 diff --git a/Source/Core/Core/HW/GPFifo.cpp b/Source/Core/Core/HW/GPFifo.cpp
 index 0de434b..8e0fd63 100644
 --- a/Source/Core/Core/HW/GPFifo.cpp
@@ -1492,21 +1527,22 @@ index 8f30be8..0d6a0e4 100644
  }
  
 diff --git a/Source/Core/Core/PowerPC/Jit64/Jit.cpp b/Source/Core/Core/PowerPC/Jit64/Jit.cpp
-index 1248b1a..519f177 100644
+index 1248b1a..4d5446a 100644
 --- a/Source/Core/Core/PowerPC/Jit64/Jit.cpp
 +++ b/Source/Core/Core/PowerPC/Jit64/Jit.cpp
-@@ -49,6 +49,10 @@
+@@ -49,6 +49,11 @@
  #include "Core/System.h"
  
  using namespace Gen;
 +
 +#ifdef __ORBIS__
 +extern "C" int ps4_fifo_batch;  // VideoCommon/Fifo.cpp (ps4.ini fifo_batch)
++extern "C" int ps4_fifo_defer;  // VideoCommon/Fifo.cpp (ps4.ini fifo_defer)
 +#endif
  using namespace PowerPC;
  
  // Dolphin's PowerPC->x86_64 JIT dynamic recompiler
-@@ -430,6 +434,19 @@ void Jit64::DoNothing(UGeckoInstruction _inst)
+@@ -430,6 +435,19 @@ void Jit64::DoNothing(UGeckoInstruction _inst)
    // Yup, just don't do anything.
  }
  
@@ -1526,7 +1562,21 @@ index 1248b1a..519f177 100644
  void Jit64::ImHere(Jit64& jit)
  {
    auto& ppc_state = jit.m_ppc_state;
-@@ -1018,8 +1035,15 @@ bool Jit64::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
+@@ -461,7 +479,13 @@ bool Jit64::Cleanup()
+   {
+     MOV(64, R(RSCRATCH), PPCSTATE(gather_pipe_ptr));
+     SUB(64, R(RSCRATCH), PPCSTATE(gather_pipe_base_ptr));
++#ifdef __ORBIS__
++    // fifo_defer=on: flush at 128 bytes; at most 127 + 256 + 8 bytes are then pending inside a
++    // block, under the gather pipe buffer's 512.
++    CMP(64, R(RSCRATCH), Imm32(ps4_fifo_defer ? 128 : GPFifo::GATHER_PIPE_SIZE));
++#else
+     CMP(64, R(RSCRATCH), Imm32(GPFifo::GATHER_PIPE_SIZE));
++#endif
+     FixupBranch exit = J_CC(CC_L);
+     ABI_PushRegistersAndAdjustStack({}, 0);
+     ABI_CallFunctionP(GPFifo::UpdateGatherPipe, &m_system.GetGPFifo());
+@@ -1018,8 +1042,15 @@ bool Jit64::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
        bool gatherPipeIntCheck = js.fifoWriteAddresses.contains(prev_address);
  
        // Gather pipe writes using an immediate address are explicitly tracked.
@@ -1670,7 +1720,7 @@ index 39e16c7..bba4032 100644
  constexpr size_t CODE_SIZE = 1024 * 1024 * 128;
 +#endif
 diff --git a/Source/Core/Core/PowerPC/MMU.cpp b/Source/Core/Core/PowerPC/MMU.cpp
-index 940e93c..dd09fe3 100644
+index 940e93c..4c86c27 100644
 --- a/Source/Core/Core/PowerPC/MMU.cpp
 +++ b/Source/Core/Core/PowerPC/MMU.cpp
 @@ -25,6 +25,14 @@
@@ -1688,7 +1738,18 @@ index 940e93c..dd09fe3 100644
  #include <algorithm>
  #include <bit>
  #include <cstddef>
-@@ -68,11 +76,18 @@ MMU::~MMU() = default;
+@@ -57,6 +65,10 @@
+ 
+ #include "VideoCommon/EFBInterface.h"
+ 
++#ifdef __ORBIS__
++extern "C" int ps4_fifo_defer;  // VideoCommon/Fifo.cpp (ps4.ini fifo_defer)
++#endif
++
+ namespace PowerPC
+ {
+ MMU::MMU(Core::System& system, Memory::MemoryManager& memory, PowerPC::PowerPCManager& power_pc)
+@@ -68,11 +80,18 @@ MMU::~MMU() = default;
  
  void MMU::Reset()
  {
@@ -1707,7 +1768,7 @@ index 940e93c..dd09fe3 100644
    // Instead of storing m_page_table in savestates, we *could* refetch it from memory
    // here in DoState, but this could lead to us getting a more up-to-date set of page mappings
    // than we had when the savestate was created, which could be a problem for TAS determinism.
-@@ -189,6 +204,59 @@ static void EFB_Write(u32 data, u32 addr)
+@@ -189,6 +208,59 @@ static void EFB_Write(u32 data, u32 addr)
    }
  }
  
@@ -1767,7 +1828,7 @@ index 940e93c..dd09fe3 100644
  template <XCheckTLBFlag flag, std::unsigned_integral T, bool never_translate>
  T MMU::ReadFromHardware(u32 em_address)
  {
-@@ -215,6 +283,7 @@ T MMU::ReadFromHardware(u32 em_address)
+@@ -215,6 +287,7 @@ T MMU::ReadFromHardware(u32 em_address)
    }
  
    bool wi = false;
@@ -1775,7 +1836,18 @@ index 940e93c..dd09fe3 100644
  
    if (!never_translate &&
        (IsOpcodeFlag(flag) ? m_ppc_state.msr.IR.Value() : m_ppc_state.msr.DR.Value()))
-@@ -259,6 +328,11 @@ T MMU::ReadFromHardware(u32 em_address)
+@@ -232,6 +305,10 @@ T MMU::ReadFromHardware(u32 em_address)
+ 
+   if (flag == XCheckTLBFlag::Read && (em_address & 0xF8000000) == 0x08000000)
+   {
++#ifdef __ORBIS__
++    if (ps4_fifo_defer)  // the game may be looking at the GPU: hand it everything first
++      m_system.GetGPFifo().FastCheckGatherPipe();
++#endif
+     if (em_address < 0x0c000000)
+     {
+       return EFB_Read(em_address);
+@@ -259,6 +336,11 @@ T MMU::ReadFromHardware(u32 em_address)
      T value;
      em_address &= m_memory.GetRamMask();
  
@@ -1787,7 +1859,7 @@ index 940e93c..dd09fe3 100644
      if (!m_ppc_state.m_enable_dcache || wi)
      {
        std::memcpy(&value, &m_memory.GetRAM()[em_address], sizeof(T));
-@@ -278,6 +352,11 @@ T MMU::ReadFromHardware(u32 em_address)
+@@ -278,6 +360,11 @@ T MMU::ReadFromHardware(u32 em_address)
      T value;
      em_address &= 0x0FFFFFFF;
  
@@ -1799,7 +1871,7 @@ index 940e93c..dd09fe3 100644
      if (!m_ppc_state.m_enable_dcache || wi)
      {
        std::memcpy(&value, &m_memory.GetEXRAM()[em_address], sizeof(T));
-@@ -343,6 +422,7 @@ void MMU::WriteToHardware(u32 em_address, const u32 data, const u32 size)
+@@ -343,6 +430,7 @@ void MMU::WriteToHardware(u32 em_address, const u32 data, const u32 size)
    }
  
    bool wi = false;
@@ -1807,7 +1879,18 @@ index 940e93c..dd09fe3 100644
  
    if (!never_translate && m_ppc_state.msr.DR)
    {
-@@ -465,6 +545,11 @@ void MMU::WriteToHardware(u32 em_address, const u32 data, const u32 size)
+@@ -395,6 +483,10 @@ void MMU::WriteToHardware(u32 em_address, const u32 data, const u32 size)
+ 
+   if (flag == XCheckTLBFlag::Write && (em_address & 0xF8000000) == 0x08000000)
+   {
++#ifdef __ORBIS__
++    if (ps4_fifo_defer)  // e.g. FIFO pointer changes: pending bursts belong to the old FIFO
++      m_system.GetGPFifo().FastCheckGatherPipe();
++#endif
+     if (em_address < 0x0c000000)
+     {
+       EFB_Write(data, em_address);
+@@ -465,6 +557,11 @@ void MMU::WriteToHardware(u32 em_address, const u32 data, const u32 size)
      // mirrors of memory).
      em_address &= m_memory.GetRamMask();
  
@@ -1819,7 +1902,7 @@ index 940e93c..dd09fe3 100644
      if (m_ppc_state.m_enable_dcache && !wi)
        m_ppc_state.dCache.Write(m_memory, em_address, &swapped_data, size, HID0(m_ppc_state).DLOCK);
  
-@@ -479,6 +564,11 @@ void MMU::WriteToHardware(u32 em_address, const u32 data, const u32 size)
+@@ -479,6 +576,11 @@ void MMU::WriteToHardware(u32 em_address, const u32 data, const u32 size)
    {
      em_address &= 0x0FFFFFFF;
  
@@ -1831,7 +1914,19 @@ index 940e93c..dd09fe3 100644
      if (m_ppc_state.m_enable_dcache && !wi)
      {
        m_ppc_state.dCache.Write(m_memory, em_address + 0x10000000, &swapped_data, size,
-@@ -1275,12 +1365,18 @@ void MMU::SDRUpdated()
+@@ -1151,6 +1253,11 @@ void MMU::TouchDCacheLine(u32 address, bool store)
+ 
+ u32 MMU::IsOptimizableMMIOAccess(u32 address, u32 access_size) const
+ {
++#ifdef __ORBIS__
++  // fifo_defer: MMIO accesses must take the slow path, which flushes the gather pipe first.
++  if (ps4_fifo_defer)
++    return 0;
++#endif
+   if (m_power_pc.GetMemChecks().HasAny())
+     return 0;
+ 
+@@ -1275,12 +1382,18 @@ void MMU::SDRUpdated()
  
    m_ppc_state.pagetable_base = htaborg << 16;
    m_ppc_state.pagetable_mask = (htabmask << 16) | 0xffc0;
@@ -1850,7 +1945,7 @@ index 940e93c..dd09fe3 100644
    // Our incremental handling of page table updates can't handle SR changing, so throw away all
    // existing mappings and then reparse the whole page table.
    m_memory.RemoveAllPageTableMappings();
-@@ -1374,7 +1470,22 @@ void MMU::InvalidateTLBEntry(u32 address)
+@@ -1374,7 +1487,22 @@ void MMU::InvalidateTLBEntry(u32 address)
  
    m_ppc_state.tlb[PowerPC::DATA_TLB_INDEX][entry_index].Invalidate();
    m_ppc_state.tlb[PowerPC::INST_TLB_INDEX][entry_index].Invalidate();
@@ -1873,7 +1968,7 @@ index 940e93c..dd09fe3 100644
    if (m_ppc_state.msr.DR)
      PageTableUpdated();
    else
-@@ -1383,6 +1494,9 @@ void MMU::InvalidateTLBEntry(u32 address)
+@@ -1383,6 +1511,9 @@ void MMU::InvalidateTLBEntry(u32 address)
  
  void MMU::ClearPageTable()
  {
@@ -1883,7 +1978,7 @@ index 940e93c..dd09fe3 100644
    // If we've skipped processing any update to the page table, we need to remove all host mappings,
    // because we don't know which of them are still valid.
    m_memory.RemoveAllPageTableMappings();
-@@ -1408,6 +1522,10 @@ void MMU::ReloadPageTable()
+@@ -1408,6 +1539,10 @@ void MMU::ReloadPageTable()
  
  void MMU::PageTableUpdated()
  {
@@ -1894,7 +1989,7 @@ index 940e93c..dd09fe3 100644
    m_ppc_state.pagetable_update_pending = false;
  
    if (!m_system.GetJitInterface().WantsPageTableMappings())
-@@ -2000,6 +2118,9 @@ void MMU::UpdateFakeMMUBat(BatTable& bat_table, u32 start_addr)
+@@ -2000,6 +2135,9 @@ void MMU::UpdateFakeMMUBat(BatTable& bat_table, u32 start_addr)
  
  void MMU::DBATUpdated()
  {
@@ -1904,7 +1999,7 @@ index 940e93c..dd09fe3 100644
    m_dbat_table = {};
    UpdateBATs(m_dbat_table, SPR_DBAT0U);
    bool extended_bats = m_system.IsWii() && HID4(m_ppc_state).SBE;
-@@ -2028,6 +2149,9 @@ void MMU::DBATUpdated()
+@@ -2028,6 +2166,9 @@ void MMU::DBATUpdated()
  
  void MMU::IBATUpdated()
  {
@@ -1914,7 +2009,7 @@ index 940e93c..dd09fe3 100644
    m_ibat_table = {};
    UpdateBATs(m_ibat_table, SPR_IBAT0U);
    bool extended_bats = m_system.IsWii() && HID4(m_ppc_state).SBE;
-@@ -2074,6 +2198,14 @@ void ClearDCacheLineFromJit(MMU& mmu, u32 address)
+@@ -2074,6 +2215,14 @@ void ClearDCacheLineFromJit(MMU& mmu, u32 address)
  template <std::unsigned_integral T>
  Common::MakeAtLeastU32<T> ReadFromJit(MMU& mmu, u32 address)
  {
@@ -1929,7 +2024,7 @@ index 940e93c..dd09fe3 100644
    return mmu.Read<T>(address);
  }
  template u32 ReadFromJit<u8>(MMU& mmu, u32 address);
-@@ -2084,6 +2216,14 @@ template u64 ReadFromJit<u64>(MMU& mmu, u32 address);
+@@ -2084,6 +2233,14 @@ template u64 ReadFromJit<u64>(MMU& mmu, u32 address);
  template <std::unsigned_integral T>
  void WriteFromJit(MMU& mmu, Common::MakeAtLeastU32<T> var, u32 address)
  {
@@ -1944,7 +2039,7 @@ index 940e93c..dd09fe3 100644
    mmu.Write<T>(var, address);
  }
  template void WriteFromJit<u8>(MMU& mmu, u32 var, u32 address);
-@@ -2092,14 +2232,37 @@ template void WriteFromJit<u32>(MMU& mmu, u32 var, u32 address);
+@@ -2092,14 +2249,37 @@ template void WriteFromJit<u32>(MMU& mmu, u32 var, u32 address);
  template void WriteFromJit<u64>(MMU& mmu, u64 var, u32 address);
  void WriteU16SwapFromJit(MMU& mmu, u32 var, u32 address)
  {
@@ -2046,7 +2141,7 @@ index 51c3fff..8e91ab7 100644
 +  ps4_add_eboot(dolphin-nogui)
 +endif()
 diff --git a/Source/Core/DolphinNoGUI/MainNoGUI.cpp b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
-index 3bf40ea..26984a0 100644
+index 3bf40ea..95c74e1 100644
 --- a/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 +++ b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 @@ -5,7 +5,9 @@
@@ -2081,7 +2176,7 @@ index 3bf40ea..26984a0 100644
  #include "UICommon/CommandLineParse.h"
  #ifdef USE_DISCORD_PRESENCE
  #include "UICommon/DiscordPresence.h"
-@@ -31,6 +40,23 @@
+@@ -31,6 +40,24 @@
  
  static std::unique_ptr<Platform> s_platform;
  
@@ -2093,6 +2188,7 @@ index 3bf40ea..26984a0 100644
 +extern "C" int ps4_cpu_thread_core, ps4_gpu_thread_core, ps4_thread_priority;  // Core/Core.cpp
 +extern "C" void ps4_sampler_start();  // DolphinPS4 port/ps4_sampler.cpp
 +extern "C" int ps4_fifo_batch;  // VideoCommon/Fifo.cpp
++extern "C" int ps4_fifo_defer;  // VideoCommon/Fifo.cpp
 +extern "C" size_t sceKernelGetDirectMemorySize();  // libkernel
 +extern "C" void ps4_boot_trace(const char* line);  // DolphinPS4 port/ps4_crashlog.cpp
 +extern "C" int ps4_uniform_merge_mode;  // VideoBackends/OGL/OGLGfx.cpp
@@ -2105,7 +2201,7 @@ index 3bf40ea..26984a0 100644
  static void signal_handler(int)
  {
    constexpr char message[] = "A signal was received. A second signal will force Dolphin to stop.\n";
-@@ -173,6 +199,10 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
+@@ -173,6 +200,10 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
    if (platform_name == "macos" || platform_name.empty())
      return Platform::CreateMacOSPlatform();
  #endif
@@ -2116,7 +2212,7 @@ index 3bf40ea..26984a0 100644
  
    if (platform_name == "headless" || platform_name.empty())
      return Platform::CreateHeadlessPlatform();
-@@ -184,8 +214,17 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
+@@ -184,8 +215,17 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
  #define main app_main
  #endif
  
@@ -2135,7 +2231,7 @@ index 3bf40ea..26984a0 100644
    const auto parser =
        CommandLineParse::CreateParser(CommandLineParse::ParserOptions::OmitGUIOptions);
    parser->add_option("-p", "--platform")
-@@ -207,6 +246,10 @@ int main(const int argc, char* argv[])
+@@ -207,6 +247,10 @@ int main(const int argc, char* argv[])
  #ifdef __APPLE__
                  ,
                  "macos"
@@ -2146,7 +2242,7 @@ index 3bf40ea..26984a0 100644
  #endif
        });
  
-@@ -270,7 +313,170 @@ int main(const int argc, char* argv[])
+@@ -270,7 +314,173 @@ int main(const int argc, char* argv[])
  
    UICommon::SetUserDirectory(user_directory);
    UICommon::Init();
@@ -2255,6 +2351,9 @@ index 3bf40ea..26984a0 100644
 +    // 32 bytes (VideoCommon/Fifo.cpp). Faster for games that send lots of GPU commands (Crash);
 +    // FIFO watermark interrupts are then checked per batch.
 +    ps4_fifo_batch = Platform::GetPS4Option("fifo_batch", "off") == "on";
++    // fifo_defer=on (with fifo_batch): JIT blocks leave GPU commands in the gather pipe until
++    // 128 bytes collect (flushed before any hardware register access and every timing slice).
++    ps4_fifo_defer = ps4_fifo_batch && Platform::GetPS4Option("fifo_defer", "off") == "on";
 +    // fast_disc=on: Dolphin's "Speed up disc transfer rate" (shorter loading pauses).
 +    Config::SetBase(Config::MAIN_FAST_DISC_SPEED,
 +                    Platform::GetPS4Option("fast_disc", "off") == "on");
@@ -2317,7 +2416,7 @@ index 3bf40ea..26984a0 100644
  
    Common::ScopeGuard ui_common_guard([] {
      UICommon::ShutdownControllers();
-@@ -284,6 +490,12 @@ int main(const int argc, char* argv[])
+@@ -284,6 +494,12 @@ int main(const int argc, char* argv[])
    }
  
    auto core_state_changed_hook = Core::AddOnStateChangedCallback([](const Core::State state) {
@@ -2330,7 +2429,7 @@ index 3bf40ea..26984a0 100644
      if (state == Core::State::Uninitialized)
        s_platform->Stop();
    });
-@@ -303,6 +515,9 @@ int main(const int argc, char* argv[])
+@@ -303,6 +519,9 @@ int main(const int argc, char* argv[])
  
    DolphinAnalytics::Instance().ReportDolphinStart("nogui");
  
@@ -6184,7 +6283,7 @@ index 976592c..a20137f 100644
    void UpdateInterruptsFromVideoBackend(u64 userdata);
  
 diff --git a/Source/Core/VideoCommon/Fifo.cpp b/Source/Core/VideoCommon/Fifo.cpp
-index f183c93..edb6020 100644
+index f183c93..21763ca 100644
 --- a/Source/Core/VideoCommon/Fifo.cpp
 +++ b/Source/Core/VideoCommon/Fifo.cpp
 @@ -2,6 +2,7 @@
@@ -6221,7 +6320,7 @@ index f183c93..edb6020 100644
  }
  
  // The deterministic_gpu_thread version.
-@@ -283,6 +300,14 @@ void FifoManager::ResetVideoBuffer()
+@@ -283,6 +300,21 @@ void FifoManager::ResetVideoBuffer()
  
  // Description: Main FIFO update loop
  // Purpose: Keep the Core HW updated about the CPU-GPU distance
@@ -6229,6 +6328,13 @@ index f183c93..edb6020 100644
 +}  // namespace Fifo
 +extern "C" int ps4_fifo_batch;  // ps4.ini fifo_batch (DolphinNoGUI)
 +int ps4_fifo_batch = 0;
++// ps4.ini fifo_defer=on: JIT blocks leave up to 127 bytes in the gather pipe instead of flushing
++// every complete 32-byte burst at their end (Jit64::Cleanup), so bursts reach the command
++// processor in batches. Pending bytes are flushed before every MMIO/EFB access, at every CPU
++// timing slice (CoreTiming::Advance) and at eieio, i.e. before the game can observe the GPU or
++// reconfigure its FIFO.
++extern "C" int ps4_fifo_defer;
++int ps4_fifo_defer = 0;
 +namespace Fifo
 +{
 +#endif
@@ -6236,7 +6342,7 @@ index f183c93..edb6020 100644
  void FifoManager::RunGpuLoop()
  {
    m_gpu_mainloop.Run(
-@@ -302,6 +327,7 @@ void FifoManager::RunGpuLoop()
+@@ -302,6 +334,7 @@ void FifoManager::RunGpuLoop()
            // See comment in SyncGPU
            if (write_ptr > seen_ptr)
            {
@@ -6244,7 +6350,7 @@ index f183c93..edb6020 100644
              m_video_buffer_read_ptr =
                  OpcodeDecoder::RunFifo(DataReader(m_video_buffer_read_ptr, write_ptr), nullptr);
              m_video_buffer_seen_ptr = write_ptr;
-@@ -324,27 +350,56 @@ void FifoManager::RunGpuLoop()
+@@ -324,27 +357,56 @@ void FifoManager::RunGpuLoop()
  
              u32 cyclesExecuted = 0;
              u32 readPtr = fifo.CPReadPointer.load(std::memory_order_relaxed);
@@ -6310,7 +6416,7 @@ index f183c93..edb6020 100644
              if ((write_ptr - m_video_buffer_read_ptr) == 0)
              {
                fifo.SafeCPReadPointer.store(fifo.CPReadPointer.load(std::memory_order_relaxed),
-@@ -551,7 +606,10 @@ int FifoManager::WaitForGpuThread(int ticks)
+@@ -551,7 +613,10 @@ int FifoManager::WaitForGpuThread(int ticks)
  
    // Wait for GPU
    if (now >= m_config_sync_gpu_max_distance)
