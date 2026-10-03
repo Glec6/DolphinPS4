@@ -3413,7 +3413,7 @@ index 51c3fff..8e91ab7 100644
 +  ps4_add_eboot(dolphin-nogui)
 +endif()
 diff --git a/Source/Core/DolphinNoGUI/MainNoGUI.cpp b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
-index 3bf40ea..08d3d40 100644
+index 3bf40ea..8aff337 100644
 --- a/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 +++ b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 @@ -5,7 +5,9 @@
@@ -3470,7 +3470,7 @@ index 3bf40ea..08d3d40 100644
 +extern "C" int sceKernelHasNeoMode(void);
 +extern "C" int sceKernelIsNeoMode(void);
 +extern "C" int sceKernelIsAuthenticNeo(void);
-+extern "C" int ps4_vk_thread, ps4_vk_thread_core;  // VideoBackends/Vulkan/PS4CommandRecorder.cpp
++extern "C" int ps4_vk_thread, ps4_vk_thread_core, ps4_vk_thread_mode;  // VideoBackends/Vulkan/PS4CommandRecorder.cpp
 +extern "C" int ps4_game_hle;                       // Core/HLE/HLE_PS4Games.cpp
 +extern "C" int ps4_force_dual_core;                // Core/ConfigManager.cpp
 +extern "C" int ps4_zoom_letterbox;                 // VideoCommon/Present.cpp
@@ -3529,7 +3529,7 @@ index 3bf40ea..08d3d40 100644
  #endif
        });
  
-@@ -270,7 +329,250 @@ int main(const int argc, char* argv[])
+@@ -270,7 +329,254 @@ int main(const int argc, char* argv[])
  
    UICommon::SetUserDirectory(user_directory);
    UICommon::Init();
@@ -3690,6 +3690,10 @@ index 3bf40ea..08d3d40 100644
 +    snprintf(ps4_game_hle_only, sizeof(ps4_game_hle_only), "%s",
 +             Platform::GetPS4Option("game_hle_only", "").c_str());
 +    ps4_vk_thread_core = std::atoi(Platform::GetPS4Option("vk_thread_core", "5").c_str());
++    {
++      const std::string mode = Platform::GetPS4Option("vk_thread_mode", "async");
++      ps4_vk_thread_mode = mode == "inline" ? 2 : mode == "sync" ? 1 : 0;
++    }
 +    // fifo_defer=on (with fifo_batch): JIT blocks leave GPU commands in the gather pipe until
 +    // 128 bytes collect (flushed before any hardware register access and every timing slice).
 +    ps4_fifo_defer = ps4_fifo_batch && Platform::GetPS4Option("fifo_defer", "off") == "on";
@@ -3780,7 +3784,7 @@ index 3bf40ea..08d3d40 100644
  
    Common::ScopeGuard ui_common_guard([] {
      UICommon::ShutdownControllers();
-@@ -284,6 +586,12 @@ int main(const int argc, char* argv[])
+@@ -284,6 +590,12 @@ int main(const int argc, char* argv[])
    }
  
    auto core_state_changed_hook = Core::AddOnStateChangedCallback([](const Core::State state) {
@@ -3793,7 +3797,7 @@ index 3bf40ea..08d3d40 100644
      if (state == Core::State::Uninitialized)
        s_platform->Stop();
    });
-@@ -303,6 +611,9 @@ int main(const int argc, char* argv[])
+@@ -303,6 +615,9 @@ int main(const int argc, char* argv[])
  
    DolphinAnalytics::Instance().ReportDolphinStart("nogui");
  
@@ -7373,10 +7377,10 @@ index c82417e..e72527d 100644
    {
 diff --git a/Source/Core/VideoBackends/Vulkan/PS4CommandRecorder.cpp b/Source/Core/VideoBackends/Vulkan/PS4CommandRecorder.cpp
 new file mode 100755
-index 0000000..ea6f5a6
+index 0000000..2db0b1f
 --- /dev/null
 +++ b/Source/Core/VideoBackends/Vulkan/PS4CommandRecorder.cpp
-@@ -0,0 +1,1171 @@
+@@ -0,0 +1,1199 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -7416,6 +7420,10 @@ index 0000000..ea6f5a6
 +extern "C" {
 +int ps4_vk_thread = 0;       // ps4.ini vk_thread=on
 +int ps4_vk_thread_core = 5;  // ps4.ini vk_thread_core
++// ps4.ini vk_thread_mode (diagnostics): 0 async (the worker replays in parallel), 1 sync (the
++// worker replays each call while the video thread waits), 2 inline (recorded calls are replayed
++// right away on the video thread - tests the record/replay itself, no second thread).
++int ps4_vk_thread_mode = 0;
 +}
 +extern "C" void ps4_boot_trace(const char* stage);
 +extern "C" void ps4_wait_add(int slot, long long ns);  // port/ps4_sampler.cpp
@@ -7612,11 +7620,20 @@ index 0000000..ea6f5a6
 +  return reinterpret_cast<u8*>(h + 1);
 +}
 +
++void ExecuteInline();
++
 +void Commit()
 +{
 +  s_reserve += s_pending;
 +  s_write.store(s_reserve, std::memory_order_seq_cst);
++  if (ps4_vk_thread_mode == 2)
++  {
++    ExecuteInline();
++    return;
++  }
 +  WakeWorker();
++  if (ps4_vk_thread_mode == 1)
++    PS4CommandRecorderDrain();
 +}
 +
 +// Writes a payload made of a fixed struct followed by arrays.
@@ -7948,6 +7965,19 @@ index 0000000..ea6f5a6
 +    ERROR_LOG_FMT(VIDEO, "vk_thread: unknown record {}", h->op);
 +    break;
 +  }
++}
++
++void ExecuteInline()
++{
++  u64 read = s_read.load(std::memory_order_relaxed);
++  const u64 write = s_write.load(std::memory_order_relaxed);
++  while (read != write)
++  {
++    const auto* h = reinterpret_cast<const Header*>(s_ring + (read & RING_MASK));
++    Execute(h);
++    read += h->size;
++  }
++  s_read.store(read, std::memory_order_release);
 +}
 +
 +void WorkerLoop()
@@ -8523,7 +8553,8 @@ index 0000000..ea6f5a6
 +#undef PS4_HOOK_DRAIN
 +
 +  s_active = true;
-+  s_worker = std::thread(WorkerLoop);
++  if (ps4_vk_thread_mode != 2)
++    s_worker = std::thread(WorkerLoop);
 +  ps4_boot_trace("vk_thread: Vulkan commands are recorded on a worker thread");
 +}
 +
@@ -8537,7 +8568,8 @@ index 0000000..ea6f5a6
 +    std::lock_guard lk(s_wake_mutex);
 +    s_wake.notify_one();
 +  }
-+  s_worker.join();
++  if (s_worker.joinable())
++    s_worker.join();
 +  s_active = false;
 +
 +#define PS4_RESTORE(name) ::name = s_real.real_##name;
@@ -8550,7 +8582,7 @@ index 0000000..ea6f5a6
 +}  // namespace Vulkan
 diff --git a/Source/Core/VideoBackends/Vulkan/PS4CommandRecorder.h b/Source/Core/VideoBackends/Vulkan/PS4CommandRecorder.h
 new file mode 100755
-index 0000000..611315b
+index 0000000..26ef750
 --- /dev/null
 +++ b/Source/Core/VideoBackends/Vulkan/PS4CommandRecorder.h
 @@ -0,0 +1,18 @@
@@ -8561,7 +8593,7 @@ index 0000000..611315b
 +
 +// PS4: Vulkan command recording thread (see PS4CommandRecorder.cpp).
 +
-+extern "C" int ps4_vk_thread, ps4_vk_thread_core;
++extern "C" int ps4_vk_thread, ps4_vk_thread_core, ps4_vk_thread_mode;
 +
 +namespace Vulkan
 +{
