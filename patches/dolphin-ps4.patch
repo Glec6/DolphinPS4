@@ -2198,10 +2198,10 @@ index f4dc8a9..4e5ff67 100644
  
 diff --git a/Source/Core/DolphinNoGUI/PlatformPS4.cpp b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
 new file mode 100644
-index 0000000..305a4fc
+index 0000000..19c4264
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
-@@ -0,0 +1,543 @@
+@@ -0,0 +1,553 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -2518,7 +2518,8 @@ index 0000000..305a4fc
 +
 +      auto& system = Core::System::GetInstance();
 +      const u64 ticks = system.GetCoreTiming().GetTicks();
-+      if (Core::GetState(system) == Core::State::Running && ticks == watchdog_ticks)
++      // Armed after 40 s: emulation legitimately stands still for a few seconds while booting.
++      if (seconds > 40 && Core::GetState(system) == Core::State::Running && ticks == watchdog_ticks)
 +      {
 +        if (++watchdog_stalled == 2)  // ~4 s: people close a frozen app quickly
 +        {
@@ -2534,6 +2535,15 @@ index 0000000..305a4fc
 +        watchdog_stalled = 0;
 +      }
 +      watchdog_ticks = ticks;
++      // One self-test dump during normal play, so a broken dump shows up long before a real hang.
++      static bool s_dump_tested = false;
++      if (!s_dump_tested && seconds >= 60)
++      {
++        s_dump_tested = true;
++        BootTrace("watchdog: self-test dump");
++        ps4_dump_thread_stacks("/data/DolphinPS4/hang-stacks.txt", "self-test at 60 s (not a hang)");
++        BootTrace("watchdog: self-test dump done");
++      }
 +    }
 +    // Port diagnostics: a screenshot every ~10 s (User/ScreenShots) shows what Dolphin renders,
 +    // independently of what reaches the TV.

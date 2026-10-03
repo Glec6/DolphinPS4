@@ -262,16 +262,13 @@ void dumpHandler(int, siginfo_t*, void* context) {
             static const uint8_t kUmtxStub[12] = {0x48, 0xc7, 0xc0, 0xc6, 0x01, 0x00,
                                                   0x00, 0x49, 0x89, 0xca, 0x0f, 0x05};
             if (memcmp(code, kUmtxStub, sizeof(kUmtxStub)) == 0) {
+                // Registers only: the objects are read by the dumping thread, after checking that
+                // they are mapped (a register that wasn't a pointer crashed v02.37 here).
                 t.in_umtx = true;
                 t.umtx_obj = regs[1];
                 t.umtx_op = regs[2];
                 t.umtx_val = regs[3];
                 t.umtx_obj2 = regs[10];
-                if (t.umtx_obj >= 0x10000)
-                    memcpy(t.umtx_words, reinterpret_cast<const void*>(t.umtx_obj), 16);
-                // Condition variable wait (UMTX_OP_CV_WAIT = 8): the 4th argument is the mutex.
-                if (t.umtx_op == 8 && t.umtx_obj2 >= 0x10000)
-                    memcpy(t.umtx_words2, reinterpret_cast<const void*>(t.umtx_obj2), 16);
             }
         }
         // Only scan a stack that is plausibly this registration's: a thread that registered and
@@ -327,6 +324,23 @@ extern "C" void ps4_watch_thread(const char* name) {
     g_watched[index].thread.store(self);
 }
 
+extern "C" int32_t sceKernelQueryMemoryProtection(void* address, void** start, void** end,
+                                                  uint32_t* protection);
+
+// Copies 16 bytes at `address` if they lie in readable memory (else leaves zeros).
+static void readIfMapped(uint64_t address, uint32_t (&words)[4]) {
+    memset(words, 0, sizeof(words));
+    void* start = nullptr;
+    void* end = nullptr;
+    uint32_t protection = 0;
+    if (address < 0x10000 ||
+        sceKernelQueryMemoryProtection(reinterpret_cast<void*>(address), &start, &end,
+                                       &protection) != 0 ||
+        !(protection & 1) || address + 16 > reinterpret_cast<uintptr_t>(end))
+        return;
+    memcpy(words, reinterpret_cast<const void*>(address), sizeof(words));
+}
+
 // Writes every watched thread's stack to `path` (appending), headed by `reason`.
 extern "C" void ps4_dump_thread_stacks(const char* path, const char* reason) {
     const int fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0666);
@@ -360,6 +374,8 @@ extern "C" void ps4_dump_thread_stacks(const char* path, const char* reason) {
                  static_cast<unsigned long long>(in_eboot ? t.rip - text : t.rip));
         writeLine(fd, line);
         if (t.in_umtx) {
+            readIfMapped(t.umtx_obj, t.umtx_words);
+            readIfMapped(t.umtx_obj2, t.umtx_words2);
             snprintf(line, sizeof(line),
                      "   blocked in _umtx_op(obj %#llx, op %llu, val %#llx, obj2 %#llx); obj: %08x "
                      "%08x %08x %08x; obj2: %08x %08x %08x %08x\n",
