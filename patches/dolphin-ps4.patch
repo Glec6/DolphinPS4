@@ -774,6 +774,26 @@ index 0000000..90decba
 +  void* m_surface = nullptr;
 +  void* m_context = nullptr;
 +};
+diff --git a/Source/Core/Common/LinearDiskCache.h b/Source/Core/Common/LinearDiskCache.h
+index 061f7d4..3985395 100644
+--- a/Source/Core/Common/LinearDiskCache.h
++++ b/Source/Core/Common/LinearDiskCache.h
+@@ -150,8 +150,13 @@ private:
+     {
+       // Null-terminator is intentionally not copied.
+       std::memcpy(&id, "DCAC", sizeof(u32));
+-      std::memcpy(ver, Common::GetScmRevGitStr().c_str(),
+-                  std::min(Common::GetScmRevGitStr().size(), sizeof(ver)));
++#ifdef __ORBIS__
++      // Port cache version 2: Vulkan vertex shaders read posmtx as uint4 again (v02.69).
++      const std::string version = "ps4c2-" + Common::GetScmRevGitStr();
++#else
++      const std::string& version = Common::GetScmRevGitStr();
++#endif
++      std::memcpy(ver, version.c_str(), std::min(version.size(), sizeof(ver)));
+     }
+ 
+     u32 id = 0;
 diff --git a/Source/Core/Common/MemArena.h b/Source/Core/Common/MemArena.h
 index 1a3093c..24cbe83 100644
 --- a/Source/Core/Common/MemArena.h
@@ -10550,7 +10570,7 @@ index 715dbee..91ca7de 100644
  
  private:
 diff --git a/Source/Core/VideoCommon/VertexShaderGen.cpp b/Source/Core/VideoCommon/VertexShaderGen.cpp
-index ac09506..34e3ee3 100644
+index ac09506..f8838d6 100644
 --- a/Source/Core/VideoCommon/VertexShaderGen.cpp
 +++ b/Source/Core/VideoCommon/VertexShaderGen.cpp
 @@ -2,6 +2,7 @@
@@ -10588,7 +10608,7 @@ index ac09506..34e3ee3 100644
  
    if (!custom_contents.uniforms.empty())
    {
-@@ -414,7 +421,16 @@ ShaderCode GenerateVertexShaderCode(APIType api_type, const ShaderHostConfig& ho
+@@ -414,7 +421,18 @@ ShaderCode GenerateVertexShaderCode(APIType api_type, const ShaderHostConfig& ho
    {
      out.Write("ATTRIBUTE_LOCATION({:s}) in float4 rawpos;\n", ShaderAttrib::Position);
      if ((uid_data->components & VB_HAS_POSMTXIDX) != 0)
@@ -10597,10 +10617,12 @@ index ac09506..34e3ee3 100644
 +      // PS4 Piglet: integer vertex attributes (glVertexAttribIPointer) come out wrong, which put
 +      // every model using per-vertex matrices off screen (black screen in Sonic Adventure DX).
 +      // The index is only read as int(posmtx.r): fetch it as a float (OGLNativeVertexFormat).
-+      out.Write("ATTRIBUTE_LOCATION({:s}) in float4 posmtx;\n", ShaderAttrib::PositionMatrix);
-+#else
-       out.Write("ATTRIBUTE_LOCATION({:s}) in uint4 posmtx;\n", ShaderAttrib::PositionMatrix);
++      // OpenGL only: Vulkan fetches it as an integer format.
++      if (api_type == APIType::OpenGL)
++        out.Write("ATTRIBUTE_LOCATION({:s}) in float4 posmtx;\n", ShaderAttrib::PositionMatrix);
++      else
 +#endif
+       out.Write("ATTRIBUTE_LOCATION({:s}) in uint4 posmtx;\n", ShaderAttrib::PositionMatrix);
 +    }
      if ((uid_data->components & VB_HAS_NORMAL) != 0)
        out.Write("ATTRIBUTE_LOCATION({:s}) in float3 rawnormal;\n", ShaderAttrib::Normal);
