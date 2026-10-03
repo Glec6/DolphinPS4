@@ -1145,6 +1145,43 @@ index 16cae73..0e59ae9 100644
  #define BACKEND_WASAPI _trans("WASAPI (Exclusive Mode)")
  
  namespace PowerPC
+diff --git a/Source/Core/Core/ConfigManager.cpp b/Source/Core/Core/ConfigManager.cpp
+index 32f74a0..cbd4922 100644
+--- a/Source/Core/Core/ConfigManager.cpp
++++ b/Source/Core/Core/ConfigManager.cpp
+@@ -57,6 +57,11 @@
+ #include "DiscIO/Volume.h"
+ #include "DiscIO/VolumeWad.h"
+ 
++#ifdef __ORBIS__
++extern "C" int ps4_force_dual_core;
++int ps4_force_dual_core = 0;
++#endif
++
+ SConfig* SConfig::m_Instance;
+ 
+ SConfig::SConfig()
+@@ -285,6 +290,20 @@ void SConfig::SetRunningGameMetadata(const std::string& game_id, const std::stri
+ 
+   Config::AddLayer(ConfigLoaders::GenerateGlobalGameConfigLoader(game_id, revision));
+   Config::AddLayer(ConfigLoaders::GenerateLocalGameConfigLoader(game_id, revision));
++#ifdef __ORBIS__
++  // ps4.ini dual_core=force: ignore a game INI's CPUThread = False. Single core puts the GPU
++  // emulation on the emulated CPU's core - on the PS4's 1.6 GHz cores about half speed (Shadow
++  // the Hedgehog: 42-65%), and none of the port's dual-core work (FIFO batching, the Vulkan
++  // recording thread) applies.
++  if (ps4_force_dual_core)
++  {
++    for (const Config::LayerType type : {Config::LayerType::GlobalGame, Config::LayerType::LocalGame})
++    {
++      if (Config::GetLayer(type)->DeleteKey(Config::MAIN_CPU_THREAD.GetLocation()))
++        NOTICE_LOG_FMT(CORE, "PS4: dual_core=force overrides the game INI's CPUThread setting");
++    }
++  }
++#endif
+ 
+   if (is_running_or_starting)
+     DolphinAnalytics::Instance().ReportGameStart();
 diff --git a/Source/Core/Core/Core.cpp b/Source/Core/Core/Core.cpp
 index fc614fd..25a840f 100644
 --- a/Source/Core/Core/Core.cpp
@@ -3256,7 +3293,7 @@ index 51c3fff..8e91ab7 100644
 +  ps4_add_eboot(dolphin-nogui)
 +endif()
 diff --git a/Source/Core/DolphinNoGUI/MainNoGUI.cpp b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
-index 3bf40ea..067c730 100644
+index 3bf40ea..a8bef59 100644
 --- a/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 +++ b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 @@ -5,7 +5,9 @@
@@ -3291,7 +3328,7 @@ index 3bf40ea..067c730 100644
  #include "UICommon/CommandLineParse.h"
  #ifdef USE_DISCORD_PRESENCE
  #include "UICommon/DiscordPresence.h"
-@@ -31,6 +40,37 @@
+@@ -31,6 +40,38 @@
  
  static std::unique_ptr<Platform> s_platform;
  
@@ -3315,6 +3352,7 @@ index 3bf40ea..067c730 100644
 +extern "C" int sceKernelIsAuthenticNeo(void);
 +extern "C" int ps4_vk_thread, ps4_vk_thread_core;  // VideoBackends/Vulkan/PS4CommandRecorder.cpp
 +extern "C" int ps4_game_hle;                       // Core/HLE/HLE_PS4Games.cpp
++extern "C" int ps4_force_dual_core;                // Core/ConfigManager.cpp
 +extern "C" char ps4_game_hle_only[64];             // Core/HLE/HLE_PS4Games.cpp
 +extern "C" int ps4_auto_clock, ps4_auto_clock_min, ps4_auto_clock_max;  // PlatformPS4.cpp
 +extern "C" size_t sceKernelGetDirectMemorySize();  // libkernel
@@ -3329,7 +3367,7 @@ index 3bf40ea..067c730 100644
  static void signal_handler(int)
  {
    constexpr char message[] = "A signal was received. A second signal will force Dolphin to stop.\n";
-@@ -173,6 +213,10 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
+@@ -173,6 +214,10 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
    if (platform_name == "macos" || platform_name.empty())
      return Platform::CreateMacOSPlatform();
  #endif
@@ -3340,7 +3378,7 @@ index 3bf40ea..067c730 100644
  
    if (platform_name == "headless" || platform_name.empty())
      return Platform::CreateHeadlessPlatform();
-@@ -184,8 +228,17 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
+@@ -184,8 +229,17 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
  #define main app_main
  #endif
  
@@ -3359,7 +3397,7 @@ index 3bf40ea..067c730 100644
    const auto parser =
        CommandLineParse::CreateParser(CommandLineParse::ParserOptions::OmitGUIOptions);
    parser->add_option("-p", "--platform")
-@@ -207,6 +260,10 @@ int main(const int argc, char* argv[])
+@@ -207,6 +261,10 @@ int main(const int argc, char* argv[])
  #ifdef __APPLE__
                  ,
                  "macos"
@@ -3370,7 +3408,7 @@ index 3bf40ea..067c730 100644
  #endif
        });
  
-@@ -270,7 +327,227 @@ int main(const int argc, char* argv[])
+@@ -270,7 +328,232 @@ int main(const int argc, char* argv[])
  
    UICommon::SetUserDirectory(user_directory);
    UICommon::Init();
@@ -3425,7 +3463,12 @@ index 3bf40ea..067c730 100644
 +                                           core == "cachedinterpreter" ? PowerPC::CPUCore::CachedInterpreter :
 +                                                                         PowerPC::CPUCore::JIT64);
 +    Config::SetBase(Config::MAIN_FASTMEM, Platform::GetPS4Option("fastmem", "on") == "on");
-+    Config::SetBase(Config::MAIN_CPU_THREAD, Platform::GetPS4Option("dual_core", "on") == "on");
++    // dual_core=force: also over a game INI's CPUThread = False (Core/ConfigManager.cpp).
++    {
++      const std::string dual_core = Platform::GetPS4Option("dual_core", "on");
++      Config::SetBase(Config::MAIN_CPU_THREAD, dual_core == "on" || dual_core == "force");
++      ps4_force_dual_core = dual_core == "force";
++    }
 +    // Keeps the GPU thread from running ahead of the CPU thread in dual core mode; without it
 +    // a game desynced ("GFX FIFO: Unknown Opcode") on loading.
 +    Config::SetBase(Config::MAIN_SYNC_GPU, Platform::GetPS4Option("sync_gpu", "on") == "on");
@@ -3598,7 +3641,7 @@ index 3bf40ea..067c730 100644
  
    Common::ScopeGuard ui_common_guard([] {
      UICommon::ShutdownControllers();
-@@ -284,6 +561,12 @@ int main(const int argc, char* argv[])
+@@ -284,6 +567,12 @@ int main(const int argc, char* argv[])
    }
  
    auto core_state_changed_hook = Core::AddOnStateChangedCallback([](const Core::State state) {
@@ -3611,7 +3654,7 @@ index 3bf40ea..067c730 100644
      if (state == Core::State::Uninitialized)
        s_platform->Stop();
    });
-@@ -303,6 +586,9 @@ int main(const int argc, char* argv[])
+@@ -303,6 +592,9 @@ int main(const int argc, char* argv[])
  
    DolphinAnalytics::Instance().ReportDolphinStart("nogui");
  
