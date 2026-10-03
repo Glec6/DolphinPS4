@@ -3815,10 +3815,10 @@ index f4dc8a9..4e5ff67 100644
  
 diff --git a/Source/Core/DolphinNoGUI/PlatformPS4.cpp b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
 new file mode 100644
-index 0000000..16b9fa1
+index 0000000..6969a04
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
-@@ -0,0 +1,735 @@
+@@ -0,0 +1,845 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -3836,6 +3836,7 @@ index 0000000..16b9fa1
 +#include <map>
 +#include <string>
 +#include <thread>
++#include <tuple>
 +#include <vector>
 +
 +#include <orbis/Sysmodule.h>
@@ -3850,6 +3851,8 @@ index 0000000..16b9fa1
 +#include <fmt/format.h>
 +
 +#include "Common/Config/Config.h"
++#include "DiscIO/Volume.h"
++#include "DiscIO/VolumeDisc.h"
 +#include "Core/Config/MainSettings.h"
 +#include "Core/Core.h"
 +#include "Core/CoreTiming.h"
@@ -4312,11 +4315,111 @@ index 0000000..16b9fa1
 +  return false;
 +}
 +
++// The game library: every disc image in /data/DolphinPS4/games, identified by its own header
++// (game ID, revision, disc number, internal title) rather than its file name.
++struct LibraryEntry
++{
++  std::string path;
++  std::string game_id;
++  u16 revision = 0;
++  int disc = 0;  // 0 = Disc 1
++  std::string title;
++};
++
++bool IsDiscImage(const std::string& name)
++{
++  static const std::array<std::string, 8> extensions = {".iso", ".gcm",  ".ciso", ".gcz",
++                                                        ".wbfs", ".wia", ".rvz",  ".nkit.iso"};
++  std::string lower = name;
++  std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
++  for (const std::string& extension : extensions)
++  {
++    if (lower.size() > extension.size() &&
++        lower.compare(lower.size() - extension.size(), extension.size(), extension) == 0)
++      return true;
++  }
++  return false;
++}
++
++const std::vector<LibraryEntry>& GameLibrary()
++{
++  static std::vector<LibraryEntry> s_library;
++  static bool s_scanned = false;
++  if (s_scanned)
++    return s_library;
++  s_scanned = true;
++  std::error_code error;
++  for (const auto& entry :
++       std::filesystem::directory_iterator(std::string(PS4_DATA_DIR_PATH) + "/games", error))
++  {
++    const std::string name = entry.path().filename().string();
++    if (!IsDiscImage(name))
++      continue;
++    LibraryEntry game;
++    game.path = entry.path().string();
++    if (std::unique_ptr<DiscIO::VolumeDisc> disc = DiscIO::CreateDisc(game.path))
++    {
++      game.game_id = disc->GetGameID();
++      game.revision = disc->GetRevision().value_or(0);
++      game.disc = disc->GetDiscNumber().value_or(0);
++      game.title = disc->GetInternalName();
++    }
++    s_library.push_back(std::move(game));
++  }
++  std::sort(s_library.begin(), s_library.end(), [](const LibraryEntry& a, const LibraryEntry& b) {
++    return std::tie(a.title, a.game_id, a.disc, a.path) <
++           std::tie(b.title, b.game_id, b.disc, b.path);
++  });
++  for (const LibraryEntry& game : s_library)
++  {
++    char line[512];
++    snprintf(line, sizeof(line), "library: %s rev %u disc %d \"%s\" (%s)",
++             game.game_id.empty() ? "??????" : game.game_id.c_str(), game.revision, game.disc + 1,
++             game.title.c_str(), std::filesystem::path(game.path).filename().string().c_str());
++    Platform::BootTrace(line);
++  }
++  return s_library;
++}
++
 +// All discs of the game `path` belongs to, `path` first, then the others in disc order (wrapping
 +// around). Dolphin switches between them when the game asks for another disc, so players never
-+// have to write an .m3u playlist.
++// have to write an .m3u playlist. Discs belong together when their headers have the same game ID
++// and revision (file names don't matter); images whose header can't be read are grouped by a
++// "(Disc N)" in their names instead.
 +std::vector<std::string> FindAllDiscs(const std::string& path)
 +{
++  {
++    const std::vector<LibraryEntry>& library = GameLibrary();
++    const std::filesystem::path chosen_path(path);
++    const auto chosen = std::find_if(library.begin(), library.end(), [&](const LibraryEntry& game) {
++      return std::filesystem::path(game.path) == chosen_path;
++    });
++    if (chosen != library.end() && !chosen->game_id.empty())
++    {
++      std::vector<const LibraryEntry*> discs;
++      for (const LibraryEntry& game : library)
++      {
++        if (game.game_id == chosen->game_id && game.revision == chosen->revision)
++          discs.push_back(&game);
++      }
++      std::sort(discs.begin(), discs.end(),
++                [](const LibraryEntry* a, const LibraryEntry* b) { return a->disc < b->disc; });
++      std::vector<std::string> ordered;
++      for (const LibraryEntry* game : discs)
++      {
++        if (game->disc >= chosen->disc)
++          ordered.push_back(game->path);
++      }
++      for (const LibraryEntry* game : discs)
++      {
++        if (game->disc < chosen->disc)
++          ordered.push_back(game->path);
++      }
++      if (!ordered.empty() && ordered.front() == chosen->path)
++        return ordered;
++    }
++  }
++
 +  const std::filesystem::path chosen(path);
 +  const std::string name = chosen.filename().string();
 +  size_t digits, length;
@@ -4369,6 +4472,13 @@ index 0000000..16b9fa1
 +      path.pop_back();
 +    if (!path.empty())
 +      return path;
++  }
++
++  // Otherwise the first game of the library (by title), on its first disc.
++  for (const LibraryEntry& game : GameLibrary())
++  {
++    if (!game.game_id.empty() && game.disc == 0)
++      return game.path;
 +  }
 +
 +  // Otherwise the first game in /data/DolphinPS4/games, in name order.
