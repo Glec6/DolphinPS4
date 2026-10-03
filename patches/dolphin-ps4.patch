@@ -1342,10 +1342,10 @@ index 31b6c2d..b581034 100644
  void PatchFunctions(Core::System& system)
 diff --git a/Source/Core/Core/HLE/HLE_PS4Games.cpp b/Source/Core/Core/HLE/HLE_PS4Games.cpp
 new file mode 100755
-index 0000000..3569792
+index 0000000..779e5ee
 --- /dev/null
 +++ b/Source/Core/Core/HLE/HLE_PS4Games.cpp
-@@ -0,0 +1,380 @@
+@@ -0,0 +1,453 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -1380,6 +1380,13 @@ index 0000000..3569792
 +
 +extern "C" int ps4_game_hle;
 +int ps4_game_hle = 1;
++// game_hle_only=<name>: install only that hook (testing).
++extern "C" char ps4_game_hle_only[64];
++char ps4_game_hle_only[64] = "";
++namespace HLE_PS4Games
++{
++u32 ps4_hle_flushed = 0;
++}
 +extern "C" void ps4_boot_trace(const char* stage);
 +
 +namespace HLE_PS4Games
@@ -1466,7 +1473,11 @@ index 0000000..3569792
 +  void PipeCheck()
 +  {
 +    if (m_pipe && m_ppc.gather_pipe_ptr - m_ppc.gather_pipe_base_ptr >= 256)
++    {
++      const u8* before = m_ppc.gather_pipe_ptr;
 +      m_gpfifo.UpdateGatherPipe();
++      ps4_hle_flushed += static_cast<u32>(before - m_ppc.gather_pipe_ptr);
++    }
 +  }
 +
 +  PowerPC::PowerPCState& ppc() { return m_ppc; }
@@ -1499,6 +1510,42 @@ index 0000000..3569792
 +// loop B at 0x800cb694 - position and a constant colour.
 +}  // namespace
 +
++// Diagnostics: the first calls of each hook log their inputs and output size.
++struct Snapshot
++{
++  u32 gpr[32];
++  u32 ctr;
++  u32 cr[8];
++  static Snapshot Of(PowerPC::PowerPCState& p)
++  {
++    Snapshot s;
++    std::memcpy(s.gpr, p.gpr, sizeof(s.gpr));
++    s.ctr = CTR(p);
++    for (int i = 0; i < 8; i++)
++      s.cr[i] = p.cr.GetField(i);
++    return s;
++  }
++};
++
++void LogCall(const char* name, int& calls, const Snapshot& in, PowerPC::PowerPCState& now,
++             u32 count, u32 base, const u8* pipe_before, u32 flushed_before)
++{
++  if (calls >= 4)
++    return;
++  calls++;
++  char line[512];
++  snprintf(line, sizeof(line),
++           "game HLE %s call %d: count %u base %08x r0 %08x r7 %08x r8 %08x r9 %08x r10 %08x "
++           "r11 %08x r28 %08x r29 %08x r30 %08x r31 %08x ctr %08x cr %x%x%x%x%x%x%x%x "
++           "pipe bytes %lld (+%u flushed)",
++           name, calls, count, base, in.gpr[0], in.gpr[7], in.gpr[8], in.gpr[9], in.gpr[10],
++           in.gpr[11], in.gpr[28], in.gpr[29], in.gpr[30], in.gpr[31], in.ctr, in.cr[0], in.cr[1],
++           in.cr[2], in.cr[3], in.cr[4], in.cr[5], in.cr[6], in.cr[7],
++           static_cast<long long>(now.gather_pipe_ptr - pipe_before),
++           ps4_hle_flushed - flushed_before);
++  ps4_boot_trace(line);
++}
++
 +constexpr u32 CRASH_CB5C4 = 0x800cb5c4;
 +constexpr u32 CRASH_CB5C4_EXIT = 0x800cb6b8;  // its "b" after the bdnz
 +constexpr u32 CRASH_CB694 = 0x800cb694;
@@ -1525,6 +1572,11 @@ index 0000000..3569792
 +  u32 count = CTR(ppc);
 +  u32 attribute = ppc.gpr[9];
 +  u32 last_position = positions;
++  const u8* pipe_before = ppc.gather_pipe_ptr;
++  const u32 flushed_before = ps4_hle_flushed;
++  static int s_calls = 0;
++  const u32 log_count = CTR(ppc);
++  const Snapshot saved_for_log = Snapshot::Of(ppc);
 +  g.SetStoreBase(ppc.gpr[11]);
 +  if (count == 0)  // never: the function only enters the loop with a positive count
 +  {
@@ -1559,6 +1611,9 @@ index 0000000..3569792
 +  (void)last_position;
 +  CTR(ppc) = 0;
 +  ppc.npc = CRASH_CB5C4_EXIT;
++  {
++    LogCall("cb5c4", s_calls, saved_for_log, ppc, log_count, saved_for_log.gpr[11], pipe_before, flushed_before);
++  }
 +}
 +
 +void CrashLoopCB694(const Core::CPUThreadGuard& guard)
@@ -1568,6 +1623,11 @@ index 0000000..3569792
 +  u32 positions = ppc.gpr[31];
 +  u32 count = CTR(ppc);
 +  const u32 colour = ppc.gpr[0];
++  const u8* pipe_before = ppc.gather_pipe_ptr;
++  const u32 flushed_before = ps4_hle_flushed;
++  static int s_calls = 0;
++  const u32 log_count = CTR(ppc);
++  const Snapshot saved_for_log = Snapshot::Of(ppc);
 +  g.SetStoreBase(ppc.gpr[9]);
 +  if (count == 0)
 +  {
@@ -1592,6 +1652,9 @@ index 0000000..3569792
 +  g.SetFloatRegister(12, last + 8);
 +  CTR(ppc) = 0;
 +  ppc.npc = CRASH_CB694_EXIT;
++  {
++    LogCall("cb694", s_calls, saved_for_log, ppc, log_count, saved_for_log.gpr[9], pipe_before, flushed_before);
++  }
 +}
 +
 +// 0x800cae70 (submits indexed triangle strips; r30 = vertex records (36 bytes), r31 = strip
@@ -1617,6 +1680,11 @@ index 0000000..3569792
 +  u32 total = ppc.gpr[29];
 +  const u32 colour_r7 = ppc.gpr[7];
 +  const u32 colour_r11 = ppc.gpr[11];
++  const u8* pipe_before = ppc.gather_pipe_ptr;
++  const u32 flushed_before = ps4_hle_flushed;
++  static int s_calls = 0;
++  const u32 log_count = ppc.gpr[8];
++  const Snapshot saved_for_log = Snapshot::Of(ppc);
 +  g.SetStoreBase(ppc.gpr[10]);
 +  if (static_cast<s32>(remaining) <= 0)  // never: the loop is entered with a positive count
 +  {
@@ -1669,6 +1737,9 @@ index 0000000..3569792
 +  ppc.cr.SetField(0, EQ | (ppc.GetXER_SO() ? 1 : 0));
 +  ppc.SetCarry(1);
 +  ppc.npc = CRASH_CAF2C_EXIT;
++  {
++    LogCall("caf2c", s_calls, saved_for_log, ppc, log_count, saved_for_log.gpr[10], pipe_before, flushed_before);
++  }
 +}
 +
 +namespace
@@ -1717,6 +1788,8 @@ index 0000000..3569792
 +  };
 +  for (const Site& site : sites)
 +  {
++    if (ps4_game_hle_only[0] && strcmp(ps4_game_hle_only, site.name) != 0)
++      continue;
 +    if (site.ok)
 +      HLE::Patch(system, site.address, site.name);
 +    char line[160];
@@ -3068,7 +3141,7 @@ index 51c3fff..8e91ab7 100644
 +  ps4_add_eboot(dolphin-nogui)
 +endif()
 diff --git a/Source/Core/DolphinNoGUI/MainNoGUI.cpp b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
-index 3bf40ea..779cd0f 100644
+index 3bf40ea..067c730 100644
 --- a/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 +++ b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 @@ -5,7 +5,9 @@
@@ -3103,7 +3176,7 @@ index 3bf40ea..779cd0f 100644
  #include "UICommon/CommandLineParse.h"
  #ifdef USE_DISCORD_PRESENCE
  #include "UICommon/DiscordPresence.h"
-@@ -31,6 +40,36 @@
+@@ -31,6 +40,37 @@
  
  static std::unique_ptr<Platform> s_platform;
  
@@ -3127,6 +3200,7 @@ index 3bf40ea..779cd0f 100644
 +extern "C" int sceKernelIsAuthenticNeo(void);
 +extern "C" int ps4_vk_thread, ps4_vk_thread_core;  // VideoBackends/Vulkan/PS4CommandRecorder.cpp
 +extern "C" int ps4_game_hle;                       // Core/HLE/HLE_PS4Games.cpp
++extern "C" char ps4_game_hle_only[64];             // Core/HLE/HLE_PS4Games.cpp
 +extern "C" int ps4_auto_clock, ps4_auto_clock_min, ps4_auto_clock_max;  // PlatformPS4.cpp
 +extern "C" size_t sceKernelGetDirectMemorySize();  // libkernel
 +extern "C" void ps4_boot_trace(const char* line);  // DolphinPS4 port/ps4_crashlog.cpp
@@ -3140,7 +3214,7 @@ index 3bf40ea..779cd0f 100644
  static void signal_handler(int)
  {
    constexpr char message[] = "A signal was received. A second signal will force Dolphin to stop.\n";
-@@ -173,6 +212,10 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
+@@ -173,6 +213,10 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
    if (platform_name == "macos" || platform_name.empty())
      return Platform::CreateMacOSPlatform();
  #endif
@@ -3151,7 +3225,7 @@ index 3bf40ea..779cd0f 100644
  
    if (platform_name == "headless" || platform_name.empty())
      return Platform::CreateHeadlessPlatform();
-@@ -184,8 +227,17 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
+@@ -184,8 +228,17 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
  #define main app_main
  #endif
  
@@ -3170,7 +3244,7 @@ index 3bf40ea..779cd0f 100644
    const auto parser =
        CommandLineParse::CreateParser(CommandLineParse::ParserOptions::OmitGUIOptions);
    parser->add_option("-p", "--platform")
-@@ -207,6 +259,10 @@ int main(const int argc, char* argv[])
+@@ -207,6 +260,10 @@ int main(const int argc, char* argv[])
  #ifdef __APPLE__
                  ,
                  "macos"
@@ -3181,7 +3255,7 @@ index 3bf40ea..779cd0f 100644
  #endif
        });
  
-@@ -270,7 +326,225 @@ int main(const int argc, char* argv[])
+@@ -270,7 +327,227 @@ int main(const int argc, char* argv[])
  
    UICommon::SetUserDirectory(user_directory);
    UICommon::Init();
@@ -3316,6 +3390,8 @@ index 3bf40ea..779cd0f 100644
 +    ps4_vk_thread = Platform::GetPS4Option("vk_thread", "off") == "on";
 +    // game_hle=off: no native versions of hot game loops (Core/HLE/HLE_PS4Games.cpp).
 +    ps4_game_hle = Platform::GetPS4Option("game_hle", "on") == "on";
++    snprintf(ps4_game_hle_only, sizeof(ps4_game_hle_only), "%s",
++             Platform::GetPS4Option("game_hle_only", "").c_str());
 +    ps4_vk_thread_core = std::atoi(Platform::GetPS4Option("vk_thread_core", "5").c_str());
 +    // fifo_defer=on (with fifo_batch): JIT blocks leave GPU commands in the gather pipe until
 +    // 128 bytes collect (flushed before any hardware register access and every timing slice).
@@ -3407,7 +3483,7 @@ index 3bf40ea..779cd0f 100644
  
    Common::ScopeGuard ui_common_guard([] {
      UICommon::ShutdownControllers();
-@@ -284,6 +558,12 @@ int main(const int argc, char* argv[])
+@@ -284,6 +561,12 @@ int main(const int argc, char* argv[])
    }
  
    auto core_state_changed_hook = Core::AddOnStateChangedCallback([](const Core::State state) {
@@ -3420,7 +3496,7 @@ index 3bf40ea..779cd0f 100644
      if (state == Core::State::Uninitialized)
        s_platform->Stop();
    });
-@@ -303,6 +583,9 @@ int main(const int argc, char* argv[])
+@@ -303,6 +586,9 @@ int main(const int argc, char* argv[])
  
    DolphinAnalytics::Instance().ReportDolphinStart("nogui");
  
