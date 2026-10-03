@@ -3413,7 +3413,7 @@ index 51c3fff..8e91ab7 100644
 +  ps4_add_eboot(dolphin-nogui)
 +endif()
 diff --git a/Source/Core/DolphinNoGUI/MainNoGUI.cpp b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
-index 3bf40ea..58d83c9 100644
+index 3bf40ea..08d3d40 100644
 --- a/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 +++ b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 @@ -5,7 +5,9 @@
@@ -3529,7 +3529,7 @@ index 3bf40ea..58d83c9 100644
  #endif
        });
  
-@@ -270,7 +329,234 @@ int main(const int argc, char* argv[])
+@@ -270,7 +329,250 @@ int main(const int argc, char* argv[])
  
    UICommon::SetUserDirectory(user_directory);
    UICommon::Init();
@@ -3671,6 +3671,22 @@ index 3bf40ea..58d83c9 100644
 +    ps4_game_hle = Platform::GetPS4Option("game_hle", "on") == "on";
 +    // zoom=letterbox: fill a 16:9 TV with a game's letterboxed 4:3 picture (VideoCommon/Present.cpp).
 +    ps4_zoom_letterbox = Platform::GetPS4Option("zoom", "off") == "letterbox";
++    // manual_texture_sampling=on: Dolphin's "Manual Texture Sampling" (exact texture lookups;
++    // EA's VP6 videos need it - FIFA Street 2).
++    if (Platform::GetPS4Option("manual_texture_sampling", "off") == "on")
++      Config::SetBase(Config::GFX_HACK_FAST_TEXTURE_SAMPLING, false);
++    // sync_on_idle=off: when the game idles, the CPU thread doesn't wait for the GPU thread to
++    // finish everything first (Dolphin's SyncOnSkipIdle) - the two keep overlapping.
++    if (Platform::GetPS4Option("sync_on_idle", "on") == "off")
++      Config::SetBase(Config::MAIN_SYNC_ON_SKIP_IDLE, false);
++    // aspect=wide: Dolphin's "Force 16:9" (games with their own 16:9 mode); aspect=stretch.
++    {
++      const std::string aspect = Platform::GetPS4Option("aspect", "auto");
++      if (aspect == "wide")
++        Config::SetBase(Config::GFX_ASPECT_RATIO, AspectMode::ForceWide);
++      else if (aspect == "stretch")
++        Config::SetBase(Config::GFX_ASPECT_RATIO, AspectMode::Stretch);
++    }
 +    snprintf(ps4_game_hle_only, sizeof(ps4_game_hle_only), "%s",
 +             Platform::GetPS4Option("game_hle_only", "").c_str());
 +    ps4_vk_thread_core = std::atoi(Platform::GetPS4Option("vk_thread_core", "5").c_str());
@@ -3764,7 +3780,7 @@ index 3bf40ea..58d83c9 100644
  
    Common::ScopeGuard ui_common_guard([] {
      UICommon::ShutdownControllers();
-@@ -284,6 +570,12 @@ int main(const int argc, char* argv[])
+@@ -284,6 +586,12 @@ int main(const int argc, char* argv[])
    }
  
    auto core_state_changed_hook = Core::AddOnStateChangedCallback([](const Core::State state) {
@@ -3777,7 +3793,7 @@ index 3bf40ea..58d83c9 100644
      if (state == Core::State::Uninitialized)
        s_platform->Stop();
    });
-@@ -303,6 +595,9 @@ int main(const int argc, char* argv[])
+@@ -303,6 +611,9 @@ int main(const int argc, char* argv[])
  
    DolphinAnalytics::Instance().ReportDolphinStart("nogui");
  
