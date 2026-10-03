@@ -3438,7 +3438,7 @@ index 51c3fff..8e91ab7 100644
 +  ps4_add_eboot(dolphin-nogui)
 +endif()
 diff --git a/Source/Core/DolphinNoGUI/MainNoGUI.cpp b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
-index 3bf40ea..43a6e4e 100644
+index 3bf40ea..951591f 100644
 --- a/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 +++ b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 @@ -5,7 +5,9 @@
@@ -3555,7 +3555,7 @@ index 3bf40ea..43a6e4e 100644
  #endif
        });
  
-@@ -270,7 +330,267 @@ int main(const int argc, char* argv[])
+@@ -270,7 +330,271 @@ int main(const int argc, char* argv[])
  
    UICommon::SetUserDirectory(user_directory);
    UICommon::Init();
@@ -3659,6 +3659,10 @@ index 3bf40ea..43a6e4e 100644
 +      Config::SetBase(Config::GFX_SHADER_COMPILER_THREADS, threads);
 +      Config::SetBase(Config::GFX_SHADER_PRECOMPILER_THREADS, threads);
 +    }
++    else
++    {
++      Config::SetBase(Config::GFX_SHADER_COMPILATION_MODE, ShaderCompilationMode::Synchronous);
++    }
 +    // efb_access=off skips CPU reads/writes of the EFB, which stall on GPU readbacks.
 +    Config::SetBase(Config::GFX_HACK_EFB_ACCESS_ENABLE,
 +                    Platform::GetPS4Option("efb_access", "on") == "on");
@@ -3712,19 +3716,18 @@ index 3bf40ea..43a6e4e 100644
 +    ps4_zoom_letterbox = Platform::GetPS4Option("zoom", "off") == "letterbox";
 +    // manual_texture_sampling=on: Dolphin's "Manual Texture Sampling" (exact texture lookups;
 +    // EA's VP6 videos need it - FIFA Street 2).
-+    if (Platform::GetPS4Option("manual_texture_sampling", "off") == "on")
-+      Config::SetBase(Config::GFX_HACK_FAST_TEXTURE_SAMPLING, false);
++    Config::SetBase(Config::GFX_HACK_FAST_TEXTURE_SAMPLING,
++                    Platform::GetPS4Option("manual_texture_sampling", "off") != "on");
 +    // sync_on_idle=off: when the game idles, the CPU thread doesn't wait for the GPU thread to
 +    // finish everything first (Dolphin's SyncOnSkipIdle) - the two keep overlapping.
-+    if (Platform::GetPS4Option("sync_on_idle", "on") == "off")
-+      Config::SetBase(Config::MAIN_SYNC_ON_SKIP_IDLE, false);
++    Config::SetBase(Config::MAIN_SYNC_ON_SKIP_IDLE,
++                    Platform::GetPS4Option("sync_on_idle", "on") != "off");
 +    // aspect=wide: Dolphin's "Force 16:9" (games with their own 16:9 mode); aspect=stretch.
 +    {
 +      const std::string aspect = Platform::GetPS4Option("aspect", "auto");
-+      if (aspect == "wide")
-+        Config::SetBase(Config::GFX_ASPECT_RATIO, AspectMode::ForceWide);
-+      else if (aspect == "stretch")
-+        Config::SetBase(Config::GFX_ASPECT_RATIO, AspectMode::Stretch);
++      Config::SetBase(Config::GFX_ASPECT_RATIO, aspect == "wide"    ? AspectMode::ForceWide :
++                                                aspect == "stretch" ? AspectMode::Stretch :
++                                                                      AspectMode::Auto);
 +    }
 +    snprintf(ps4_game_hle_only, sizeof(ps4_game_hle_only), "%s",
 +             Platform::GetPS4Option("game_hle_only", "").c_str());
@@ -3754,6 +3757,7 @@ index 3bf40ea..43a6e4e 100644
 +    // profile=on samples the CPU and video threads (/data/DolphinPS4/samples.log).
 +    // It also writes the JIT block map (/data/DolphinPS4/perf-<pid>.map: host address, size,
 +    // guest address) for the sampled JIT code.
++    Config::SetBase(Config::MAIN_PERF_MAP_DIR, std::string());
 +    if (Platform::GetPS4Option("profile", "off") == "on")
 +    {
 +      Config::SetBase(Config::MAIN_PERF_MAP_DIR, "/data/DolphinPS4");
@@ -3805,8 +3809,8 @@ index 3bf40ea..43a6e4e 100644
 +    // sync_gpu_distance=<emulated cycles> the CPU may run ahead of the GPU thread before it
 +    // waits for it (Dolphin's default 200000); larger means fewer waits.
 +    const int sync_distance = std::atoi(Platform::GetPS4Option("sync_gpu_distance", "0").c_str());
-+    if (sync_distance > 0)
-+      Config::SetBase(Config::MAIN_SYNC_GPU_MAX_DISTANCE, sync_distance);
++    Config::SetBase(Config::MAIN_SYNC_GPU_MAX_DISTANCE,
++                    sync_distance > 0 ? sync_distance : 200000);
 +    // diagnostics=on enables the render probes and shader dumps in the OGL backend.
 +    ps4_render_diagnostics = Platform::GetPS4Option("diagnostics", "off") == "on";
 +    // dump=on writes game textures and EFB/XFB copies as PNGs to User/Dump/Textures.
@@ -3823,7 +3827,7 @@ index 3bf40ea..43a6e4e 100644
  
    Common::ScopeGuard ui_common_guard([] {
      UICommon::ShutdownControllers();
-@@ -284,6 +604,12 @@ int main(const int argc, char* argv[])
+@@ -284,6 +608,12 @@ int main(const int argc, char* argv[])
    }
  
    auto core_state_changed_hook = Core::AddOnStateChangedCallback([](const Core::State state) {
@@ -3836,7 +3840,7 @@ index 3bf40ea..43a6e4e 100644
      if (state == Core::State::Uninitialized)
        s_platform->Stop();
    });
-@@ -303,6 +629,9 @@ int main(const int argc, char* argv[])
+@@ -303,6 +633,9 @@ int main(const int argc, char* argv[])
  
    DolphinAnalytics::Instance().ReportDolphinStart("nogui");
  
