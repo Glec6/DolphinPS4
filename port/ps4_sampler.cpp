@@ -506,16 +506,16 @@ extern "C" void ps4_thread_cpu_sample(int slot) {
 // 1 GPU loop sleeping for lack of work, 2 video thread waiting for the Vulkan recording thread,
 // 3 vkWaitForFences.
 namespace {
-std::atomic<long long> g_wait_ns[4];
+std::atomic<long long> g_wait_ns[6];  // 4: video-thread pipeline compile ns, 5: their count
 }  // namespace
 
 extern "C" void ps4_wait_add(int slot, long long ns) {
-    if (slot >= 0 && slot < 4 && ns > 0)
+    if (slot >= 0 && slot < 6 && ns > 0)
         g_wait_ns[slot].fetch_add(ns, std::memory_order_relaxed);
 }
 
 extern "C" long long ps4_wait_total(int slot) {
-    return slot >= 0 && slot < 4 ? g_wait_ns[slot].load(std::memory_order_relaxed) : 0;
+    return slot >= 0 && slot < 6 ? g_wait_ns[slot].load(std::memory_order_relaxed) : 0;
 }
 
 extern "C" double ps4_thread_cpu_seconds(int slot) {

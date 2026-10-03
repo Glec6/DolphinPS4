@@ -3413,7 +3413,7 @@ index 51c3fff..8e91ab7 100644
 +  ps4_add_eboot(dolphin-nogui)
 +endif()
 diff --git a/Source/Core/DolphinNoGUI/MainNoGUI.cpp b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
-index 3bf40ea..a8bef59 100644
+index 3bf40ea..58d83c9 100644
 --- a/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 +++ b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 @@ -5,7 +5,9 @@
@@ -3448,7 +3448,7 @@ index 3bf40ea..a8bef59 100644
  #include "UICommon/CommandLineParse.h"
  #ifdef USE_DISCORD_PRESENCE
  #include "UICommon/DiscordPresence.h"
-@@ -31,6 +40,38 @@
+@@ -31,6 +40,39 @@
  
  static std::unique_ptr<Platform> s_platform;
  
@@ -3473,6 +3473,7 @@ index 3bf40ea..a8bef59 100644
 +extern "C" int ps4_vk_thread, ps4_vk_thread_core;  // VideoBackends/Vulkan/PS4CommandRecorder.cpp
 +extern "C" int ps4_game_hle;                       // Core/HLE/HLE_PS4Games.cpp
 +extern "C" int ps4_force_dual_core;                // Core/ConfigManager.cpp
++extern "C" int ps4_zoom_letterbox;                 // VideoCommon/Present.cpp
 +extern "C" char ps4_game_hle_only[64];             // Core/HLE/HLE_PS4Games.cpp
 +extern "C" int ps4_auto_clock, ps4_auto_clock_min, ps4_auto_clock_max;  // PlatformPS4.cpp
 +extern "C" size_t sceKernelGetDirectMemorySize();  // libkernel
@@ -3487,7 +3488,7 @@ index 3bf40ea..a8bef59 100644
  static void signal_handler(int)
  {
    constexpr char message[] = "A signal was received. A second signal will force Dolphin to stop.\n";
-@@ -173,6 +214,10 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
+@@ -173,6 +215,10 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
    if (platform_name == "macos" || platform_name.empty())
      return Platform::CreateMacOSPlatform();
  #endif
@@ -3498,7 +3499,7 @@ index 3bf40ea..a8bef59 100644
  
    if (platform_name == "headless" || platform_name.empty())
      return Platform::CreateHeadlessPlatform();
-@@ -184,8 +229,17 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
+@@ -184,8 +230,17 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
  #define main app_main
  #endif
  
@@ -3517,7 +3518,7 @@ index 3bf40ea..a8bef59 100644
    const auto parser =
        CommandLineParse::CreateParser(CommandLineParse::ParserOptions::OmitGUIOptions);
    parser->add_option("-p", "--platform")
-@@ -207,6 +261,10 @@ int main(const int argc, char* argv[])
+@@ -207,6 +262,10 @@ int main(const int argc, char* argv[])
  #ifdef __APPLE__
                  ,
                  "macos"
@@ -3528,7 +3529,7 @@ index 3bf40ea..a8bef59 100644
  #endif
        });
  
-@@ -270,7 +328,232 @@ int main(const int argc, char* argv[])
+@@ -270,7 +329,234 @@ int main(const int argc, char* argv[])
  
    UICommon::SetUserDirectory(user_directory);
    UICommon::Init();
@@ -3668,6 +3669,8 @@ index 3bf40ea..a8bef59 100644
 +    ps4_vk_thread = Platform::GetPS4Option("vk_thread", "off") == "on";
 +    // game_hle=off: no native versions of hot game loops (Core/HLE/HLE_PS4Games.cpp).
 +    ps4_game_hle = Platform::GetPS4Option("game_hle", "on") == "on";
++    // zoom=letterbox: fill a 16:9 TV with a game's letterboxed 4:3 picture (VideoCommon/Present.cpp).
++    ps4_zoom_letterbox = Platform::GetPS4Option("zoom", "off") == "letterbox";
 +    snprintf(ps4_game_hle_only, sizeof(ps4_game_hle_only), "%s",
 +             Platform::GetPS4Option("game_hle_only", "").c_str());
 +    ps4_vk_thread_core = std::atoi(Platform::GetPS4Option("vk_thread_core", "5").c_str());
@@ -3761,7 +3764,7 @@ index 3bf40ea..a8bef59 100644
  
    Common::ScopeGuard ui_common_guard([] {
      UICommon::ShutdownControllers();
-@@ -284,6 +567,12 @@ int main(const int argc, char* argv[])
+@@ -284,6 +570,12 @@ int main(const int argc, char* argv[])
    }
  
    auto core_state_changed_hook = Core::AddOnStateChangedCallback([](const Core::State state) {
@@ -3774,7 +3777,7 @@ index 3bf40ea..a8bef59 100644
      if (state == Core::State::Uninitialized)
        s_platform->Stop();
    });
-@@ -303,6 +592,9 @@ int main(const int argc, char* argv[])
+@@ -303,6 +595,9 @@ int main(const int argc, char* argv[])
  
    DolphinAnalytics::Instance().ReportDolphinStart("nogui");
  
@@ -3815,10 +3818,10 @@ index f4dc8a9..4e5ff67 100644
  
 diff --git a/Source/Core/DolphinNoGUI/PlatformPS4.cpp b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
 new file mode 100644
-index 0000000..6969a04
+index 0000000..6b053ef
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
-@@ -0,0 +1,845 @@
+@@ -0,0 +1,878 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -3888,8 +3891,11 @@ index 0000000..6969a04
 +{
 +constexpr char PS4_DATA_DIR_PATH[] = "/data/DolphinPS4";
 +
-+// /data/DolphinPS4/ps4.ini: "key=value" lines, editable over FTP between runs.
++// /data/DolphinPS4/ps4.ini: "key=value" lines, editable over FTP between runs. Lines after a
++// "[GAMEID]" header (a full game ID like G4BE08, or its first 3 characters for every region) only
++// apply to that game; they override the global lines (ApplyGameOptions).
 +std::map<std::string, std::string> s_options;
++std::map<std::string, std::map<std::string, std::string>> s_game_options;
 +
 +void LoadOptions()
 +{
@@ -3897,15 +3903,24 @@ index 0000000..6969a04
 +  if (!file)
 +    return;
 +  char line[256];
++  std::string section;
 +  while (fgets(line, sizeof(line), file))
 +  {
 +    std::string text = line;
 +    while (!text.empty() && (text.back() == '\n' || text.back() == '\r' || text.back() == ' '))
 +      text.pop_back();
++    if (text.size() > 2 && text.front() == '[' && text.back() == ']')
++    {
++      section = text.substr(1, text.size() - 2);
++      continue;
++    }
 +    const size_t equals = text.find('=');
 +    if (text.empty() || text[0] == '#' || text[0] == ';' || equals == std::string::npos)
 +      continue;
-+    s_options[text.substr(0, equals)] = text.substr(equals + 1);
++    if (section.empty())
++      s_options[text.substr(0, equals)] = text.substr(equals + 1);
++    else
++      s_game_options[section][text.substr(0, equals)] = text.substr(equals + 1);
 +  }
 +  fclose(file);
 +}
@@ -4218,18 +4233,20 @@ index 0000000..6969a04
 +        // Where the threads wait, ms per second: the CPU thread for the GPU thread (FlushGpu), the
 +        // GPU thread for work, the video thread for the Vulkan recording thread, GPU fences.
 +        {
-+          static long long s_last_waits[4] = {};
++          static long long s_last_waits[6] = {};
 +          const size_t used3 = strlen(line);
-+          long long ms[4];
-+          for (int i = 0; i < 4; i++)
++          long long ms[6];
++          for (int i = 0; i < 6; i++)
 +          {
 +            const long long total = ps4_wait_total(i);
-+            ms[i] = static_cast<long long>((total - s_last_waits[i]) / period / 1000000);
++            const long long delta = total - s_last_waits[i];
++            ms[i] = static_cast<long long>(i == 5 ? delta / period : delta / period / 1000000);
 +            s_last_waits[i] = total;
 +          }
 +          snprintf(line + used3, sizeof(line) - used3,
-+                   ", waits ms/s: cpu-for-gpu %lld gpu-idle %lld vk-drain %lld fences %lld", ms[0],
-+                   ms[1], ms[2], ms[3]);
++                   ", waits ms/s: cpu-for-gpu %lld gpu-idle %lld vk-drain %lld fences %lld, "
++                   "compiles %lld/s %lld ms/s",
++                   ms[0], ms[1], ms[2], ms[3], ms[5], ms[4]);
 +        }
 +        const size_t used2 = strlen(line);
 +        snprintf(line + used2, sizeof(line) - used2,
@@ -4660,6 +4677,25 @@ index 0000000..6969a04
 +      fprintf(stderr, "[dolphin] booting %s\n", disc.c_str());
 +      BootTrace(("boot: " + disc).c_str());
 +      args.push_back("--exec=" + disc);
++    }
++    // Per-game ps4.ini sections: the game's 3-character ID first, then its full ID.
++    for (const LibraryEntry& entry : GameLibrary())
++    {
++      if (std::filesystem::path(entry.path) != std::filesystem::path(game) ||
++          entry.game_id.size() < 3)
++        continue;
++      for (const std::string& id : {entry.game_id.substr(0, 3), entry.game_id})
++      {
++        const auto section = s_game_options.find(id);
++        if (section == s_game_options.end())
++          continue;
++        for (const auto& [key, value] : section->second)
++        {
++          s_options[key] = value;
++          BootTrace(("option [" + id + "] " + key + "=" + value).c_str());
++        }
++      }
++      break;
 +    }
 +  }
 +  return args;
@@ -8570,6 +8606,62 @@ index 6338e52..ad1953f 100644
    size_t swapchain_image_count =
        surface != VK_NULL_HANDLE ? swap_chain->GetSwapChainImageCount() : 0;
    if (!g_command_buffer_mgr->Initialize(swapchain_image_count))
+diff --git a/Source/Core/VideoBackends/Vulkan/VKPipeline.cpp b/Source/Core/VideoBackends/Vulkan/VKPipeline.cpp
+index 6dbd9e5..fe50a42 100644
+--- a/Source/Core/VideoBackends/Vulkan/VKPipeline.cpp
++++ b/Source/Core/VideoBackends/Vulkan/VKPipeline.cpp
+@@ -3,6 +3,8 @@
+ 
+ #include "VideoBackends/Vulkan/VKPipeline.h"
+ 
++#include "Core/Core.h"
++
+ #include <array>
+ 
+ #include "Common/Assert.h"
+@@ -238,7 +240,28 @@ GetVulkanColorBlendState(const BlendingState& state,
+   return vk_state;
+ }
+ 
++#ifdef __ORBIS__
++extern "C" void ps4_wait_add(int slot, long long ns);  // port/ps4_sampler.cpp
++#endif
++
+ std::unique_ptr<VKPipeline> VKPipeline::Create(const AbstractPipelineConfig& config)
++#ifdef __ORBIS__
++{
++  // How long pipeline compiles block the video thread (monitor: "compiles"); background compiler
++  // threads aren't counted.
++  if (!Core::IsGPUThread())
++    return CreateImpl(config);
++  timespec t0, t1;
++  clock_gettime(CLOCK_MONOTONIC, &t0);
++  std::unique_ptr<VKPipeline> pipeline = CreateImpl(config);
++  clock_gettime(CLOCK_MONOTONIC, &t1);
++  ps4_wait_add(4, (t1.tv_sec - t0.tv_sec) * 1000000000ll + (t1.tv_nsec - t0.tv_nsec));
++  ps4_wait_add(5, 1);
++  return pipeline;
++}
++
++std::unique_ptr<VKPipeline> VKPipeline::CreateImpl(const AbstractPipelineConfig& config)
++#endif
+ {
+   DEBUG_ASSERT(config.vertex_shader && config.pixel_shader);
+ 
+diff --git a/Source/Core/VideoBackends/Vulkan/VKPipeline.h b/Source/Core/VideoBackends/Vulkan/VKPipeline.h
+index 82bf1f2..0fb51d2 100644
+--- a/Source/Core/VideoBackends/Vulkan/VKPipeline.h
++++ b/Source/Core/VideoBackends/Vulkan/VKPipeline.h
+@@ -21,6 +21,9 @@ public:
+   VkPipelineLayout GetVkPipelineLayout() const { return m_pipeline_layout; }
+   AbstractPipelineUsage GetUsage() const { return m_usage; }
+   static std::unique_ptr<VKPipeline> Create(const AbstractPipelineConfig& config);
++#ifdef __ORBIS__
++  static std::unique_ptr<VKPipeline> CreateImpl(const AbstractPipelineConfig& config);
++#endif
+ 
+ private:
+   VkPipeline m_pipeline;
 diff --git a/Source/Core/VideoBackends/Vulkan/VKSwapChain.cpp b/Source/Core/VideoBackends/Vulkan/VKSwapChain.cpp
 index 370e22d..18c06b5 100644
 --- a/Source/Core/VideoBackends/Vulkan/VKSwapChain.cpp
@@ -9792,7 +9884,7 @@ index 92f7c1f..3378a49 100644
      m_default_pixel_shader = g_gfx->CreateShaderFromSource(
          ShaderStage::Pixel, GetHeader(false) + default_pixel_shader_code + GetFooter(), nullptr,
 diff --git a/Source/Core/VideoCommon/Present.cpp b/Source/Core/VideoCommon/Present.cpp
-index 41d05f3..9fce0d3 100644
+index 41d05f3..214eb4b 100644
 --- a/Source/Core/VideoCommon/Present.cpp
 +++ b/Source/Core/VideoCommon/Present.cpp
 @@ -3,6 +3,11 @@
@@ -9834,7 +9926,43 @@ index 41d05f3..9fce0d3 100644
  
      // Draw a blank frame (and complete OnScreenUI initialization)
      g_gfx->BindBackbuffer({{0.0f, 0.0f, 0.0f, 1.0f}});
-@@ -903,10 +918,131 @@ void Presenter::RenderXFBToScreen(const MathUtil::Rectangle<int>& target_rc,
+@@ -431,8 +446,23 @@ Presenter::ConvertStereoRectangle(const MathUtil::Rectangle<int>& rc) const
+   return std::make_tuple(left_rc, right_rc);
+ }
+ 
++#ifdef __ORBIS__
++// ps4.ini zoom=letterbox (DolphinNoGUI): games that letterbox a 16:9 picture inside their 4:3 frame
++// (Resident Evil 4) fill a 16:9 TV: 1/8 of the height is cropped at the top and at the bottom,
++// and the aspect correction below turns the remaining 4:3 x 3/4 into exactly 16:9.
++extern "C" int ps4_zoom_letterbox;
++int ps4_zoom_letterbox = 0;
++#endif
++
+ MathUtil::Rectangle<int> Presenter::GetCustomCrop(const MathUtil::Rectangle<int>& rect) const
+ {
++#ifdef __ORBIS__
++  if (ps4_zoom_letterbox)
++  {
++    const int bar = rect.GetHeight() / 8;
++    return MathUtil::Rectangle<int>(0, bar, 0, bar);
++  }
++#endif
+   if (!g_ActiveConfig.bCropCustom)
+     return MathUtil::Rectangle<int>(0, 0, 0, 0);
+ 
+@@ -464,7 +494,11 @@ MathUtil::Rectangle<int> Presenter::AdjustForCustomCrop(const MathUtil::Rectangl
+ 
+ float Presenter::AdjustAspectRatioForCustomCrop(float input_aspect_ratio) const
+ {
++#ifdef __ORBIS__
++  if (!g_ActiveConfig.bCropCustom && !ps4_zoom_letterbox)
++#else
+   if (!g_ActiveConfig.bCropCustom)
++#endif
+     return input_aspect_ratio;
+ 
+   const MathUtil::Rectangle<int> rect = m_xfb_rect;
+@@ -903,10 +937,131 @@ void Presenter::RenderXFBToScreen(const MathUtil::Rectangle<int>& target_rc,
    }
  }
  
@@ -9966,7 +10094,7 @@ index 41d05f3..9fce0d3 100644
    if (g_gfx->IsHeadless() || (!m_onscreen_ui && !m_xfb_entry))
      return;
  
-@@ -934,7 +1070,18 @@ void Presenter::Present(PresentInfo* present_info)
+@@ -934,7 +1089,18 @@ void Presenter::Present(PresentInfo* present_info)
    UpdateDrawRectangle();
  
    g_gfx->BeginUtilityDrawing();
@@ -9985,7 +10113,7 @@ index 41d05f3..9fce0d3 100644
  
    // Render the XFB to the screen.
    if (backbuffer_bound && m_xfb_entry)
-@@ -945,7 +1092,52 @@ void Presenter::Present(PresentInfo* present_info)
+@@ -945,7 +1111,52 @@ void Presenter::Present(PresentInfo* present_info)
      AdjustRectanglesToFitBounds(&render_target_rc, &render_source_rc, m_backbuffer_width,
                                  m_backbuffer_height);
      RenderXFBToScreen(render_target_rc, m_xfb_entry->texture.get(), render_source_rc);
