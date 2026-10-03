@@ -1237,10 +1237,31 @@ index fc614fd..25a840f 100644
    {
      system.GetPowerPC().SetMode(PowerPC::CoreMode::JIT);
 diff --git a/Source/Core/Core/HW/GPFifo.cpp b/Source/Core/Core/HW/GPFifo.cpp
-index 0de434b..9bdc38d 100644
+index 0de434b..8e0fd63 100644
 --- a/Source/Core/Core/HW/GPFifo.cpp
 +++ b/Source/Core/Core/HW/GPFifo.cpp
-@@ -93,8 +93,18 @@ void GPFifoManager::UpdateGatherPipe()
+@@ -16,6 +16,10 @@
+ #include "Core/System.h"
+ #include "VideoCommon/CommandProcessor.h"
+ 
++#ifdef __ORBIS__
++extern "C" int ps4_fifo_batch;  // VideoCommon/Fifo.cpp
++#endif
++
+ namespace GPFifo
+ {
+ GPFifoManager::GPFifoManager(Core::System& system) : m_system(system)
+@@ -90,11 +94,28 @@ void GPFifoManager::UpdateGatherPipe()
+ 
+   size_t pipe_count = GetGatherPipeCount();
+   size_t processed;
++#ifdef __ORBIS__
++  // fifo_batch=on: copy every complete burst, then hand them to the command processor at once.
++  auto& command_processor = system.GetCommandProcessor();
++  const bool batch = ps4_fifo_batch && pipe_count >= 2 * GATHER_PIPE_SIZE &&
++                     command_processor.CanBatchGatherPipe();
++  u32 bursts = 0;
++#endif
    for (processed = 0; pipe_count >= GATHER_PIPE_SIZE; processed += GATHER_PIPE_SIZE)
    {
      // copy the GatherPipe
@@ -1261,8 +1282,23 @@ index 0de434b..9bdc38d 100644
      pipe_count -= GATHER_PIPE_SIZE;
  
      // increase the CPUWritePointer
-@@ -107,7 +117,20 @@ void GPFifoManager::UpdateGatherPipe()
+@@ -103,11 +124,35 @@ void GPFifoManager::UpdateGatherPipe()
+     else
+       processor_interface.m_fifo_cpu_write_pointer += GATHER_PIPE_SIZE;
+ 
++#ifdef __ORBIS__
++    if (batch)
++    {
++      bursts++;
++      continue;
++    }
++#endif
+     system.GetCommandProcessor().GatherPipeBursted();
    }
++#ifdef __ORBIS__
++  if (bursts != 0)
++    command_processor.GatherPipeBurstedBatch(bursts);
++#endif
  
    // move back the spill bytes
 -  memmove(m_gather_pipe, m_gather_pipe + processed, pipe_count);
@@ -1456,10 +1492,21 @@ index 8f30be8..0d6a0e4 100644
  }
  
 diff --git a/Source/Core/Core/PowerPC/Jit64/Jit.cpp b/Source/Core/Core/PowerPC/Jit64/Jit.cpp
-index 1248b1a..3c51971 100644
+index 1248b1a..519f177 100644
 --- a/Source/Core/Core/PowerPC/Jit64/Jit.cpp
 +++ b/Source/Core/Core/PowerPC/Jit64/Jit.cpp
-@@ -430,6 +430,19 @@ void Jit64::DoNothing(UGeckoInstruction _inst)
+@@ -49,6 +49,10 @@
+ #include "Core/System.h"
+ 
+ using namespace Gen;
++
++#ifdef __ORBIS__
++extern "C" int ps4_fifo_batch;  // VideoCommon/Fifo.cpp (ps4.ini fifo_batch)
++#endif
+ using namespace PowerPC;
+ 
+ // Dolphin's PowerPC->x86_64 JIT dynamic recompiler
+@@ -430,6 +434,19 @@ void Jit64::DoNothing(UGeckoInstruction _inst)
    // Yup, just don't do anything.
  }
  
@@ -1479,6 +1526,23 @@ index 1248b1a..3c51971 100644
  void Jit64::ImHere(Jit64& jit)
  {
    auto& ppc_state = jit.m_ppc_state;
+@@ -1018,8 +1035,15 @@ bool Jit64::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
+       bool gatherPipeIntCheck = js.fifoWriteAddresses.contains(prev_address);
+ 
+       // Gather pipe writes using an immediate address are explicitly tracked.
++#ifdef __ORBIS__
++      // PS4 fifo_batch=on: check every 256 bytes (the gather pipe buffer holds 512; at most
++      // 31 + 256 + 8 bytes are pending here). The block's end still flushes (Cleanup).
++      const u32 fifo_check_bytes = ps4_fifo_batch ? 256 : GPFifo::GATHER_PIPE_SIZE;
++#else
++      const u32 fifo_check_bytes = GPFifo::GATHER_PIPE_SIZE;
++#endif
+       if (jo.optimizeGatherPipe &&
+-          (js.fifoBytesSinceCheck >= GPFifo::GATHER_PIPE_SIZE || js.mustCheckFifo))
++          (js.fifoBytesSinceCheck >= fifo_check_bytes || js.mustCheckFifo))
+       {
+         js.fifoBytesSinceCheck = 0;
+         js.mustCheckFifo = false;
 diff --git a/Source/Core/Core/PowerPC/Jit64/Jit.h b/Source/Core/Core/PowerPC/Jit64/Jit.h
 index da1be2d..ad041b0 100644
 --- a/Source/Core/Core/PowerPC/Jit64/Jit.h
@@ -1533,6 +1597,48 @@ index be5458b..a507294 100644
  }};
  
  constexpr std::array<Jit64OpTemplate, 9> s_table59{{
+diff --git a/Source/Core/Core/PowerPC/Jit64/Jit_LoadStoreFloating.cpp b/Source/Core/Core/PowerPC/Jit64/Jit_LoadStoreFloating.cpp
+index 4d64010..f3a1816 100644
+--- a/Source/Core/Core/PowerPC/Jit64/Jit_LoadStoreFloating.cpp
++++ b/Source/Core/Core/PowerPC/Jit64/Jit_LoadStoreFloating.cpp
+@@ -120,8 +120,37 @@ void Jit64::stfXXX(UGeckoInstruction inst)
+     {
+       RCX64Reg Rs = fpr.Bind(s, RCMode::Read);
+       RegCache::Realize(Rs);
++#ifdef __ORBIS__
++      // PS4: the common case of the cdts routine inline, in integer registers. On Jaguar the
++      // routine's call plus its two SSE <-> integer transfers and SSE masking cost ~9% of the
++      // CPU thread in Crash Bandicoot (vertex data copied with lfs/stfs into the gather pipe).
++      // Bit-exact like the routine: outside the single-denormal exponent range (874..896) the
++      // result is bits 0-1 and 5-34 of the double; that range still goes to the routine.
++      MOVQ_xmm(R(RSCRATCH), Rs);
++      MOV(64, R(RSCRATCH2), R(RSCRATCH));
++      SHR(64, R(RSCRATCH2), Imm8(52));
++      AND(32, R(RSCRATCH2), Imm32(0x7ff));
++      SUB(32, R(RSCRATCH2), Imm32(874));
++      CMP(32, R(RSCRATCH2), Imm32(896 - 874));
++      FixupBranch denormal = J_CC(CC_NA, Jump::Near);
++      MOV(64, R(RSCRATCH2), R(RSCRATCH));
++      SHR(64, R(RSCRATCH), Imm8(29));
++      AND(32, R(RSCRATCH), Imm32(0x3fffffff));
++      SHR(64, R(RSCRATCH2), Imm8(32));
++      AND(32, R(RSCRATCH2), Imm32(0xc0000000));
++      OR(32, R(RSCRATCH), R(RSCRATCH2));
++
++      SwitchToFarCode();
++      SetJumpTarget(denormal);
+       MOVAPD(XMM0, Rs);
+       CALL(asm_routines.cdts);
++      FixupBranch back = J(Jump::Near);
++      SwitchToNearCode();
++      SetJumpTarget(back);
++#else
++      MOVAPD(XMM0, Rs);
++      CALL(asm_routines.cdts);
++#endif
+     }
+   }
+   else
 diff --git a/Source/Core/Core/PowerPC/Jit64Common/FarCodeCache.h b/Source/Core/Core/PowerPC/Jit64Common/FarCodeCache.h
 index 08cfe3f..04ee875 100644
 --- a/Source/Core/Core/PowerPC/Jit64Common/FarCodeCache.h
@@ -5957,10 +6063,57 @@ index a761a81..3416e1f 100644
      return false;
  
 diff --git a/Source/Core/VideoCommon/CommandProcessor.cpp b/Source/Core/VideoCommon/CommandProcessor.cpp
-index 1dbf466..3e15165 100644
+index 1dbf466..b66cbac 100644
 --- a/Source/Core/VideoCommon/CommandProcessor.cpp
 +++ b/Source/Core/VideoCommon/CommandProcessor.cpp
-@@ -476,12 +476,26 @@ void CommandProcessorManager::SetCPStatusFromGPU()
+@@ -406,6 +406,46 @@ void CommandProcessorManager::GatherPipeBursted()
+              "FIFOs linked but out of sync");
+ }
+ 
++#ifdef __ORBIS__
++// The linked FIFO without breakpoints: the common case, where a batch of bursts can be handed
++// over at once.
++bool CommandProcessorManager::CanBatchGatherPipe() const
++{
++  return m_cp_ctrl_reg.GPLinkEnable && !m_fifo.bFF_BPEnable.load(std::memory_order_relaxed);
++}
++
++// GatherPipeBursted() for `bursts` bursts at once: one status check, one update of the shared
++// read/write distance and one GPU wakeup instead of one each per 32 bytes (each of those touches
++// cache lines the GPU thread's core also writes).
++void CommandProcessorManager::GatherPipeBurstedBatch(u32 bursts)
++{
++  SetCPStatusFromCPU();
++
++  const u32 base = m_fifo.CPBase.load(std::memory_order_relaxed);
++  const u32 end = m_fifo.CPEnd.load(std::memory_order_relaxed);
++  u32 write_pointer = m_fifo.CPWritePointer.load(std::memory_order_relaxed);
++  for (u32 i = 0; i < bursts; i++)
++    write_pointer = write_pointer == end ? base : write_pointer + GPFifo::GATHER_PIPE_SIZE;
++  m_fifo.CPWritePointer.store(write_pointer, std::memory_order_relaxed);
++
++  if (m_cp_ctrl_reg.GPReadEnable)
++  {
++    auto& processor_interface = m_system.GetProcessorInterface();
++    processor_interface.m_fifo_cpu_write_pointer = write_pointer;
++    processor_interface.m_fifo_cpu_base = base;
++    processor_interface.m_fifo_cpu_end = end;
++  }
++
++  if (m_fifo.bFF_HiWatermark.load(std::memory_order_relaxed) != 0)
++    m_system.GetCoreTiming().ForceExceptionCheck(0);
++
++  m_fifo.CPReadWriteDistance.fetch_add(GPFifo::GATHER_PIPE_SIZE * bursts,
++                                       std::memory_order_seq_cst);
++
++  m_system.GetFifo().RunGpu();
++}
++#endif
++
+ void CommandProcessorManager::UpdateInterrupts(u64 userdata)
+ {
+   if (userdata)
+@@ -476,12 +516,26 @@ void CommandProcessorManager::SetCPStatusFromGPU()
    }
  
    // overflow & underflow check
@@ -5987,7 +6140,7 @@ index 1dbf466..3e15165 100644
  
    bool bpInt = m_fifo.bFF_Breakpoint.load(std::memory_order_relaxed) &&
                 m_fifo.bFF_BPInt.load(std::memory_order_relaxed);
-@@ -514,12 +528,26 @@ void CommandProcessorManager::SetCPStatusFromGPU()
+@@ -514,12 +568,26 @@ void CommandProcessorManager::SetCPStatusFromGPU()
  void CommandProcessorManager::SetCPStatusFromCPU()
  {
    // overflow & underflow check
@@ -6014,8 +6167,24 @@ index 1dbf466..3e15165 100644
  
    bool bpInt = m_fifo.bFF_Breakpoint.load(std::memory_order_relaxed) &&
                 m_fifo.bFF_BPInt.load(std::memory_order_relaxed);
+diff --git a/Source/Core/VideoCommon/CommandProcessor.h b/Source/Core/VideoCommon/CommandProcessor.h
+index 976592c..a20137f 100644
+--- a/Source/Core/VideoCommon/CommandProcessor.h
++++ b/Source/Core/VideoCommon/CommandProcessor.h
+@@ -172,6 +172,11 @@ public:
+   void SetCPStatusFromGPU();
+   void SetCPStatusFromCPU();
+   void GatherPipeBursted();
++#ifdef __ORBIS__
++  // PS4 (ps4.ini fifo_batch=on): several bursts at once - see GPFifo::UpdateGatherPipe.
++  bool CanBatchGatherPipe() const;
++  void GatherPipeBurstedBatch(u32 bursts);
++#endif
+   void UpdateInterrupts(u64 userdata);
+   void UpdateInterruptsFromVideoBackend(u64 userdata);
+ 
 diff --git a/Source/Core/VideoCommon/Fifo.cpp b/Source/Core/VideoCommon/Fifo.cpp
-index f183c93..64fba21 100644
+index f183c93..edb6020 100644
 --- a/Source/Core/VideoCommon/Fifo.cpp
 +++ b/Source/Core/VideoCommon/Fifo.cpp
 @@ -2,6 +2,7 @@
@@ -6026,7 +6195,7 @@ index f183c93..64fba21 100644
  
  #include <atomic>
  #include <cstring>
-@@ -230,7 +231,15 @@ void FifoManager::ReadDataFromFifo(u32 read_ptr)
+@@ -230,8 +231,24 @@ void FifoManager::ReadDataFromFifo(u32 read_ptr)
    }
    // Copy new video instructions to m_video_buffer for future use in rendering the new picture
    auto& memory = m_system.GetMemory();
@@ -6040,10 +6209,19 @@ index f183c93..64fba21 100644
 +  else
 +#endif
 +    memory.CopyFromEmu(m_video_buffer_write_ptr, read_ptr, GPFifo::GATHER_PIPE_SIZE);
++#ifdef __ORBIS__
++  // Only the GPU thread uses this pointer here (the deterministic mode has its own reader), so a
++  // plain update instead of a locked add for every 32 bytes.
++  m_video_buffer_write_ptr.store(
++      m_video_buffer_write_ptr.load(std::memory_order_relaxed) + GPFifo::GATHER_PIPE_SIZE,
++      std::memory_order_relaxed);
++#else
    m_video_buffer_write_ptr += GPFifo::GATHER_PIPE_SIZE;
++#endif
  }
  
-@@ -283,6 +292,14 @@ void FifoManager::ResetVideoBuffer()
+ // The deterministic_gpu_thread version.
+@@ -283,6 +300,14 @@ void FifoManager::ResetVideoBuffer()
  
  // Description: Main FIFO update loop
  // Purpose: Keep the Core HW updated about the CPU-GPU distance
@@ -6058,7 +6236,7 @@ index f183c93..64fba21 100644
  void FifoManager::RunGpuLoop()
  {
    m_gpu_mainloop.Run(
-@@ -302,6 +319,7 @@ void FifoManager::RunGpuLoop()
+@@ -302,6 +327,7 @@ void FifoManager::RunGpuLoop()
            // See comment in SyncGPU
            if (write_ptr > seen_ptr)
            {
@@ -6066,7 +6244,7 @@ index f183c93..64fba21 100644
              m_video_buffer_read_ptr =
                  OpcodeDecoder::RunFifo(DataReader(m_video_buffer_read_ptr, write_ptr), nullptr);
              m_video_buffer_seen_ptr = write_ptr;
-@@ -324,27 +342,56 @@ void FifoManager::RunGpuLoop()
+@@ -324,27 +350,56 @@ void FifoManager::RunGpuLoop()
  
              u32 cyclesExecuted = 0;
              u32 readPtr = fifo.CPReadPointer.load(std::memory_order_relaxed);
@@ -6132,7 +6310,7 @@ index f183c93..64fba21 100644
              if ((write_ptr - m_video_buffer_read_ptr) == 0)
              {
                fifo.SafeCPReadPointer.store(fifo.CPReadPointer.load(std::memory_order_relaxed),
-@@ -551,7 +598,10 @@ int FifoManager::WaitForGpuThread(int ticks)
+@@ -551,7 +606,10 @@ int FifoManager::WaitForGpuThread(int ticks)
  
    // Wait for GPU
    if (now >= m_config_sync_gpu_max_distance)

@@ -25,6 +25,10 @@ rm -rf "$STAGE/Sys/Themes" "$STAGE/Sys/Load"
 # SFO_STYLE=retroarch + PS4_PAID 0x3100000000000002 for the OpenGL (Piglet) backend.
 PKG="$(SFO_STYLE="${SFO_STYLE:-plain}" "$HERE/make-pkg.sh" "$STAGE" DLPH00010 "Dolphin" "$VERSION" DOLPHIN "$PS4_BUILD_ROOT/out" | tail -1)"
 ls -la "$PKG"
+# Keep the symbols of every packaged build: profiles and crash logs from the console must be
+# symbolized against the exact binary that produced them, not a later rebuild.
+mkdir -p "$PS4_BUILD_ROOT/oelf"
+cp "${EBOOT%/eboot.bin}/dolphin-nogui.oelf" "$PS4_BUILD_ROOT/oelf/v$VERSION.oelf"
 if [ "${1:-}" = upload ]; then
     curl -sS -T "$PKG" "$HOST/data/pkg/"
     echo "uploaded $(basename "$PKG")"
