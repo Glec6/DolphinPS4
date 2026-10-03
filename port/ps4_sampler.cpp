@@ -274,8 +274,15 @@ void dumpHandler(int, siginfo_t*, void* context) {
                     memcpy(t.umtx_words2, reinterpret_cast<const void*>(t.umtx_obj2), 16);
             }
         }
-        const auto* stack = reinterpret_cast<const uint64_t*>(regs[kRspIndex]);
-        const auto* limit = reinterpret_cast<const uint64_t*>(t.stack_limit);
+        // Only scan a stack that is plausibly this registration's: a thread that registered and
+        // exited can leave its pthread handle to a new thread, whose stack is elsewhere (a v02.34
+        // hang dump crashed scanning from one thread's rsp to another's stack limit).
+        const uint64_t rsp = regs[kRspIndex];
+        const bool same_thread = pthread_getthreadid_np() == t.tid;
+        const bool sane = t.stack_limit > rsp && t.stack_limit - rsp <= (1u << 20);
+        const auto* stack = reinterpret_cast<const uint64_t*>(rsp);
+        const auto* limit =
+            reinterpret_cast<const uint64_t*>(same_thread && sane ? t.stack_limit : rsp);
         int n = 0;
         for (const uint64_t* p = stack; p < limit && n < kMaxFrames; p++) {
             if (*p >= text && *p < text + kTextWindow)
