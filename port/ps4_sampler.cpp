@@ -4,8 +4,11 @@
 // SIGPROF to each registered thread every millisecond, and the handler records the interrupted
 // instruction pointer. Every 10 seconds the samples are aggregated and appended to
 // /data/DolphinPS4/samples.log: per thread, the busiest eboot addresses (ELF virtual addresses,
-// symbolize with `llvm-symbolizer --obj=<oelf> 0x...`) and the busiest 1 MiB regions outside the
-// eboot (JIT code, system modules).
+// symbolize with `llvm-symbolizer --obj=<oelf> 0x...`), system module addresses ("sys") and JIT
+// code addresses ("jit", 16-byte buckets). Every 60 s the busiest JIT code (64 KiB chunks) is
+// copied to /data/DolphinPS4/jitcode.bin and the emulated MEM1 to mem1.bin, so the generated x86
+// and the guest code behind it can be disassembled offline (blocks: the jit-perf map written by
+// Common/JitRegister).
 //
 // Started by ps4_sampler_start() (DolphinNoGUI, ps4.ini profile=on); threads register
 // themselves with ps4_sampler_register_thread().
@@ -84,6 +87,8 @@ void writeLine(int fd, const char* text) {
     }
 }
 
+void noteHotJit(uint64_t address, int count);
+
 // Aggregates one thread's window: sorts the samples in place and prints the top entries.
 void report(int fd, ThreadSamples& t, double window_start) {
     // Copy first: the handler keeps writing into t.samples once count is reset.
@@ -95,15 +100,15 @@ void report(int fd, ThreadSamples& t, double window_start) {
         return;
     const uintptr_t text = reinterpret_cast<uintptr_t>(__text_start);
 
-    // Eboot code: exact addresses, aggregated by the symbolizer later; bucket by 16 bytes here.
-    // Elsewhere (JIT code, modules): 1 MiB regions.
+    // Eboot and JIT code: bucket by 16 bytes (eboot addresses relative to .text; JIT addresses
+    // tagged with bit 63).
     for (int i = 0; i < n; i++) {
         if (s[i] & kCallerTag) {
             s[i] &= ~0xFULL;  // system module address (see the module list)
             continue;
         }
         const bool eboot = s[i] >= text && s[i] < text + kTextWindow;
-        s[i] = eboot ? ((s[i] - text) & ~0xFULL) : (s[i] | (1ULL << 63)) >> 20 << 20;
+        s[i] = eboot ? ((s[i] - text) & ~0xFULL) : (s[i] | (1ULL << 63)) & ~0xFULL;
     }
     std::sort(s, s + n);
     struct Entry { uint64_t key; int count; };
@@ -124,13 +129,16 @@ void report(int fd, ThreadSamples& t, double window_start) {
     snprintf(line, sizeof(line), "== %.0f s, %s: %d samples, %d in eboot code (%.0f%%)\n",
              window_start, t.name, n, eboot_samples, 100.0 * eboot_samples / n);
     writeLine(fd, line);
-    // Every bucket seen at least twice (up to 800): a function spread over many 16-byte buckets
+    // Every bucket seen at least twice (up to 1500): a function spread over many 16-byte buckets
     // fell below a top-60 cut, hiding about half of a busy thread. Aggregated per function
-    // offline (symbolizer).
-    for (int i = 0; i < unique && i < 800 && entries[i].count >= 2; i++) {
-        if (entries[i].key >> 63)
-            snprintf(line, sizeof(line), "  %5.1f%% region 0x%llx\n", 100.0 * entries[i].count / n,
-                     static_cast<unsigned long long>(entries[i].key & ~(1ULL << 63)));
+    // offline (symbolizer, JIT block map).
+    for (int i = 0; i < unique && i < 1500 && entries[i].count >= 2; i++) {
+        if (entries[i].key >> 63) {
+            const uint64_t address = entries[i].key & ~(1ULL << 63);
+            snprintf(line, sizeof(line), "  %5.1f%% jit 0x%llx\n", 100.0 * entries[i].count / n,
+                     static_cast<unsigned long long>(address));
+            noteHotJit(address, entries[i].count);
+        }
         else if (entries[i].key & kCallerTag)
             snprintf(line, sizeof(line), "  %5.1f%% sys 0x%llx\n",
                      100.0 * entries[i].count / n,
@@ -140,6 +148,23 @@ void report(int fd, ThreadSamples& t, double window_start) {
                      static_cast<unsigned long long>(entries[i].key));
         writeLine(fd, line);
     }
+}
+
+// 64 KiB chunks of JIT code sampled since the last dump (dumpJitCode).
+constexpr int kMaxHotChunks = 96;
+uint64_t g_hot_chunks[kMaxHotChunks];
+int g_hot_chunk_count = 0;
+
+void noteHotJit(uint64_t address, int count) {
+    if (count < 3)
+        return;
+    const uint64_t chunk = address & ~0xFFFFULL;
+    for (int i = 0; i < g_hot_chunk_count; i++) {
+        if (g_hot_chunks[i] == chunk)
+            return;
+    }
+    if (g_hot_chunk_count < kMaxHotChunks)
+        g_hot_chunks[g_hot_chunk_count++] = chunk;
 }
 
 double now() {
@@ -187,13 +212,68 @@ void writeModuleList(int fd) {
     }
 }
 
+}  // namespace
+
+extern "C" int32_t sceKernelQueryMemoryProtection(void* address, void** start, void** end,
+                                                  uint32_t* protection);
+// Emulated MEM1 (set by Core/HW/Memmap.cpp), dumped with the JIT code.
+extern "C" void* ps4_profile_guest_ram;
+extern "C" uint32_t ps4_profile_guest_ram_size;
+extern "C" {
+void* ps4_profile_guest_ram = nullptr;
+uint32_t ps4_profile_guest_ram_size = 0;
+}
+
+namespace {
+
+bool isReadable(uint64_t address, uint64_t size) {
+    void* start = nullptr;
+    void* end = nullptr;
+    uint32_t protection = 0;
+    return sceKernelQueryMemoryProtection(reinterpret_cast<void*>(address), &start, &end,
+                                          &protection) == 0 &&
+           (protection & 1) && address + size <= reinterpret_cast<uintptr_t>(end);
+}
+
+// jitcode.bin: records of {u64 address, u64 size, bytes}. Copied through a buffer first so the
+// kernel never reads JIT memory for the file write.
+void dumpJitCode() {
+    const int fd = open("/data/DolphinPS4/jitcode.bin", O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    if (fd >= 0) {
+        static uint8_t buffer[0x10000];
+        for (int i = 0; i < g_hot_chunk_count; i++) {
+            if (!isReadable(g_hot_chunks[i], sizeof(buffer)))
+                continue;
+            memcpy(buffer, reinterpret_cast<const void*>(g_hot_chunks[i]), sizeof(buffer));
+            const uint64_t header[2] = {g_hot_chunks[i], sizeof(buffer)};
+            write(fd, header, sizeof(header));
+            write(fd, buffer, sizeof(buffer));
+        }
+        close(fd);
+    }
+    g_hot_chunk_count = 0;
+    if (ps4_profile_guest_ram && ps4_profile_guest_ram_size) {
+        const int ram = open("/data/DolphinPS4/mem1.bin", O_WRONLY | O_CREAT | O_TRUNC, 0666);
+        if (ram >= 0) {
+            static uint8_t copy[0x100000];
+            for (uint32_t offset = 0; offset < ps4_profile_guest_ram_size; offset += sizeof(copy)) {
+                const uint32_t size =
+                    std::min<uint32_t>(sizeof(copy), ps4_profile_guest_ram_size - offset);
+                memcpy(copy, static_cast<const uint8_t*>(ps4_profile_guest_ram) + offset, size);
+                write(ram, copy, size);
+            }
+            close(ram);
+        }
+    }
+}
+
 void* samplerThread(void*) {
     const int fd = open("/data/DolphinPS4/samples.log", O_WRONLY | O_CREAT | O_TRUNC, 0666);
     if (fd < 0)
         return nullptr;
     writeModuleList(fd);
     const double start = now();
-    double window_start = start;
+    double window_start = start, last_dump = start;
     const timespec period = {0, 1000000};
     for (;;) {
         nanosleep(&period, nullptr);
@@ -205,6 +285,11 @@ void* samplerThread(void*) {
             for (int i = 0; i < threads; i++)
                 report(fd, g_threads[i], window_start - start);
             window_start = now();
+            if (window_start - last_dump >= 60.0) {
+                dumpJitCode();
+                last_dump = window_start = now();
+                writeLine(fd, "(jitcode.bin and mem1.bin updated)\n");
+            }
         }
     }
     return nullptr;

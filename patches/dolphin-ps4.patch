@@ -1284,10 +1284,34 @@ index 0de434b..9bdc38d 100644
  }
  
 diff --git a/Source/Core/Core/HW/Memmap.cpp b/Source/Core/Core/HW/Memmap.cpp
-index 054596e..9b72b50 100644
+index 054596e..939e27c 100644
 --- a/Source/Core/Core/HW/Memmap.cpp
 +++ b/Source/Core/Core/HW/Memmap.cpp
-@@ -348,6 +348,13 @@ void MemoryManager::AddPageTableMapping(u32 logical_address, u32 translated_addr
+@@ -86,6 +86,12 @@ void MemoryManager::InitMMIO(Core::System& system)
+   }
+ }
+ 
++#ifdef __ORBIS__
++// The port's profiler (ps4.ini profile=on) dumps MEM1 with the hot JIT code (port/ps4_sampler.cpp).
++extern "C" void* ps4_profile_guest_ram;
++extern "C" u32 ps4_profile_guest_ram_size;
++#endif
++
+ void MemoryManager::Init()
+ {
+   const auto get_mem1_size = [this] {
+@@ -178,6 +184,10 @@ void MemoryManager::Init()
+ 
+   INFO_LOG_FMT(MEMMAP, "Memory system initialized. RAM at {}", fmt::ptr(m_ram));
+   m_is_initialized = true;
++#ifdef __ORBIS__
++  ps4_profile_guest_ram = m_ram;
++  ps4_profile_guest_ram_size = GetRamSizeReal();
++#endif
+ }
+ 
+ bool MemoryManager::IsAddressInFastmemArea(const u8* address) const
+@@ -348,6 +358,13 @@ void MemoryManager::AddPageTableMapping(u32 logical_address, u32 translated_addr
    }
  }
  
@@ -1301,7 +1325,7 @@ index 054596e..9b72b50 100644
  void MemoryManager::TryAddLargePageTableMapping(u32 logical_address, u32 translated_address,
                                                  bool writeable)
  {
-@@ -363,6 +370,9 @@ void MemoryManager::TryAddLargePageTableMapping(u32 logical_address, u32 transla
+@@ -363,6 +380,9 @@ void MemoryManager::TryAddLargePageTableMapping(u32 logical_address, u32 transla
      AddHostPageTableMapping(logical_address & ~(m_page_size - 1),
                              translated_address & ~(m_page_size - 1), add_writeable, m_page_size);
    }
@@ -1916,7 +1940,7 @@ index 51c3fff..8e91ab7 100644
 +  ps4_add_eboot(dolphin-nogui)
 +endif()
 diff --git a/Source/Core/DolphinNoGUI/MainNoGUI.cpp b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
-index 3bf40ea..b492fda 100644
+index 3bf40ea..26984a0 100644
 --- a/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 +++ b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 @@ -5,7 +5,9 @@
@@ -2016,7 +2040,7 @@ index 3bf40ea..b492fda 100644
  #endif
        });
  
-@@ -270,7 +313,165 @@ int main(const int argc, char* argv[])
+@@ -270,7 +313,170 @@ int main(const int argc, char* argv[])
  
    UICommon::SetUserDirectory(user_directory);
    UICommon::Init();
@@ -2141,8 +2165,13 @@ index 3bf40ea..b492fda 100644
 +    Config::SetBase(Config::MAIN_ACCURATE_FMADDS,
 +                    Platform::GetPS4Option("accurate_fmadds", "on") == "on");
 +    // profile=on samples the CPU and video threads (/data/DolphinPS4/samples.log).
++    // It also writes the JIT block map (/data/DolphinPS4/perf-<pid>.map: host address, size,
++    // guest address) for the sampled JIT code.
 +    if (Platform::GetPS4Option("profile", "off") == "on")
++    {
++      Config::SetBase(Config::MAIN_PERF_MAP_DIR, "/data/DolphinPS4");
 +      ps4_sampler_start();
++    }
 +    {
 +      const std::string cpu = cpu_info.Summarize();
 +      Platform::BootTrace(("host CPU: " + cpu).c_str());
@@ -2182,7 +2211,7 @@ index 3bf40ea..b492fda 100644
  
    Common::ScopeGuard ui_common_guard([] {
      UICommon::ShutdownControllers();
-@@ -284,6 +485,12 @@ int main(const int argc, char* argv[])
+@@ -284,6 +490,12 @@ int main(const int argc, char* argv[])
    }
  
    auto core_state_changed_hook = Core::AddOnStateChangedCallback([](const Core::State state) {
@@ -2195,7 +2224,7 @@ index 3bf40ea..b492fda 100644
      if (state == Core::State::Uninitialized)
        s_platform->Stop();
    });
-@@ -303,6 +510,9 @@ int main(const int argc, char* argv[])
+@@ -303,6 +515,9 @@ int main(const int argc, char* argv[])
  
    DolphinAnalytics::Instance().ReportDolphinStart("nogui");
  
