@@ -1237,7 +1237,7 @@ index fc614fd..25a840f 100644
    {
      system.GetPowerPC().SetMode(PowerPC::CoreMode::JIT);
 diff --git a/Source/Core/Core/HW/GPFifo.cpp b/Source/Core/Core/HW/GPFifo.cpp
-index 0de434b..0b3cc7e 100644
+index 0de434b..9bdc38d 100644
 --- a/Source/Core/Core/HW/GPFifo.cpp
 +++ b/Source/Core/Core/HW/GPFifo.cpp
 @@ -93,8 +93,18 @@ void GPFifoManager::UpdateGatherPipe()
@@ -1261,13 +1261,23 @@ index 0de434b..0b3cc7e 100644
      pipe_count -= GATHER_PIPE_SIZE;
  
      // increase the CPUWritePointer
-@@ -107,7 +117,10 @@ void GPFifoManager::UpdateGatherPipe()
+@@ -107,7 +117,20 @@ void GPFifoManager::UpdateGatherPipe()
    }
  
    // move back the spill bytes
 -  memmove(m_gather_pipe, m_gather_pipe + processed, pipe_count);
 +#ifdef __ORBIS__
-+  if (pipe_count != 0)  // usually none: skip the libc call
++  // The spill is under 32 bytes and starts at least 32 bytes in (one burst was processed), so the
++  // ranges don't overlap: a fixed 32-byte copy (inline) instead of a memmove call per burst.
++  static_assert(GATHER_PIPE_EXTRA_SIZE % GATHER_PIPE_SIZE == 0);
++  if (pipe_count != 0 && processed >= GATHER_PIPE_SIZE &&
++      processed + GATHER_PIPE_SIZE <= GATHER_PIPE_EXTRA_SIZE)
++  {
++    u8 spill[GATHER_PIPE_SIZE];
++    __builtin_memcpy(spill, m_gather_pipe + processed, GATHER_PIPE_SIZE);
++    __builtin_memcpy(m_gather_pipe, spill, GATHER_PIPE_SIZE);
++  }
++  else if (pipe_count != 0)
 +#endif
 +    memmove(m_gather_pipe, m_gather_pipe + processed, pipe_count);
    SetGatherPipeCount(pipe_count);
@@ -5912,6 +5922,64 @@ index a761a81..3416e1f 100644
    if (!s_vulkan_module.IsOpen() && !OpenVulkanLibrary(force_system_library))
      return false;
  
+diff --git a/Source/Core/VideoCommon/CommandProcessor.cpp b/Source/Core/VideoCommon/CommandProcessor.cpp
+index 1dbf466..3e15165 100644
+--- a/Source/Core/VideoCommon/CommandProcessor.cpp
++++ b/Source/Core/VideoCommon/CommandProcessor.cpp
+@@ -476,12 +476,26 @@ void CommandProcessorManager::SetCPStatusFromGPU()
+   }
+ 
+   // overflow & underflow check
++#ifdef __ORBIS__
++  // PS4: store only on change. Both the CPU and the GPU thread run this for every 32 bytes of GPU
++  // commands; unconditional stores kept the FIFO state's cache line bouncing between their cores.
++  {
++    const u32 distance = m_fifo.CPReadWriteDistance.load(std::memory_order_relaxed);
++    const u32 hi = distance > m_fifo.CPHiWatermark;
++    const u32 lo = distance < m_fifo.CPLoWatermark;
++    if (m_fifo.bFF_HiWatermark.load(std::memory_order_relaxed) != hi)
++      m_fifo.bFF_HiWatermark.store(hi, std::memory_order_relaxed);
++    if (m_fifo.bFF_LoWatermark.load(std::memory_order_relaxed) != lo)
++      m_fifo.bFF_LoWatermark.store(lo, std::memory_order_relaxed);
++  }
++#else
+   m_fifo.bFF_HiWatermark.store(
+       (m_fifo.CPReadWriteDistance.load(std::memory_order_relaxed) > m_fifo.CPHiWatermark),
+       std::memory_order_relaxed);
+   m_fifo.bFF_LoWatermark.store(
+       (m_fifo.CPReadWriteDistance.load(std::memory_order_relaxed) < m_fifo.CPLoWatermark),
+       std::memory_order_relaxed);
++#endif
+ 
+   bool bpInt = m_fifo.bFF_Breakpoint.load(std::memory_order_relaxed) &&
+                m_fifo.bFF_BPInt.load(std::memory_order_relaxed);
+@@ -514,12 +528,26 @@ void CommandProcessorManager::SetCPStatusFromGPU()
+ void CommandProcessorManager::SetCPStatusFromCPU()
+ {
+   // overflow & underflow check
++#ifdef __ORBIS__
++  // PS4: store only on change. Both the CPU and the GPU thread run this for every 32 bytes of GPU
++  // commands; unconditional stores kept the FIFO state's cache line bouncing between their cores.
++  {
++    const u32 distance = m_fifo.CPReadWriteDistance.load(std::memory_order_relaxed);
++    const u32 hi = distance > m_fifo.CPHiWatermark;
++    const u32 lo = distance < m_fifo.CPLoWatermark;
++    if (m_fifo.bFF_HiWatermark.load(std::memory_order_relaxed) != hi)
++      m_fifo.bFF_HiWatermark.store(hi, std::memory_order_relaxed);
++    if (m_fifo.bFF_LoWatermark.load(std::memory_order_relaxed) != lo)
++      m_fifo.bFF_LoWatermark.store(lo, std::memory_order_relaxed);
++  }
++#else
+   m_fifo.bFF_HiWatermark.store(
+       (m_fifo.CPReadWriteDistance.load(std::memory_order_relaxed) > m_fifo.CPHiWatermark),
+       std::memory_order_relaxed);
+   m_fifo.bFF_LoWatermark.store(
+       (m_fifo.CPReadWriteDistance.load(std::memory_order_relaxed) < m_fifo.CPLoWatermark),
+       std::memory_order_relaxed);
++#endif
+ 
+   bool bpInt = m_fifo.bFF_Breakpoint.load(std::memory_order_relaxed) &&
+                m_fifo.bFF_BPInt.load(std::memory_order_relaxed);
 diff --git a/Source/Core/VideoCommon/Fifo.cpp b/Source/Core/VideoCommon/Fifo.cpp
 index f183c93..702d4de 100644
 --- a/Source/Core/VideoCommon/Fifo.cpp
