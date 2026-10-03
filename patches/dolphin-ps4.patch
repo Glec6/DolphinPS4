@@ -1533,10 +1533,10 @@ index 8f30be8..0d6a0e4 100644
  }
  
 diff --git a/Source/Core/Core/PowerPC/Jit64/Jit.cpp b/Source/Core/Core/PowerPC/Jit64/Jit.cpp
-index 1248b1a..7e7188e 100644
+index 1248b1a..3885ab5 100644
 --- a/Source/Core/Core/PowerPC/Jit64/Jit.cpp
 +++ b/Source/Core/Core/PowerPC/Jit64/Jit.cpp
-@@ -49,6 +49,13 @@
+@@ -49,6 +49,15 @@
  #include "Core/System.h"
  
  using namespace Gen;
@@ -1546,11 +1546,13 @@ index 1248b1a..7e7188e 100644
 +extern "C" int ps4_fifo_defer;  // VideoCommon/Fifo.cpp (ps4.ini fifo_defer)
 +extern "C" int ps4_gp_fuse;     // ps4.ini jit_gp_fuse (DolphinNoGUI)
 +int ps4_gp_fuse = 1;
++extern "C" int ps4_lazy_lfs;    // ps4.ini jit_lazy_lfs (DolphinNoGUI)
++int ps4_lazy_lfs = 1;
 +#endif
  using namespace PowerPC;
  
  // Dolphin's PowerPC->x86_64 JIT dynamic recompiler
-@@ -430,6 +437,19 @@ void Jit64::DoNothing(UGeckoInstruction _inst)
+@@ -430,6 +439,19 @@ void Jit64::DoNothing(UGeckoInstruction _inst)
    // Yup, just don't do anything.
  }
  
@@ -1570,7 +1572,7 @@ index 1248b1a..7e7188e 100644
  void Jit64::ImHere(Jit64& jit)
  {
    auto& ppc_state = jit.m_ppc_state;
-@@ -453,15 +473,154 @@ void Jit64::ImHere(Jit64& jit)
+@@ -453,15 +475,210 @@ void Jit64::ImHere(Jit64& jit)
    been_here[ppc_state.pc] = 1;
  }
  
@@ -1616,6 +1618,62 @@ index 1248b1a..7e7188e 100644
 +    }
 +    if (op.fregOut >= 0)
 +      producer[op.fregOut] = is_lfs(op.inst) ? static_cast<s32>(i) : -1;
++  }
++
++  // Lazy lfs (flag 4): an lfs whose value is only ever stored by forwarded stfs before the
++  // register is overwritten, in this block, with nothing in between that could leave the block or
++  // flush registers, needs no single -> double conversion at all: the register cache entry is
++  // discarded until the overwrite. (Crash Bandicoot's vertex loops: 6 of 8 loads per vertex.)
++  m_ps4_raw_only.assign(num_instructions, BitSet32{});
++  if (!ps4_lazy_lfs || jo.memcheck || jo.fp_exceptions || jo.div_by_zero_exceptions ||
++      IsDebuggingEnabled() || bJITRegisterCacheOff)
++  {
++    return;
++  }
++  for (u32 i = 0; i < num_instructions; i++)
++  {
++    const PPCAnalyst::CodeOp& load = m_code_buffer[i];
++    if (load.skip || !is_lfs(load.inst) || !(m_ps4_raw_single[i] & 1) ||
++        js.fifoWriteAddresses.contains(load.address))
++    {
++      continue;
++    }
++    const u32 d = load.inst.RD;
++    u32 overwrite = 0;
++    bool ok = true;
++    for (u32 k = i + 1; k < num_instructions && ok; k++)
++    {
++      const PPCAnalyst::CodeOp& op = m_code_buffer[k];
++      if (op.skip || op.canEndBlock ||
++          (op.opinfo->flags & (FL_PROGRAMEXCEPTION | FL_FLOAT_EXCEPTION |
++                               FL_FLOAT_DIV)) ||
++          js.fifoWriteAddresses.contains(op.address) ||
++          (op.inst.OPCD == 31 && op.inst.SUBOP10 == 854) ||  // eieio
++          HLE::TryReplaceFunction(m_ppc_symbol_db, op.address, PowerPC::CoreMode::JIT))
++      {
++        ok = false;
++        break;
++      }
++      if (op.fregsIn[d])
++      {
++        // Only stores of the loaded bits may read it.
++        if (!(is_stfs(op.inst) && op.inst.RS == d && (m_ps4_raw_single[k] & 2)))
++          ok = false;
++        else if (op.fregOut == static_cast<s32>(d))
++          ok = false;
++        continue;
++      }
++      if (op.fregOut == static_cast<s32>(d))
++      {
++        overwrite = k;
++        break;
++      }
++    }
++    if (!ok || overwrite == 0)
++      continue;
++    m_ps4_raw_single[i] |= 4;
++    for (u32 k = i + 1; k <= overwrite; k++)
++      m_ps4_raw_only[k][d] = true;
 +  }
 +}
 +
@@ -1725,7 +1783,7 @@ index 1248b1a..7e7188e 100644
      FixupBranch exit = J_CC(CC_L);
      ABI_PushRegistersAndAdjustStack({}, 0);
      ABI_CallFunctionP(GPFifo::UpdateGatherPipe, &m_system.GetGPFifo());
-@@ -992,10 +1151,21 @@ bool Jit64::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
+@@ -992,10 +1209,21 @@ bool Jit64::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
      IntializeSpeculativeConstants();
    }
  
@@ -1747,7 +1805,7 @@ index 1248b1a..7e7188e 100644
  
      js.compilerPC = op.address;
      js.op = &op;
-@@ -1018,11 +1188,21 @@ bool Jit64::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
+@@ -1018,16 +1246,32 @@ bool Jit64::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
        bool gatherPipeIntCheck = js.fifoWriteAddresses.contains(prev_address);
  
        // Gather pipe writes using an immediate address are explicitly tracked.
@@ -1770,8 +1828,33 @@ index 1248b1a..7e7188e 100644
          BitSet32 registersInUse = CallerSavedRegistersInUse();
          ABI_PushRegistersAndAdjustStack(registersInUse, 0);
          ABI_CallFunctionP(GPFifo::FastCheckGatherPipe, &m_system.GetGPFifo());
+         ABI_PopRegistersAndAdjustStack(registersInUse, 0);
+-        gatherPipeIntCheck = true;
++#ifdef __ORBIS__
++        // jit_lazy_lfs: a CP interrupt raised by this check is taken at the next timing slice
++        // instead of right here (the hardware's interrupt is asynchronous too), so the block has
++        // no exit in the middle of its gather pipe writes.
++        if (!ps4_lazy_lfs)
++#endif
++          gatherPipeIntCheck = true;
+       }
+ 
+       // Gather pipe writes can generate an exception; add an exception check.
+@@ -1155,7 +1399,12 @@ bool Jit64::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
+             // prioritize the more important registers.
+             gpr.PreloadRegisters(op.regsIn & (op.gprWillBeRead | op.gprWillBeWritten) &
+                                  ~op.gprDiscardable);
++#ifdef __ORBIS__
++            fpr.PreloadRegisters(op.fregsIn & op.fprInXmm & ~op.fprDiscardable &
++                                 ~(i < m_ps4_raw_only.size() ? m_ps4_raw_only[i] : BitSet32{}));
++#else
+             fpr.PreloadRegisters(op.fregsIn & op.fprInXmm & ~op.fprDiscardable);
++#endif
+           }
+ 
+           CompileInstruction(op);
 diff --git a/Source/Core/Core/PowerPC/Jit64/Jit.h b/Source/Core/Core/PowerPC/Jit64/Jit.h
-index da1be2d..b0a12ff 100644
+index da1be2d..dde2ce5 100644
 --- a/Source/Core/Core/PowerPC/Jit64/Jit.h
 +++ b/Source/Core/Core/PowerPC/Jit64/Jit.h
 @@ -167,6 +167,9 @@ public:
@@ -1784,7 +1867,7 @@ index da1be2d..b0a12ff 100644
    void HLEFunction(u32 hook_index);
  
    void DynaRunTable4(UGeckoInstruction inst);
-@@ -238,6 +241,16 @@ public:
+@@ -238,6 +241,19 @@ public:
    void cntlzwx(UGeckoInstruction inst);
  
    void lfXXX(UGeckoInstruction inst);
@@ -1797,6 +1880,9 @@ index da1be2d..b0a12ff 100644
 +  void PS4CommitGatherPipe(bool reset);
 +  u8 PS4RawSingleFlags() const;
 +  std::vector<u8> m_ps4_raw_single;
++  // Per instruction: FPRs whose lfs skipped the conversion (flag 4) and that are not yet
++  // overwritten - not loaded, preloaded or flushed (their register cache entry is discarded).
++  std::vector<BitSet32> m_ps4_raw_only;
 +#endif
    void stfXXX(UGeckoInstruction inst);
    void stfiwx(UGeckoInstruction inst);
@@ -1842,7 +1928,7 @@ index be5458b..a507294 100644
  
  constexpr std::array<Jit64OpTemplate, 9> s_table59{{
 diff --git a/Source/Core/Core/PowerPC/Jit64/Jit_LoadStoreFloating.cpp b/Source/Core/Core/PowerPC/Jit64/Jit_LoadStoreFloating.cpp
-index 4d64010..6b53156 100644
+index 4d64010..8dbbcbe 100644
 --- a/Source/Core/Core/PowerPC/Jit64/Jit_LoadStoreFloating.cpp
 +++ b/Source/Core/Core/PowerPC/Jit64/Jit_LoadStoreFloating.cpp
 @@ -8,6 +8,7 @@
@@ -1853,7 +1939,26 @@ index 4d64010..6b53156 100644
  
  using namespace Gen;
  
-@@ -71,6 +72,12 @@ void Jit64::lfXXX(UGeckoInstruction inst)
+@@ -63,6 +64,18 @@ void Jit64::lfXXX(UGeckoInstruction inst)
+       offset = (s16)inst.SIMM_16;
+   }
+ 
++#ifdef __ORBIS__
++  if (single && (PS4RawSingleFlags() & 4) && !jo.memcheck)
++  {
++    // Lazy lfs: only forwarded stfs read this value before it is overwritten - keep just the
++    // loaded bits (PS4AnalyzeRawSingles).
++    SafeLoadToReg(RSCRATCH, addr, 32, offset, CallerSavedRegistersInUse(), false);
++    MOV(32, MDisp(RPPCSTATE, PPCSTATE_OFF_ARRAY(ps4_raw_single, d)), R(RSCRATCH));
++    addr.Unlock();
++    fpr.Discard(BitSet32{d});
++    return;
++  }
++#endif
+   RCMode Rd_mode = !single ? RCMode::ReadWrite : RCMode::Write;
+   RCX64Reg Rd = jo.memcheck && single ? fpr.RevertableBind(d, Rd_mode) : fpr.Bind(d, Rd_mode);
+   RegCache::Realize(Rd);
+@@ -71,6 +84,12 @@ void Jit64::lfXXX(UGeckoInstruction inst)
      registersInUse[RSCRATCH2] = true;
    SafeLoadToReg(RSCRATCH, addr, single ? 32 : 64, offset, registersInUse, false);
  
@@ -1866,7 +1971,7 @@ index 4d64010..6b53156 100644
    if (single)
    {
      ConvertSingleToDouble(Rd, RSCRATCH, true);
-@@ -109,6 +116,14 @@ void Jit64::stfXXX(UGeckoInstruction inst)
+@@ -109,6 +128,14 @@ void Jit64::stfXXX(UGeckoInstruction inst)
  
    if (single)
    {
@@ -1881,7 +1986,7 @@ index 4d64010..6b53156 100644
      if (js.fpr_is_store_safe[s] && js.op->fprIsSingle[s])
      {
        RCOpArg Rs = fpr.Use(s, RCMode::Read);
-@@ -120,8 +135,37 @@ void Jit64::stfXXX(UGeckoInstruction inst)
+@@ -120,8 +147,37 @@ void Jit64::stfXXX(UGeckoInstruction inst)
      {
        RCX64Reg Rs = fpr.Bind(s, RCMode::Read);
        RegCache::Realize(Rs);
@@ -2476,7 +2581,7 @@ index 51c3fff..8e91ab7 100644
 +  ps4_add_eboot(dolphin-nogui)
 +endif()
 diff --git a/Source/Core/DolphinNoGUI/MainNoGUI.cpp b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
-index 3bf40ea..42fe2b7 100644
+index 3bf40ea..70d775c 100644
 --- a/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 +++ b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 @@ -5,7 +5,9 @@
@@ -2511,7 +2616,7 @@ index 3bf40ea..42fe2b7 100644
  #include "UICommon/CommandLineParse.h"
  #ifdef USE_DISCORD_PRESENCE
  #include "UICommon/DiscordPresence.h"
-@@ -31,6 +40,28 @@
+@@ -31,6 +40,29 @@
  
  static std::unique_ptr<Platform> s_platform;
  
@@ -2527,6 +2632,7 @@ index 3bf40ea..42fe2b7 100644
 +extern "C" int ps4_perfmon;     // Core/PowerPC/PowerPC.cpp
 +extern "C" int ps4_gp_fuse;     // Core/PowerPC/Jit64/Jit.cpp
 +extern "C" int ps4_tex_hash_once;  // VideoCommon/TextureCacheBase.cpp
++extern "C" int ps4_lazy_lfs;       // Core/PowerPC/Jit64/Jit.cpp
 +extern "C" int ps4_auto_clock, ps4_auto_clock_min, ps4_auto_clock_max;  // PlatformPS4.cpp
 +extern "C" size_t sceKernelGetDirectMemorySize();  // libkernel
 +extern "C" void ps4_boot_trace(const char* line);  // DolphinPS4 port/ps4_crashlog.cpp
@@ -2540,7 +2646,7 @@ index 3bf40ea..42fe2b7 100644
  static void signal_handler(int)
  {
    constexpr char message[] = "A signal was received. A second signal will force Dolphin to stop.\n";
-@@ -173,6 +204,10 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
+@@ -173,6 +205,10 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
    if (platform_name == "macos" || platform_name.empty())
      return Platform::CreateMacOSPlatform();
  #endif
@@ -2551,7 +2657,7 @@ index 3bf40ea..42fe2b7 100644
  
    if (platform_name == "headless" || platform_name.empty())
      return Platform::CreateHeadlessPlatform();
-@@ -184,8 +219,17 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
+@@ -184,8 +220,17 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
  #define main app_main
  #endif
  
@@ -2570,7 +2676,7 @@ index 3bf40ea..42fe2b7 100644
    const auto parser =
        CommandLineParse::CreateParser(CommandLineParse::ParserOptions::OmitGUIOptions);
    parser->add_option("-p", "--platform")
-@@ -207,6 +251,10 @@ int main(const int argc, char* argv[])
+@@ -207,6 +252,10 @@ int main(const int argc, char* argv[])
  #ifdef __APPLE__
                  ,
                  "macos"
@@ -2581,7 +2687,7 @@ index 3bf40ea..42fe2b7 100644
  #endif
        });
  
-@@ -270,7 +318,192 @@ int main(const int argc, char* argv[])
+@@ -270,7 +319,194 @@ int main(const int argc, char* argv[])
  
    UICommon::SetUserDirectory(user_directory);
    UICommon::Init();
@@ -2709,6 +2815,8 @@ index 3bf40ea..42fe2b7 100644
 +    ps4_gp_fuse = Platform::GetPS4Option("jit_gp_fuse", "on") == "on";
 +    // tex_hash_once=off: hash textures on every lookup again (TextureCacheBase.cpp).
 +    ps4_tex_hash_once = Platform::GetPS4Option("tex_hash_once", "on") == "on";
++    // jit_lazy_lfs=off: every lfs converts its value again (Jit64 PS4AnalyzeRawSingles).
++    ps4_lazy_lfs = Platform::GetPS4Option("jit_lazy_lfs", "on") == "on";
 +    // fifo_defer=on (with fifo_batch): JIT blocks leave GPU commands in the gather pipe until
 +    // 128 bytes collect (flushed before any hardware register access and every timing slice).
 +    ps4_fifo_defer = ps4_fifo_batch && Platform::GetPS4Option("fifo_defer", "off") == "on";
@@ -2774,7 +2882,7 @@ index 3bf40ea..42fe2b7 100644
  
    Common::ScopeGuard ui_common_guard([] {
      UICommon::ShutdownControllers();
-@@ -284,6 +517,12 @@ int main(const int argc, char* argv[])
+@@ -284,6 +520,12 @@ int main(const int argc, char* argv[])
    }
  
    auto core_state_changed_hook = Core::AddOnStateChangedCallback([](const Core::State state) {
@@ -2787,7 +2895,7 @@ index 3bf40ea..42fe2b7 100644
      if (state == Core::State::Uninitialized)
        s_platform->Stop();
    });
-@@ -303,6 +542,9 @@ int main(const int argc, char* argv[])
+@@ -303,6 +545,9 @@ int main(const int argc, char* argv[])
  
    DolphinAnalytics::Instance().ReportDolphinStart("nogui");
  
