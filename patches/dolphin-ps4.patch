@@ -1916,7 +1916,7 @@ index 51c3fff..8e91ab7 100644
 +  ps4_add_eboot(dolphin-nogui)
 +endif()
 diff --git a/Source/Core/DolphinNoGUI/MainNoGUI.cpp b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
-index 3bf40ea..f3f5bc4 100644
+index 3bf40ea..b492fda 100644
 --- a/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 +++ b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 @@ -5,7 +5,9 @@
@@ -1951,7 +1951,7 @@ index 3bf40ea..f3f5bc4 100644
  #include "UICommon/CommandLineParse.h"
  #ifdef USE_DISCORD_PRESENCE
  #include "UICommon/DiscordPresence.h"
-@@ -31,6 +40,22 @@
+@@ -31,6 +40,23 @@
  
  static std::unique_ptr<Platform> s_platform;
  
@@ -1962,6 +1962,7 @@ index 3bf40ea..f3f5bc4 100644
 +extern "C" int ps4_show_fps;            // VideoCommon/Present.cpp
 +extern "C" int ps4_cpu_thread_core, ps4_gpu_thread_core, ps4_thread_priority;  // Core/Core.cpp
 +extern "C" void ps4_sampler_start();  // DolphinPS4 port/ps4_sampler.cpp
++extern "C" int ps4_fifo_batch;  // VideoCommon/Fifo.cpp
 +extern "C" size_t sceKernelGetDirectMemorySize();  // libkernel
 +extern "C" void ps4_boot_trace(const char* line);  // DolphinPS4 port/ps4_crashlog.cpp
 +extern "C" int ps4_uniform_merge_mode;  // VideoBackends/OGL/OGLGfx.cpp
@@ -1974,7 +1975,7 @@ index 3bf40ea..f3f5bc4 100644
  static void signal_handler(int)
  {
    constexpr char message[] = "A signal was received. A second signal will force Dolphin to stop.\n";
-@@ -173,6 +198,10 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
+@@ -173,6 +199,10 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
    if (platform_name == "macos" || platform_name.empty())
      return Platform::CreateMacOSPlatform();
  #endif
@@ -1985,7 +1986,7 @@ index 3bf40ea..f3f5bc4 100644
  
    if (platform_name == "headless" || platform_name.empty())
      return Platform::CreateHeadlessPlatform();
-@@ -184,8 +213,17 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
+@@ -184,8 +214,17 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
  #define main app_main
  #endif
  
@@ -2004,7 +2005,7 @@ index 3bf40ea..f3f5bc4 100644
    const auto parser =
        CommandLineParse::CreateParser(CommandLineParse::ParserOptions::OmitGUIOptions);
    parser->add_option("-p", "--platform")
-@@ -207,6 +245,10 @@ int main(const int argc, char* argv[])
+@@ -207,6 +246,10 @@ int main(const int argc, char* argv[])
  #ifdef __APPLE__
                  ,
                  "macos"
@@ -2015,7 +2016,7 @@ index 3bf40ea..f3f5bc4 100644
  #endif
        });
  
-@@ -270,7 +312,161 @@ int main(const int argc, char* argv[])
+@@ -270,7 +313,165 @@ int main(const int argc, char* argv[])
  
    UICommon::SetUserDirectory(user_directory);
    UICommon::Init();
@@ -2120,6 +2121,10 @@ index 3bf40ea..f3f5bc4 100644
 +      Config::SetBase(Config::MAIN_PAGE_TABLE_FASTMEM, mode == "on" || mode == "deferred");
 +      ps4_pagetable_deferred = mode == "deferred";
 +    }
++    // fifo_batch=on: the GPU thread takes the command FIFO in batches of up to 1 KiB instead of
++    // 32 bytes (VideoCommon/Fifo.cpp). Faster for games that send lots of GPU commands (Crash);
++    // FIFO watermark interrupts are then checked per batch.
++    ps4_fifo_batch = Platform::GetPS4Option("fifo_batch", "off") == "on";
 +    // fast_disc=on: Dolphin's "Speed up disc transfer rate" (shorter loading pauses).
 +    Config::SetBase(Config::MAIN_FAST_DISC_SPEED,
 +                    Platform::GetPS4Option("fast_disc", "off") == "on");
@@ -2177,7 +2182,7 @@ index 3bf40ea..f3f5bc4 100644
  
    Common::ScopeGuard ui_common_guard([] {
      UICommon::ShutdownControllers();
-@@ -284,6 +480,12 @@ int main(const int argc, char* argv[])
+@@ -284,6 +485,12 @@ int main(const int argc, char* argv[])
    }
  
    auto core_state_changed_hook = Core::AddOnStateChangedCallback([](const Core::State state) {
@@ -2190,7 +2195,7 @@ index 3bf40ea..f3f5bc4 100644
      if (state == Core::State::Uninitialized)
        s_platform->Stop();
    });
-@@ -303,6 +505,9 @@ int main(const int argc, char* argv[])
+@@ -303,6 +510,9 @@ int main(const int argc, char* argv[])
  
    DolphinAnalytics::Instance().ReportDolphinStart("nogui");
  
@@ -5981,7 +5986,7 @@ index 1dbf466..3e15165 100644
    bool bpInt = m_fifo.bFF_Breakpoint.load(std::memory_order_relaxed) &&
                 m_fifo.bFF_BPInt.load(std::memory_order_relaxed);
 diff --git a/Source/Core/VideoCommon/Fifo.cpp b/Source/Core/VideoCommon/Fifo.cpp
-index f183c93..702d4de 100644
+index f183c93..64fba21 100644
 --- a/Source/Core/VideoCommon/Fifo.cpp
 +++ b/Source/Core/VideoCommon/Fifo.cpp
 @@ -2,6 +2,7 @@
@@ -6009,7 +6014,22 @@ index f183c93..702d4de 100644
    m_video_buffer_write_ptr += GPFifo::GATHER_PIPE_SIZE;
  }
  
-@@ -302,6 +311,7 @@ void FifoManager::RunGpuLoop()
+@@ -283,6 +292,14 @@ void FifoManager::ResetVideoBuffer()
+ 
+ // Description: Main FIFO update loop
+ // Purpose: Keep the Core HW updated about the CPU-GPU distance
++#ifdef __ORBIS__
++}  // namespace Fifo
++extern "C" int ps4_fifo_batch;  // ps4.ini fifo_batch (DolphinNoGUI)
++int ps4_fifo_batch = 0;
++namespace Fifo
++{
++#endif
++
+ void FifoManager::RunGpuLoop()
+ {
+   m_gpu_mainloop.Run(
+@@ -302,6 +319,7 @@ void FifoManager::RunGpuLoop()
            // See comment in SyncGPU
            if (write_ptr > seen_ptr)
            {
@@ -6017,7 +6037,54 @@ index f183c93..702d4de 100644
              m_video_buffer_read_ptr =
                  OpcodeDecoder::RunFifo(DataReader(m_video_buffer_read_ptr, write_ptr), nullptr);
              m_video_buffer_seen_ptr = write_ptr;
-@@ -340,8 +350,11 @@ void FifoManager::RunGpuLoop()
+@@ -324,27 +342,56 @@ void FifoManager::RunGpuLoop()
+ 
+             u32 cyclesExecuted = 0;
+             u32 readPtr = fifo.CPReadPointer.load(std::memory_order_relaxed);
+-            ReadDataFromFifo(readPtr);
++            u32 chunks = 1;
++#ifdef __ORBIS__
++            // ps4.ini fifo_batch=on: take up to 32 bursts (1 KiB) per pass instead of one - one
++            // decode call, one atomic update and one status check per batch. Each burst cost a
++            // round trip of shared atomics between the CPU and GPU threads' cores (Crash: ~40% of
++            // the GPU thread). Not with FIFO breakpoints or Sync GPU; watermark interrupts are
++            // then checked per batch. Never across the FIFO's wrap point.
++            if (ps4_fifo_batch && !m_config_sync_gpu &&
++                !fifo.bFF_BPEnable.load(std::memory_order_relaxed))
++            {
++              const u32 available = fifo.CPReadWriteDistance.load(std::memory_order_relaxed) /
++                                    GPFifo::GATHER_PIPE_SIZE;
++              const u32 end = fifo.CPEnd.load(std::memory_order_relaxed);
++              const u32 until_wrap =
++                  end >= readPtr ? (end - readPtr) / GPFifo::GATHER_PIPE_SIZE + 1 : 1;
++              chunks = available < until_wrap ? available : until_wrap;
++              if (chunks > 32)
++                chunks = 32;
++              if (chunks == 0)
++                chunks = 1;
++            }
++#endif
++            for (u32 chunk = 0; chunk < chunks; chunk++)
++            {
++              ReadDataFromFifo(readPtr);
+ 
+-            if (readPtr == fifo.CPEnd.load(std::memory_order_relaxed))
+-              readPtr = fifo.CPBase.load(std::memory_order_relaxed);
+-            else
+-              readPtr += GPFifo::GATHER_PIPE_SIZE;
++              if (readPtr == fifo.CPEnd.load(std::memory_order_relaxed))
++                readPtr = fifo.CPBase.load(std::memory_order_relaxed);
++              else
++                readPtr += GPFifo::GATHER_PIPE_SIZE;
++            }
+ 
+             const s32 distance =
+                 static_cast<s32>(fifo.CPReadWriteDistance.load(std::memory_order_relaxed)) -
+-                GPFifo::GATHER_PIPE_SIZE;
++                GPFifo::GATHER_PIPE_SIZE * chunks;
+             ASSERT_MSG(COMMANDPROCESSOR, distance >= 0,
+                        "Negative fifo.CPReadWriteDistance = {} in FIFO Loop !\nThat can produce "
+                        "instability in the game. Please report it.",
                         distance);
  
              u8* write_ptr = m_video_buffer_write_ptr;
@@ -6030,8 +6097,13 @@ index f183c93..702d4de 100644
 +            }
  
              fifo.CPReadPointer.store(readPtr, std::memory_order_relaxed);
-             fifo.CPReadWriteDistance.fetch_sub(GPFifo::GATHER_PIPE_SIZE, std::memory_order_seq_cst);
-@@ -551,7 +564,10 @@ int FifoManager::WaitForGpuThread(int ticks)
+-            fifo.CPReadWriteDistance.fetch_sub(GPFifo::GATHER_PIPE_SIZE, std::memory_order_seq_cst);
++            fifo.CPReadWriteDistance.fetch_sub(GPFifo::GATHER_PIPE_SIZE * chunks,
++                                               std::memory_order_seq_cst);
+             if ((write_ptr - m_video_buffer_read_ptr) == 0)
+             {
+               fifo.SafeCPReadPointer.store(fifo.CPReadPointer.load(std::memory_order_relaxed),
+@@ -551,7 +598,10 @@ int FifoManager::WaitForGpuThread(int ticks)
  
    // Wait for GPU
    if (now >= m_config_sync_gpu_max_distance)
@@ -6140,10 +6212,10 @@ index 3c57ea7..aa515f1 100644
    Common::EnumMap<PrimitiveFunction, OpcodeDecoder::Primitive::GX_DRAW_POINTS> m_primitive_table{};
 diff --git a/Source/Core/VideoCommon/PS4Profile.h b/Source/Core/VideoCommon/PS4Profile.h
 new file mode 100644
-index 0000000..7120e2c
+index 0000000..e39e130
 --- /dev/null
 +++ b/Source/Core/VideoCommon/PS4Profile.h
-@@ -0,0 +1,68 @@
+@@ -0,0 +1,75 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -6208,7 +6280,14 @@ index 0000000..7120e2c
 +  unsigned long long m_start;
 +};
 +
++// Each scope reads the TSC twice (~40 cycles each on Jaguar), and the hottest scopes run millions
++// of times per second (Crash: ~1.9M Flush calls/s, most returning at once), so the timers are only
++// compiled into profiling builds (-DPS4_PROFILE_TIMERS).
++#ifdef PS4_PROFILE_TIMERS
 +#define PS4_PROFILE(category) PS4ProfileScope ps4_profile_scope(category)
++#else
++#define PS4_PROFILE(category)
++#endif
 +#else
 +#define PS4_PROFILE(category)
 +#endif
