@@ -2198,7 +2198,7 @@ index f4dc8a9..4e5ff67 100644
  
 diff --git a/Source/Core/DolphinNoGUI/PlatformPS4.cpp b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
 new file mode 100644
-index 0000000..1dcafbc
+index 0000000..305a4fc
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
 @@ -0,0 +1,543 @@
@@ -2520,10 +2520,10 @@ index 0000000..1dcafbc
 +      const u64 ticks = system.GetCoreTiming().GetTicks();
 +      if (Core::GetState(system) == Core::State::Running && ticks == watchdog_ticks)
 +      {
-+        if (++watchdog_stalled == 5)
++        if (++watchdog_stalled == 2)  // ~4 s: people close a frozen app quickly
 +        {
 +          char reason[96];
-+          snprintf(reason, sizeof(reason), "emulation stalled ~10 s at %lld s",
++          snprintf(reason, sizeof(reason), "emulation stalled ~4 s at %lld s",
 +                   static_cast<long long>(seconds));
 +          BootTrace("watchdog: emulation stalled, writing hang-stacks.txt");
 +          ps4_dump_thread_stacks("/data/DolphinPS4/hang-stacks.txt", reason);

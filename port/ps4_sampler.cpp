@@ -23,6 +23,7 @@
 #include <atomic>
 
 extern "C" char __text_start[];  // defined by the OpenOrbis link.x at the start of .text
+extern "C" int pthread_getthreadid_np(void);  // libkernel (FreeBSD libthr)
 extern "C" void ps4_boot_trace(const char* stage);
 
 namespace {
@@ -227,9 +228,16 @@ struct WatchedThread {
     // (plus its caller's frame). Reading a fixed amount above rsp ran off the top of small thread
     // stacks (the Wiimote scanner's) and crashed the app in the middle of a hang dump.
     uintptr_t stack_limit = 0;
+    int tid = 0;  // kernel thread id (pthread_getthreadid_np): mutex objects record their owner's
     uint64_t rip = 0;
     uint64_t frames[kMaxFrames];
     int frame_count = 0;
+    // Blocked in _umtx_op (the kernel's wait for mutexes, condition variables, semaphores): its
+    // arguments - object, operation, value, second object (condition variable waits: the mutex) -
+    // and the first 16 bytes of both objects (a FreeBSD mutex starts with its owner's thread id).
+    bool in_umtx = false;
+    uint64_t umtx_obj = 0, umtx_op = 0, umtx_val = 0, umtx_obj2 = 0;
+    uint32_t umtx_words[4] = {}, umtx_words2[4] = {};
     std::atomic<int> done{0};
 };
 WatchedThread g_watched[kMaxWatched];
@@ -245,6 +253,27 @@ void dumpHandler(int, siginfo_t*, void* context) {
         const auto* regs =
             reinterpret_cast<const uint64_t*>(static_cast<char*>(context) + kMcontextOffset);
         t.rip = regs[kRipIndex];
+        // libkernel's _umtx_op stub: "mov $0x1c6, %rax; mov %rcx, %r10; syscall" (12 bytes), the
+        // interrupted thread sits right after the syscall. FreeBSD mcontext: rdi 1, rsi 2, rdx 3,
+        // r10 10. Only then are the argument registers known to be the wait's.
+        t.in_umtx = false;
+        if (t.rip >= kSystemLibs && t.rip < 2 * kSystemLibs) {
+            const auto* code = reinterpret_cast<const uint8_t*>(t.rip - 12);
+            static const uint8_t kUmtxStub[12] = {0x48, 0xc7, 0xc0, 0xc6, 0x01, 0x00,
+                                                  0x00, 0x49, 0x89, 0xca, 0x0f, 0x05};
+            if (memcmp(code, kUmtxStub, sizeof(kUmtxStub)) == 0) {
+                t.in_umtx = true;
+                t.umtx_obj = regs[1];
+                t.umtx_op = regs[2];
+                t.umtx_val = regs[3];
+                t.umtx_obj2 = regs[10];
+                if (t.umtx_obj >= 0x10000)
+                    memcpy(t.umtx_words, reinterpret_cast<const void*>(t.umtx_obj), 16);
+                // Condition variable wait (UMTX_OP_CV_WAIT = 8): the 4th argument is the mutex.
+                if (t.umtx_op == 8 && t.umtx_obj2 >= 0x10000)
+                    memcpy(t.umtx_words2, reinterpret_cast<const void*>(t.umtx_obj2), 16);
+            }
+        }
         const auto* stack = reinterpret_cast<const uint64_t*>(regs[kRspIndex]);
         const auto* limit = reinterpret_cast<const uint64_t*>(t.stack_limit);
         int n = 0;
@@ -287,6 +316,7 @@ extern "C" void ps4_watch_thread(const char* name) {
         return;
     snprintf(g_watched[index].name, sizeof(g_watched[index].name), "%s", name ? name : "?");
     g_watched[index].stack_limit = reinterpret_cast<uintptr_t>(__builtin_frame_address(0)) + 256;
+    g_watched[index].tid = pthread_getthreadid_np();
     g_watched[index].thread.store(self);
 }
 
@@ -318,10 +348,23 @@ extern "C" void ps4_dump_thread_stacks(const char* path, const char* reason) {
             continue;
         }
         const bool in_eboot = t.rip >= text && t.rip < text + kTextWindow;
-        snprintf(line, sizeof(line), "-- %s: rip %s0x%llx\n   stack:", t.name,
+        snprintf(line, sizeof(line), "-- %s (thread id %d): rip %s0x%llx\n", t.name, t.tid,
                  in_eboot ? "elf " : "(system/JIT) ",
                  static_cast<unsigned long long>(in_eboot ? t.rip - text : t.rip));
         writeLine(fd, line);
+        if (t.in_umtx) {
+            snprintf(line, sizeof(line),
+                     "   blocked in _umtx_op(obj %#llx, op %llu, val %#llx, obj2 %#llx); obj: %08x "
+                     "%08x %08x %08x; obj2: %08x %08x %08x %08x\n",
+                     static_cast<unsigned long long>(t.umtx_obj),
+                     static_cast<unsigned long long>(t.umtx_op),
+                     static_cast<unsigned long long>(t.umtx_val),
+                     static_cast<unsigned long long>(t.umtx_obj2), t.umtx_words[0], t.umtx_words[1],
+                     t.umtx_words[2], t.umtx_words[3], t.umtx_words2[0], t.umtx_words2[1],
+                     t.umtx_words2[2], t.umtx_words2[3]);
+            writeLine(fd, line);
+        }
+        writeLine(fd, "   stack:");
         for (int f = 0; f < t.frame_count; f++) {
             snprintf(line, sizeof(line), " 0x%llx", static_cast<unsigned long long>(t.frames[f]));
             writeLine(fd, line);
