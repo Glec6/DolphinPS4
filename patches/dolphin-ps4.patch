@@ -6359,7 +6359,7 @@ index 92f7c1f..3378a49 100644
      m_default_pixel_shader = g_gfx->CreateShaderFromSource(
          ShaderStage::Pixel, GetHeader(false) + default_pixel_shader_code + GetFooter(), nullptr,
 diff --git a/Source/Core/VideoCommon/Present.cpp b/Source/Core/VideoCommon/Present.cpp
-index 41d05f3..9a0a8ac 100644
+index 41d05f3..9fce0d3 100644
 --- a/Source/Core/VideoCommon/Present.cpp
 +++ b/Source/Core/VideoCommon/Present.cpp
 @@ -3,6 +3,11 @@
@@ -6374,15 +6374,21 @@ index 41d05f3..9a0a8ac 100644
  #include "Common/ChunkFile.h"
  #include "Core/Config/GraphicsSettings.h"
  #include "Core/Config/MainSettings.h"
-@@ -10,6 +15,7 @@
+@@ -10,6 +15,13 @@
  #include "Core/HW/VideoInterface.h"
  #include "Core/Host.h"
  #include "Core/System.h"
++#ifdef __ORBIS__
++#include <chrono>
++#include <x86intrin.h>
++#include "Core/HW/SystemTimers.h"
++#include "VideoCommon/PS4Profile.h"
++#endif
 +#include "VideoCommon/PerformanceMetrics.h"
  
  #include "InputCommon/ControllerInterface/ControllerInterface.h"
  
-@@ -124,9 +130,12 @@ bool Presenter::Initialize()
+@@ -124,9 +136,12 @@ bool Presenter::Initialize()
      if (!m_post_processor->Initialize(m_backbuffer_format))
        return false;
  
@@ -6395,12 +6401,59 @@ index 41d05f3..9a0a8ac 100644
  
      // Draw a blank frame (and complete OnScreenUI initialization)
      g_gfx->BindBackbuffer({{0.0f, 0.0f, 0.0f, 1.0f}});
-@@ -903,10 +912,84 @@ void Presenter::RenderXFBToScreen(const MathUtil::Rectangle<int>& target_rc,
+@@ -903,10 +918,131 @@ void Presenter::RenderXFBToScreen(const MathUtil::Rectangle<int>& target_rc,
    }
  }
  
 +#ifdef __ORBIS__
 +extern "C" void ps4_boot_trace(const char* stage);
++
++// Hitch detector (PS4 port): a gap of more than 150 ms between presented frames is logged to
++// boot-trace.log with what happened in it - how much emulated time passed (little = the CPU
++// thread stalled) and the video thread's timed work by category (PS4Profile.h).
++static void PS4CheckHitch()
++{
++  static const char* const names[PS4_PROF_CATEGORY_COUNT] = {
++      "flush", "vtx-upload", "uniforms", "draw", "pipeline", "tex-cache", "tex-upload",
++      "compile", "link", "efb-copy", "efb-peek", "present", "gpu-fifo", "cpu-wait", "tlbie",
++      "pagetable"};
++  static auto s_last = std::chrono::steady_clock::now();
++  static unsigned long long s_last_tsc = __rdtsc();
++  static u64 s_last_emu = 0;
++  static unsigned long long s_ticks[PS4_PROF_CATEGORY_COUNT], s_counts[PS4_PROF_CATEGORY_COUNT];
++
++  const auto now = std::chrono::steady_clock::now();
++  const unsigned long long tsc = __rdtsc();
++  const u64 emu = Core::System::GetInstance().GetCoreTiming().GetTicks();
++  const double gap_ms = std::chrono::duration<double, std::milli>(now - s_last).count();
++  if (gap_ms > 150.0 && s_last_emu != 0)
++  {
++    const double tsc_per_ms = (tsc - s_last_tsc) / gap_ms;
++    const double emu_ms = (emu - s_last_emu) * 1000.0 /
++                          Core::System::GetInstance().GetSystemTimers().GetTicksPerSecond();
++    char line[512];
++    int len = snprintf(line, sizeof(line), "hitch: %.0f ms between frames, emulated time %.0f ms |",
++                       gap_ms, emu_ms);
++    for (int c = 0; c < PS4_PROF_CATEGORY_COUNT && len < static_cast<int>(sizeof(line)) - 48; c++)
++    {
++      const double ms = (ps4_prof_ticks[c] - s_ticks[c]) / tsc_per_ms;
++      if (ms >= 5.0)
++      {
++        len += snprintf(line + len, sizeof(line) - len, " %s %.0f ms/%llu", names[c], ms,
++                        ps4_prof_count[c] - s_counts[c]);
++      }
++    }
++    ps4_boot_trace(line);
++  }
++  s_last = now;
++  s_last_tsc = tsc;
++  s_last_emu = emu;
++  for (int c = 0; c < PS4_PROF_CATEGORY_COUNT; c++)
++  {
++    s_ticks[c] = ps4_prof_ticks[c];
++    s_counts[c] = ps4_prof_count[c];
++  }
++}
 +// VideoBackends/OGL/OGLGfx.cpp
 +extern "C" void ps4_probe_center_pixel(const char* name, const AbstractTexture* texture);
 +extern "C" int ps4_render_diagnostics;  // ps4.ini diagnostics=on
@@ -6480,13 +6533,13 @@ index 41d05f3..9a0a8ac 100644
    if (g_gfx->IsHeadless() || (!m_onscreen_ui && !m_xfb_entry))
      return;
  
-@@ -934,7 +1017,18 @@ void Presenter::Present(PresentInfo* present_info)
+@@ -934,7 +1070,18 @@ void Presenter::Present(PresentInfo* present_info)
    UpdateDrawRectangle();
  
    g_gfx->BeginUtilityDrawing();
 +#ifdef __ORBIS__
 +  // Port diagnostics are done: black around the game image, as on other platforms.
-+  const bool backbuffer_bound = g_gfx->BindBackbuffer({{0.0f, 0.0f, 0.0f, 1.0f}});
+   const bool backbuffer_bound = g_gfx->BindBackbuffer({{0.0f, 0.0f, 0.0f, 1.0f}});
 +  static bool s_reported_unbound = false;
 +  if (!backbuffer_bound && !s_reported_unbound)
 +  {
@@ -6494,12 +6547,12 @@ index 41d05f3..9a0a8ac 100644
 +    ps4_boot_trace("present: backbuffer could not be bound");
 +  }
 +#else
-   const bool backbuffer_bound = g_gfx->BindBackbuffer({{0.0f, 0.0f, 0.0f, 1.0f}});
++  const bool backbuffer_bound = g_gfx->BindBackbuffer({{0.0f, 0.0f, 0.0f, 1.0f}});
 +#endif
  
    // Render the XFB to the screen.
    if (backbuffer_bound && m_xfb_entry)
-@@ -945,7 +1039,39 @@ void Presenter::Present(PresentInfo* present_info)
+@@ -945,7 +1092,52 @@ void Presenter::Present(PresentInfo* present_info)
      AdjustRectanglesToFitBounds(&render_target_rc, &render_source_rc, m_backbuffer_width,
                                  m_backbuffer_height);
      RenderXFBToScreen(render_target_rc, m_xfb_entry->texture.get(), render_source_rc);
@@ -6522,7 +6575,20 @@ index 41d05f3..9a0a8ac 100644
 +  // Save the shader caches every ~30 s (PS4 apps are killed, not exited).
 +  static u32 s_ps4_presents = 0;
 +  if (++s_ps4_presents % 1800 == 0 && g_shader_cache)
++  {
++    const auto flush_start = std::chrono::steady_clock::now();
 +    g_shader_cache->PS4FlushDiskCaches();
++    const double flush_ms = std::chrono::duration<double, std::milli>(
++                                std::chrono::steady_clock::now() - flush_start)
++                                .count();
++    if (flush_ms > 20.0)
++    {
++      char line[96];
++      snprintf(line, sizeof(line), "shader cache flush took %.0f ms", flush_ms);
++      ps4_boot_trace(line);
++    }
++  }
++  PS4CheckHitch();
 +
 +  if (backbuffer_bound && ps4_show_fps)
 +  {
