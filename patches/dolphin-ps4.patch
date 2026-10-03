@@ -1342,10 +1342,10 @@ index 31b6c2d..b581034 100644
  void PatchFunctions(Core::System& system)
 diff --git a/Source/Core/Core/HLE/HLE_PS4Games.cpp b/Source/Core/Core/HLE/HLE_PS4Games.cpp
 new file mode 100755
-index 0000000..3c931fe
+index 0000000..ffcbdde
 --- /dev/null
 +++ b/Source/Core/Core/HLE/HLE_PS4Games.cpp
-@@ -0,0 +1,473 @@
+@@ -0,0 +1,568 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -1418,6 +1418,31 @@ index 0000000..3c931fe
 +    const u32 value = Common::swap32(PowerPC::MMU::HostRead<u32>(m_guard, address));
 +    std::memcpy(out, &value, 4);
 +  }
++
++  // Host pointer to [address, address + size) when it lies in MEM1, else nullptr.
++  const u8* Host(u32 address, u32 size) const
++  {
++    const u32 segment = address >> 28;
++    const u32 offset = address & 0x0FFFFFFF;
++    if ((segment == 0x8 || segment == 0xC) && offset <= m_ram_size && size <= m_ram_size - offset)
++      return m_ram + offset;
++    return nullptr;
++  }
++
++  // Copies `size` bytes of guest memory as stored (a multiple of 4).
++  void CopyGuest(u8* dst, u32 address, u32 size) const
++  {
++    if (const u8* src = Host(address, size))
++    {
++      std::memcpy(dst, src, size);
++      return;
++    }
++    for (u32 i = 0; i < size; i += 4)
++      ReadRaw32(address + i, dst + i);
++  }
++
++  bool Pipe() const { return m_pipe; }
++  u8*& PipePtr() { return m_ppc.gather_pipe_ptr; }
 +
 +  u32 Read32(u32 address) const
 +  {
@@ -1592,6 +1617,29 @@ index 0000000..3c931fe
 +    ppc.npc = CRASH_CB5C4_EXIT;
 +    return;
 +  }
++  if (g.Pipe())
++  {
++    // Fast path: per vertex, the position (12 bytes) and the attribute record's normal, colour
++    // and texcoord (24 contiguous bytes at +0x20) - two block copies into the pipe.
++    do
++    {
++      last_position = positions;
++      u8* dst = g.PipePtr();
++      g.CopyGuest(dst, positions, 12);
++      positions += 24;
++      attribute =
++          static_cast<u32>(static_cast<s32>(g.Read16s(offset + indices)) * 56) + attributes;
++      g.CopyGuest(dst + 12, attribute + 0x20, 24);
++      g.PipePtr() = dst + 36;
++      offset += 2;
++      if (g.PipeCheck() && count > 1)
++      {
++        count--;
++        break;  // yield at the loop head (see PipeCheck)
++      }
++    } while (--count != 0);
++  }
++  else
 +  do
 +  {
 +    last_position = positions;
@@ -1648,6 +1696,25 @@ index 0000000..3c931fe
 +    return;
 +  }
 +  u32 last = positions;
++  const u32 colour_be = Common::swap32(colour);
++  if (g.Pipe())
++  {
++    do
++    {
++      last = positions;
++      u8* dst = g.PipePtr();
++      g.CopyGuest(dst, positions, 12);
++      std::memcpy(dst + 12, &colour_be, 4);
++      g.PipePtr() = dst + 16;
++      positions += 24;
++      if (g.PipeCheck() && count > 1)
++      {
++        count--;
++        break;  // yield at the loop head (see PipeCheck)
++      }
++    } while (--count != 0);
++  }
++  else
 +  do
 +  {
 +    last = positions;
@@ -1716,6 +1783,34 @@ index 0000000..3c931fe
 +  const int colour_source = (!cr1_eq || !cr6_eq) ? 0 : (cr7_eq ? 1 : 2);
 +
 +  u32 record = 0, last_colour = 0;
++  const u32 colour_r7_be = Common::swap32(colour_r7);
++  const u32 colour_r11_be = Common::swap32(colour_r11);
++  if (g.Pipe())
++  {
++    // Fast path: the record's position and normal (24 contiguous bytes), the colour, the
++    // texcoord (8 bytes at +0x1c) - all through the same index.
++    do
++    {
++      record = static_cast<u32>(static_cast<s32>(g.Read16s(list)) * 36) + records;
++      u8* dst = g.PipePtr();
++      g.CopyGuest(dst, record, 24);
++      if (colour_source == 0)
++        std::memcpy(dst + 24, &colour_r7_be, 4);
++      else if (colour_source == 1)
++        std::memcpy(dst + 24, &colour_r11_be, 4);
++      else
++        g.CopyGuest(dst + 24, record + 0x18, 4);
++      g.CopyGuest(dst + 28, record + 0x1c, 8);
++      g.PipePtr() = dst + 36;
++      total--;
++      list += 2;
++      remaining--;
++      if (g.PipeCheck() && static_cast<s32>(remaining) > 0)
++        break;  // yield at the loop head (see PipeCheck)
++    } while (static_cast<s32>(remaining) > 0);
++    last_colour = g.Read32(record + 0x18);
++  }
++  else
 +  do
 +  {
 +    record = static_cast<u32>(static_cast<s32>(g.Read16s(list)) * 36) + records;
