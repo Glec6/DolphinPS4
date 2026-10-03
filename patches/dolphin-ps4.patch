@@ -2581,7 +2581,7 @@ index 51c3fff..8e91ab7 100644
 +  ps4_add_eboot(dolphin-nogui)
 +endif()
 diff --git a/Source/Core/DolphinNoGUI/MainNoGUI.cpp b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
-index 3bf40ea..70d775c 100644
+index 3bf40ea..7e0f3ec 100644
 --- a/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 +++ b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 @@ -5,7 +5,9 @@
@@ -2616,7 +2616,7 @@ index 3bf40ea..70d775c 100644
  #include "UICommon/CommandLineParse.h"
  #ifdef USE_DISCORD_PRESENCE
  #include "UICommon/DiscordPresence.h"
-@@ -31,6 +40,29 @@
+@@ -31,6 +40,30 @@
  
  static std::unique_ptr<Platform> s_platform;
  
@@ -2633,6 +2633,7 @@ index 3bf40ea..70d775c 100644
 +extern "C" int ps4_gp_fuse;     // Core/PowerPC/Jit64/Jit.cpp
 +extern "C" int ps4_tex_hash_once;  // VideoCommon/TextureCacheBase.cpp
 +extern "C" int ps4_lazy_lfs;       // Core/PowerPC/Jit64/Jit.cpp
++extern "C" int ps4_vk_thread, ps4_vk_thread_core;  // VideoBackends/Vulkan/PS4CommandRecorder.cpp
 +extern "C" int ps4_auto_clock, ps4_auto_clock_min, ps4_auto_clock_max;  // PlatformPS4.cpp
 +extern "C" size_t sceKernelGetDirectMemorySize();  // libkernel
 +extern "C" void ps4_boot_trace(const char* line);  // DolphinPS4 port/ps4_crashlog.cpp
@@ -2646,7 +2647,7 @@ index 3bf40ea..70d775c 100644
  static void signal_handler(int)
  {
    constexpr char message[] = "A signal was received. A second signal will force Dolphin to stop.\n";
-@@ -173,6 +205,10 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
+@@ -173,6 +206,10 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
    if (platform_name == "macos" || platform_name.empty())
      return Platform::CreateMacOSPlatform();
  #endif
@@ -2657,7 +2658,7 @@ index 3bf40ea..70d775c 100644
  
    if (platform_name == "headless" || platform_name.empty())
      return Platform::CreateHeadlessPlatform();
-@@ -184,8 +220,17 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
+@@ -184,8 +221,17 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
  #define main app_main
  #endif
  
@@ -2676,7 +2677,7 @@ index 3bf40ea..70d775c 100644
    const auto parser =
        CommandLineParse::CreateParser(CommandLineParse::ParserOptions::OmitGUIOptions);
    parser->add_option("-p", "--platform")
-@@ -207,6 +252,10 @@ int main(const int argc, char* argv[])
+@@ -207,6 +253,10 @@ int main(const int argc, char* argv[])
  #ifdef __APPLE__
                  ,
                  "macos"
@@ -2687,7 +2688,7 @@ index 3bf40ea..70d775c 100644
  #endif
        });
  
-@@ -270,7 +319,194 @@ int main(const int argc, char* argv[])
+@@ -270,7 +320,198 @@ int main(const int argc, char* argv[])
  
    UICommon::SetUserDirectory(user_directory);
    UICommon::Init();
@@ -2817,6 +2818,10 @@ index 3bf40ea..70d775c 100644
 +    ps4_tex_hash_once = Platform::GetPS4Option("tex_hash_once", "on") == "on";
 +    // jit_lazy_lfs=off: every lfs converts its value again (Jit64 PS4AnalyzeRawSingles).
 +    ps4_lazy_lfs = Platform::GetPS4Option("jit_lazy_lfs", "on") == "on";
++    // vk_thread=on: Vulkan commands are recorded on a worker thread on core vk_thread_core
++    // (VideoBackends/Vulkan/PS4CommandRecorder.cpp).
++    ps4_vk_thread = Platform::GetPS4Option("vk_thread", "off") == "on";
++    ps4_vk_thread_core = std::atoi(Platform::GetPS4Option("vk_thread_core", "5").c_str());
 +    // fifo_defer=on (with fifo_batch): JIT blocks leave GPU commands in the gather pipe until
 +    // 128 bytes collect (flushed before any hardware register access and every timing slice).
 +    ps4_fifo_defer = ps4_fifo_batch && Platform::GetPS4Option("fifo_defer", "off") == "on";
@@ -2882,7 +2887,7 @@ index 3bf40ea..70d775c 100644
  
    Common::ScopeGuard ui_common_guard([] {
      UICommon::ShutdownControllers();
-@@ -284,6 +520,12 @@ int main(const int argc, char* argv[])
+@@ -284,6 +525,12 @@ int main(const int argc, char* argv[])
    }
  
    auto core_state_changed_hook = Core::AddOnStateChangedCallback([](const Core::State state) {
@@ -2895,7 +2900,7 @@ index 3bf40ea..70d775c 100644
      if (state == Core::State::Uninitialized)
        s_platform->Stop();
    });
-@@ -303,6 +545,9 @@ int main(const int argc, char* argv[])
+@@ -303,6 +550,9 @@ int main(const int argc, char* argv[])
  
    DolphinAnalytics::Instance().ReportDolphinStart("nogui");
  
@@ -6182,6 +6187,19 @@ index 6657f34..b45d76e 100644
      SetParameters(sampler, state);
      it = m_cache.emplace(state, sampler).first;
    }
+diff --git a/Source/Core/VideoBackends/Vulkan/CMakeLists.txt b/Source/Core/VideoBackends/Vulkan/CMakeLists.txt
+index 5f5583f..fa7ee2a 100644
+--- a/Source/Core/VideoBackends/Vulkan/CMakeLists.txt
++++ b/Source/Core/VideoBackends/Vulkan/CMakeLists.txt
+@@ -34,6 +34,8 @@ add_library(videovulkan
+   VulkanContext.cpp
+   VulkanContext.h
+   VulkanLoader.cpp
++  PS4CommandRecorder.cpp
++  PS4CommandRecorder.h
+   VulkanLoader.h
+ )
+ 
 diff --git a/Source/Core/VideoBackends/Vulkan/CommandBufferManager.cpp b/Source/Core/VideoBackends/Vulkan/CommandBufferManager.cpp
 index c82417e..e72527d 100644
 --- a/Source/Core/VideoBackends/Vulkan/CommandBufferManager.cpp
@@ -6223,11 +6241,1210 @@ index c82417e..e72527d 100644
    // Do we have a swap chain to present?
    if (present_swap_chain != VK_NULL_HANDLE)
    {
+diff --git a/Source/Core/VideoBackends/Vulkan/PS4CommandRecorder.cpp b/Source/Core/VideoBackends/Vulkan/PS4CommandRecorder.cpp
+new file mode 100755
+index 0000000..7418c80
+--- /dev/null
++++ b/Source/Core/VideoBackends/Vulkan/PS4CommandRecorder.cpp
+@@ -0,0 +1,1159 @@
++// Copyright 2026 Dolphin Emulator Project
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++// PS4: Vulkan command recording thread (ps4.ini vk_thread=on).
++//
++// The video thread emulates the GameCube GPU and records Vulkan commands. On the PS4's Jaguar
++// cores RADV's per-draw work (state emission, descriptors, the draw packets) was ~16% of the video
++// thread in draw-heavy scenes (Crash Bandicoot: ~4000 draws per frame), while three cores sat
++// idle. Here the video thread only queues the calls Dolphin makes (a few dozen bytes each, into a
++// ring buffer); a worker thread on its own core replays them into RADV and submits.
++//
++// Ordering: everything that records into or submits command buffers goes through the queue in
++// program order. Calls that observe the results (fence waits, query results, idle waits), destroy
++// objects queued commands may still reference, or present (the PS4 flip) first wait until the
++// worker has replayed everything queued ("drain"). Calls that only create objects or update
++// descriptor sets run directly: Dolphin never changes a descriptor set after binding it, and
++// resets descriptor pools only after waiting for the command buffers that used them.
++//
++// Only the video thread may record (Dolphin's own submission thread is disabled with this).
++
++#include "VideoBackends/Vulkan/PS4CommandRecorder.h"
++
++#include <pthread.h>
++#include <time.h>
++
++#include <atomic>
++#include <condition_variable>
++#include <cstring>
++#include <mutex>
++#include <thread>
++
++#include "Common/CommonTypes.h"
++#include "Common/Logging/Log.h"
++#include "Common/Thread.h"
++#include "VideoBackends/Vulkan/VulkanLoader.h"
++
++extern "C" {
++int ps4_vk_thread = 0;       // ps4.ini vk_thread=on
++int ps4_vk_thread_core = 5;  // ps4.ini vk_thread_core
++}
++extern "C" void ps4_boot_trace(const char* stage);
++
++namespace Vulkan
++{
++namespace
++{
++enum Op : u32
++{
++  OP_PAD,
++  OP_BeginCommandBuffer,
++  OP_EndCommandBuffer,
++  OP_ResetCommandPool,
++  OP_ResetFences,
++  OP_QueueSubmit,
++  OP_CmdBindPipeline,
++  OP_CmdBindDescriptorSets,
++  OP_CmdBindVertexBuffers,
++  OP_CmdBindIndexBuffer,
++  OP_CmdDraw,
++  OP_CmdDrawIndexed,
++  OP_CmdDispatch,
++  OP_CmdSetViewport,
++  OP_CmdSetScissor,
++  OP_CmdBeginRenderPass,
++  OP_CmdEndRenderPass,
++  OP_CmdPipelineBarrier,
++  OP_CmdClearAttachments,
++  OP_CmdUpdateBuffer,
++  OP_CmdResetQueryPool,
++  OP_CmdBeginQuery,
++  OP_CmdEndQuery,
++  OP_CmdCopyBufferToImage,
++  OP_CmdCopyImageToBuffer,
++  OP_CmdCopyImage,
++  OP_CmdCopyBuffer,
++  OP_CmdBlitImage,
++  OP_CmdResolveImage,
++};
++
++// The real (RADV) entry points of the functions replaced here.
++#define PS4_RECORDED(X)                                                                            \
++  X(vkBeginCommandBuffer)                                                                          \
++  X(vkEndCommandBuffer)                                                                            \
++  X(vkResetCommandPool)                                                                            \
++  X(vkResetFences)                                                                                 \
++  X(vkQueueSubmit)                                                                                 \
++  X(vkCmdBindPipeline)                                                                             \
++  X(vkCmdBindDescriptorSets)                                                                       \
++  X(vkCmdBindVertexBuffers)                                                                        \
++  X(vkCmdBindIndexBuffer)                                                                          \
++  X(vkCmdDraw)                                                                                     \
++  X(vkCmdDrawIndexed)                                                                              \
++  X(vkCmdDispatch)                                                                                 \
++  X(vkCmdSetViewport)                                                                              \
++  X(vkCmdSetScissor)                                                                               \
++  X(vkCmdBeginRenderPass)                                                                          \
++  X(vkCmdEndRenderPass)                                                                            \
++  X(vkCmdPipelineBarrier)                                                                          \
++  X(vkCmdClearAttachments)                                                                         \
++  X(vkCmdUpdateBuffer)                                                                             \
++  X(vkCmdResetQueryPool)                                                                           \
++  X(vkCmdBeginQuery)                                                                               \
++  X(vkCmdEndQuery)                                                                                 \
++  X(vkCmdCopyBufferToImage)                                                                        \
++  X(vkCmdCopyImageToBuffer)                                                                        \
++  X(vkCmdCopyImage)                                                                                \
++  X(vkCmdCopyBuffer)                                                                               \
++  X(vkCmdBlitImage)                                                                                \
++  X(vkCmdResolveImage)
++
++#define PS4_DRAINED(X)                                                                             \
++  X(vkWaitForFences)                                                                               \
++  X(vkGetFenceStatus)                                                                              \
++  X(vkQueueWaitIdle)                                                                               \
++  X(vkDeviceWaitIdle)                                                                              \
++  X(vkGetQueryPoolResults)                                                                         \
++  X(vkResetDescriptorPool)                                                                         \
++  X(vkFreeCommandBuffers)                                                                          \
++  X(vkFreeMemory)                                                                                  \
++  X(vkDestroyPipeline)                                                                             \
++  X(vkDestroyImage)                                                                                \
++  X(vkDestroyImageView)                                                                            \
++  X(vkDestroyBuffer)                                                                               \
++  X(vkDestroyBufferView)                                                                           \
++  X(vkDestroyFramebuffer)                                                                          \
++  X(vkDestroyRenderPass)                                                                           \
++  X(vkDestroySampler)                                                                              \
++  X(vkDestroyDescriptorPool)                                                                       \
++  X(vkDestroyPipelineLayout)                                                                       \
++  X(vkDestroyDescriptorSetLayout)                                                                  \
++  X(vkDestroyQueryPool)                                                                            \
++  X(vkDestroySemaphore)                                                                            \
++  X(vkDestroyFence)                                                                                \
++  X(vkDestroyCommandPool)                                                                          \
++  X(vkDestroyDevice)
++
++#define PS4_DECLARE_REAL(name) PFN_##name real_##name = nullptr;
++struct RealFunctions
++{
++  PS4_RECORDED(PS4_DECLARE_REAL)
++  PS4_DRAINED(PS4_DECLARE_REAL)
++};
++#undef PS4_DECLARE_REAL
++RealFunctions s_real;
++
++// ---------------------------------------------------------------------------------------------
++// The queue: a single-producer (video thread), single-consumer (worker) ring of records
++// {u32 size, u32 op, payload}, 16-byte aligned, never wrapping inside a record.
++constexpr size_t RING_SIZE = 16u << 20;
++constexpr size_t RING_MASK = RING_SIZE - 1;
++
++struct Header
++{
++  u32 size;
++  u32 op;
++};
++
++u8* s_ring = nullptr;
++alignas(64) std::atomic<u64> s_write{0};  // published by the producer
++alignas(64) std::atomic<u64> s_read{0};   // published by the consumer
++alignas(64) u64 s_reserve = 0;            // producer-local
++u32 s_pending = 0;                        // size of the record being written
++std::atomic<bool> s_sleeping{false};
++std::atomic<bool> s_stop{false};
++std::mutex s_wake_mutex;
++std::condition_variable s_wake;
++std::thread s_worker;
++bool s_active = false;
++
++void WakeWorker()
++{
++  if (s_sleeping.load(std::memory_order_seq_cst))
++  {
++    std::lock_guard lk(s_wake_mutex);
++    s_wake.notify_one();
++  }
++}
++
++void Pause(u32& spins)
++{
++  if (++spins < 64)
++  {
++    __builtin_ia32_pause();
++  }
++  else if (spins < 256)
++  {
++    std::this_thread::yield();
++  }
++  else
++  {
++    const timespec ts{0, 20000};
++    nanosleep(&ts, nullptr);
++  }
++}
++
++void WaitForSpace(size_t size)
++{
++  u32 spins = 0;
++  while (s_reserve + size - s_read.load(std::memory_order_acquire) > RING_SIZE)
++  {
++    WakeWorker();
++    Pause(spins);
++  }
++}
++
++constexpr size_t Align16(size_t size)
++{
++  return (size + 15) & ~size_t(15);
++}
++
++// Starts a record with `payload` bytes; finish with Commit().
++u8* Begin(Op op, size_t payload)
++{
++  const size_t size = Align16(sizeof(Header) + payload);
++  size_t offset = s_reserve & RING_MASK;
++  if (offset + size > RING_SIZE)
++  {
++    const size_t pad = RING_SIZE - offset;
++    WaitForSpace(pad);
++    auto* h = reinterpret_cast<Header*>(s_ring + offset);
++    h->size = static_cast<u32>(pad);
++    h->op = OP_PAD;
++    s_reserve += pad;
++    s_write.store(s_reserve, std::memory_order_seq_cst);
++    offset = 0;
++  }
++  WaitForSpace(size);
++  auto* h = reinterpret_cast<Header*>(s_ring + offset);
++  h->size = static_cast<u32>(size);
++  h->op = op;
++  s_pending = static_cast<u32>(size);
++  return reinterpret_cast<u8*>(h + 1);
++}
++
++void Commit()
++{
++  s_reserve += s_pending;
++  s_write.store(s_reserve, std::memory_order_seq_cst);
++  WakeWorker();
++}
++
++// Writes a payload made of a fixed struct followed by arrays.
++class Writer
++{
++public:
++  explicit Writer(u8* p) : m_p(p) {}
++  template <typename T>
++  void Put(const T& v)
++  {
++    std::memcpy(m_p, &v, sizeof(T));
++    m_p += sizeof(T);
++  }
++  template <typename T>
++  void PutArray(const T* v, u32 count)
++  {
++    if (count)
++      std::memcpy(m_p, v, sizeof(T) * count);
++    m_p += sizeof(T) * count;
++  }
++
++private:
++  u8* m_p;
++};
++
++class Reader
++{
++public:
++  explicit Reader(const u8* p) : m_p(p) {}
++  template <typename T>
++  T Get()
++  {
++    T v;
++    std::memcpy(&v, m_p, sizeof(T));
++    m_p += sizeof(T);
++    return v;
++  }
++  template <typename T>
++  const T* GetArray(u32 count)
++  {
++    const T* v = reinterpret_cast<const T*>(m_p);
++    m_p += sizeof(T) * count;
++    return v;
++  }
++
++private:
++  const u8* m_p;
++};
++
++// ---------------------------------------------------------------------------------------------
++// Replay (worker thread).
++void Execute(const Header* h)
++{
++  Reader r(reinterpret_cast<const u8*>(h + 1));
++  switch (h->op)
++  {
++  case OP_PAD:
++    break;
++  case OP_BeginCommandBuffer:
++  {
++    const auto cb = r.Get<VkCommandBuffer>();
++    VkCommandBufferBeginInfo info = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, nullptr,
++                                     r.Get<VkCommandBufferUsageFlags>(), nullptr};
++    const VkResult res = s_real.real_vkBeginCommandBuffer(cb, &info);
++    if (res != VK_SUCCESS)
++      ERROR_LOG_FMT(VIDEO, "vk_thread: vkBeginCommandBuffer failed: {}", static_cast<int>(res));
++    break;
++  }
++  case OP_EndCommandBuffer:
++  {
++    const VkResult res = s_real.real_vkEndCommandBuffer(r.Get<VkCommandBuffer>());
++    if (res != VK_SUCCESS)
++      ERROR_LOG_FMT(VIDEO, "vk_thread: vkEndCommandBuffer failed: {}", static_cast<int>(res));
++    break;
++  }
++  case OP_ResetCommandPool:
++  {
++    const auto device = r.Get<VkDevice>();
++    const auto pool = r.Get<VkCommandPool>();
++    s_real.real_vkResetCommandPool(device, pool, r.Get<VkCommandPoolResetFlags>());
++    break;
++  }
++  case OP_ResetFences:
++  {
++    const auto device = r.Get<VkDevice>();
++    const u32 count = r.Get<u32>();
++    s_real.real_vkResetFences(device, count, r.GetArray<VkFence>(count));
++    break;
++  }
++  case OP_QueueSubmit:
++  {
++    const auto queue = r.Get<VkQueue>();
++    const auto fence = r.Get<VkFence>();
++    const u32 count = r.Get<u32>();
++    VkSubmitInfo submits[4];
++    for (u32 i = 0; i < count && i < 4; i++)
++    {
++      VkSubmitInfo& s = submits[i];
++      s = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
++      s.waitSemaphoreCount = r.Get<u32>();
++      s.pWaitSemaphores = r.GetArray<VkSemaphore>(s.waitSemaphoreCount);
++      s.pWaitDstStageMask = r.GetArray<VkPipelineStageFlags>(s.waitSemaphoreCount);
++      s.commandBufferCount = r.Get<u32>();
++      s.pCommandBuffers = r.GetArray<VkCommandBuffer>(s.commandBufferCount);
++      s.signalSemaphoreCount = r.Get<u32>();
++      s.pSignalSemaphores = r.GetArray<VkSemaphore>(s.signalSemaphoreCount);
++    }
++    const VkResult res = s_real.real_vkQueueSubmit(queue, count, submits, fence);
++    if (res != VK_SUCCESS)
++      ERROR_LOG_FMT(VIDEO, "vk_thread: vkQueueSubmit failed: {}", static_cast<int>(res));
++    break;
++  }
++  case OP_CmdBindPipeline:
++  {
++    const auto cb = r.Get<VkCommandBuffer>();
++    const auto point = r.Get<VkPipelineBindPoint>();
++    s_real.real_vkCmdBindPipeline(cb, point, r.Get<VkPipeline>());
++    break;
++  }
++  case OP_CmdBindDescriptorSets:
++  {
++    const auto cb = r.Get<VkCommandBuffer>();
++    const auto point = r.Get<VkPipelineBindPoint>();
++    const auto layout = r.Get<VkPipelineLayout>();
++    const u32 first = r.Get<u32>();
++    const u32 count = r.Get<u32>();
++    const u32 dynamic_count = r.Get<u32>();
++    const VkDescriptorSet* sets = r.GetArray<VkDescriptorSet>(count);
++    const u32* offsets = r.GetArray<u32>(dynamic_count);
++    s_real.real_vkCmdBindDescriptorSets(cb, point, layout, first, count, sets, dynamic_count,
++                                        offsets);
++    break;
++  }
++  case OP_CmdBindVertexBuffers:
++  {
++    const auto cb = r.Get<VkCommandBuffer>();
++    const u32 first = r.Get<u32>();
++    const u32 count = r.Get<u32>();
++    const VkBuffer* buffers = r.GetArray<VkBuffer>(count);
++    const VkDeviceSize* offsets = r.GetArray<VkDeviceSize>(count);
++    s_real.real_vkCmdBindVertexBuffers(cb, first, count, buffers, offsets);
++    break;
++  }
++  case OP_CmdBindIndexBuffer:
++  {
++    const auto cb = r.Get<VkCommandBuffer>();
++    const auto buffer = r.Get<VkBuffer>();
++    const auto offset = r.Get<VkDeviceSize>();
++    s_real.real_vkCmdBindIndexBuffer(cb, buffer, offset, r.Get<VkIndexType>());
++    break;
++  }
++  case OP_CmdDraw:
++  {
++    const auto cb = r.Get<VkCommandBuffer>();
++    const u32 a = r.Get<u32>(), b = r.Get<u32>(), c = r.Get<u32>(), d = r.Get<u32>();
++    s_real.real_vkCmdDraw(cb, a, b, c, d);
++    break;
++  }
++  case OP_CmdDrawIndexed:
++  {
++    const auto cb = r.Get<VkCommandBuffer>();
++    const u32 a = r.Get<u32>(), b = r.Get<u32>(), c = r.Get<u32>();
++    const s32 d = r.Get<s32>();
++    const u32 e = r.Get<u32>();
++    s_real.real_vkCmdDrawIndexed(cb, a, b, c, d, e);
++    break;
++  }
++  case OP_CmdDispatch:
++  {
++    const auto cb = r.Get<VkCommandBuffer>();
++    const u32 x = r.Get<u32>(), y = r.Get<u32>(), z = r.Get<u32>();
++    s_real.real_vkCmdDispatch(cb, x, y, z);
++    break;
++  }
++  case OP_CmdSetViewport:
++  {
++    const auto cb = r.Get<VkCommandBuffer>();
++    const u32 first = r.Get<u32>();
++    const u32 count = r.Get<u32>();
++    s_real.real_vkCmdSetViewport(cb, first, count, r.GetArray<VkViewport>(count));
++    break;
++  }
++  case OP_CmdSetScissor:
++  {
++    const auto cb = r.Get<VkCommandBuffer>();
++    const u32 first = r.Get<u32>();
++    const u32 count = r.Get<u32>();
++    s_real.real_vkCmdSetScissor(cb, first, count, r.GetArray<VkRect2D>(count));
++    break;
++  }
++  case OP_CmdBeginRenderPass:
++  {
++    const auto cb = r.Get<VkCommandBuffer>();
++    VkRenderPassBeginInfo info = {VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
++    info.renderPass = r.Get<VkRenderPass>();
++    info.framebuffer = r.Get<VkFramebuffer>();
++    info.renderArea = r.Get<VkRect2D>();
++    info.clearValueCount = r.Get<u32>();
++    const auto contents = r.Get<VkSubpassContents>();
++    info.pClearValues = r.GetArray<VkClearValue>(info.clearValueCount);
++    s_real.real_vkCmdBeginRenderPass(cb, &info, contents);
++    break;
++  }
++  case OP_CmdEndRenderPass:
++    s_real.real_vkCmdEndRenderPass(r.Get<VkCommandBuffer>());
++    break;
++  case OP_CmdPipelineBarrier:
++  {
++    const auto cb = r.Get<VkCommandBuffer>();
++    const auto src = r.Get<VkPipelineStageFlags>();
++    const auto dst = r.Get<VkPipelineStageFlags>();
++    const auto flags = r.Get<VkDependencyFlags>();
++    const u32 nm = r.Get<u32>(), nb = r.Get<u32>(), ni = r.Get<u32>();
++    const auto* m = r.GetArray<VkMemoryBarrier>(nm);
++    const auto* b = r.GetArray<VkBufferMemoryBarrier>(nb);
++    const auto* i = r.GetArray<VkImageMemoryBarrier>(ni);
++    s_real.real_vkCmdPipelineBarrier(cb, src, dst, flags, nm, m, nb, b, ni, i);
++    break;
++  }
++  case OP_CmdClearAttachments:
++  {
++    const auto cb = r.Get<VkCommandBuffer>();
++    const u32 na = r.Get<u32>(), nr = r.Get<u32>();
++    const auto* a = r.GetArray<VkClearAttachment>(na);
++    const auto* rects = r.GetArray<VkClearRect>(nr);
++    s_real.real_vkCmdClearAttachments(cb, na, a, nr, rects);
++    break;
++  }
++  case OP_CmdUpdateBuffer:
++  {
++    const auto cb = r.Get<VkCommandBuffer>();
++    const auto buffer = r.Get<VkBuffer>();
++    const auto offset = r.Get<VkDeviceSize>();
++    const auto size = r.Get<VkDeviceSize>();
++    s_real.real_vkCmdUpdateBuffer(cb, buffer, offset, size,
++                                  r.GetArray<u8>(static_cast<u32>(size)));
++    break;
++  }
++  case OP_CmdResetQueryPool:
++  {
++    const auto cb = r.Get<VkCommandBuffer>();
++    const auto pool = r.Get<VkQueryPool>();
++    const u32 first = r.Get<u32>(), count = r.Get<u32>();
++    s_real.real_vkCmdResetQueryPool(cb, pool, first, count);
++    break;
++  }
++  case OP_CmdBeginQuery:
++  {
++    const auto cb = r.Get<VkCommandBuffer>();
++    const auto pool = r.Get<VkQueryPool>();
++    const u32 query = r.Get<u32>();
++    s_real.real_vkCmdBeginQuery(cb, pool, query, r.Get<VkQueryControlFlags>());
++    break;
++  }
++  case OP_CmdEndQuery:
++  {
++    const auto cb = r.Get<VkCommandBuffer>();
++    const auto pool = r.Get<VkQueryPool>();
++    s_real.real_vkCmdEndQuery(cb, pool, r.Get<u32>());
++    break;
++  }
++  case OP_CmdCopyBufferToImage:
++  {
++    const auto cb = r.Get<VkCommandBuffer>();
++    const auto src = r.Get<VkBuffer>();
++    const auto dst = r.Get<VkImage>();
++    const auto layout = r.Get<VkImageLayout>();
++    const u32 n = r.Get<u32>();
++    s_real.real_vkCmdCopyBufferToImage(cb, src, dst, layout, n, r.GetArray<VkBufferImageCopy>(n));
++    break;
++  }
++  case OP_CmdCopyImageToBuffer:
++  {
++    const auto cb = r.Get<VkCommandBuffer>();
++    const auto src = r.Get<VkImage>();
++    const auto layout = r.Get<VkImageLayout>();
++    const auto dst = r.Get<VkBuffer>();
++    const u32 n = r.Get<u32>();
++    s_real.real_vkCmdCopyImageToBuffer(cb, src, layout, dst, n, r.GetArray<VkBufferImageCopy>(n));
++    break;
++  }
++  case OP_CmdCopyImage:
++  {
++    const auto cb = r.Get<VkCommandBuffer>();
++    const auto src = r.Get<VkImage>();
++    const auto src_layout = r.Get<VkImageLayout>();
++    const auto dst = r.Get<VkImage>();
++    const auto dst_layout = r.Get<VkImageLayout>();
++    const u32 n = r.Get<u32>();
++    s_real.real_vkCmdCopyImage(cb, src, src_layout, dst, dst_layout, n,
++                               r.GetArray<VkImageCopy>(n));
++    break;
++  }
++  case OP_CmdCopyBuffer:
++  {
++    const auto cb = r.Get<VkCommandBuffer>();
++    const auto src = r.Get<VkBuffer>();
++    const auto dst = r.Get<VkBuffer>();
++    const u32 n = r.Get<u32>();
++    s_real.real_vkCmdCopyBuffer(cb, src, dst, n, r.GetArray<VkBufferCopy>(n));
++    break;
++  }
++  case OP_CmdBlitImage:
++  {
++    const auto cb = r.Get<VkCommandBuffer>();
++    const auto src = r.Get<VkImage>();
++    const auto src_layout = r.Get<VkImageLayout>();
++    const auto dst = r.Get<VkImage>();
++    const auto dst_layout = r.Get<VkImageLayout>();
++    const auto filter = r.Get<VkFilter>();
++    const u32 n = r.Get<u32>();
++    s_real.real_vkCmdBlitImage(cb, src, src_layout, dst, dst_layout, n,
++                               r.GetArray<VkImageBlit>(n), filter);
++    break;
++  }
++  case OP_CmdResolveImage:
++  {
++    const auto cb = r.Get<VkCommandBuffer>();
++    const auto src = r.Get<VkImage>();
++    const auto src_layout = r.Get<VkImageLayout>();
++    const auto dst = r.Get<VkImage>();
++    const auto dst_layout = r.Get<VkImageLayout>();
++    const u32 n = r.Get<u32>();
++    s_real.real_vkCmdResolveImage(cb, src, src_layout, dst, dst_layout, n,
++                                  r.GetArray<VkImageResolve>(n));
++    break;
++  }
++  default:
++    ERROR_LOG_FMT(VIDEO, "vk_thread: unknown record {}", h->op);
++    break;
++  }
++}
++
++void WorkerLoop()
++{
++  Common::SetCurrentThreadName("VK record thread");
++  {
++    const auto [affinity, priority] = Common::PS4SetCurrentThreadCoreAndPriority(
++        ps4_vk_thread_core, 0);
++    char line[128];
++    snprintf(line, sizeof(line), "vk_thread: worker on core %d (result 0x%x)", ps4_vk_thread_core,
++             affinity);
++    ps4_boot_trace(line);
++  }
++  u64 read = s_read.load(std::memory_order_relaxed);
++  for (;;)
++  {
++    u64 write = s_write.load(std::memory_order_acquire);
++    if (read == write)
++    {
++      if (s_stop.load(std::memory_order_acquire))
++        break;
++      // Spin briefly (the video thread usually queues the next call within microseconds), then
++      // sleep. Timed waits: a lost wakeup costs at most a millisecond.
++      u32 spins = 0;
++      while (spins < 2000 && s_write.load(std::memory_order_acquire) == read)
++      {
++        __builtin_ia32_pause();
++        spins++;
++      }
++      if (s_write.load(std::memory_order_acquire) == read)
++      {
++        std::unique_lock lk(s_wake_mutex);
++        s_sleeping.store(true, std::memory_order_seq_cst);
++        if (s_write.load(std::memory_order_seq_cst) == read && !s_stop.load())
++          s_wake.wait_for(lk, std::chrono::milliseconds(1));
++        s_sleeping.store(false, std::memory_order_relaxed);
++      }
++      continue;
++    }
++    while (read != write)
++    {
++      const auto* h = reinterpret_cast<const Header*>(s_ring + (read & RING_MASK));
++      Execute(h);
++      read += h->size;
++      s_read.store(read, std::memory_order_release);
++    }
++  }
++}
++
++// ---------------------------------------------------------------------------------------------
++// Recording thunks (video thread).
++VKAPI_ATTR VkResult VKAPI_CALL Rec_vkBeginCommandBuffer(VkCommandBuffer cb,
++                                                        const VkCommandBufferBeginInfo* info)
++{
++  Writer w(Begin(OP_BeginCommandBuffer, sizeof(cb) + sizeof(VkCommandBufferUsageFlags)));
++  w.Put(cb);
++  w.Put(info->flags);
++  Commit();
++  return VK_SUCCESS;
++}
++
++VKAPI_ATTR VkResult VKAPI_CALL Rec_vkEndCommandBuffer(VkCommandBuffer cb)
++{
++  Writer w(Begin(OP_EndCommandBuffer, sizeof(cb)));
++  w.Put(cb);
++  Commit();
++  return VK_SUCCESS;
++}
++
++VKAPI_ATTR VkResult VKAPI_CALL Rec_vkResetCommandPool(VkDevice device, VkCommandPool pool,
++                                                      VkCommandPoolResetFlags flags)
++{
++  Writer w(Begin(OP_ResetCommandPool, sizeof(device) + sizeof(pool) + sizeof(flags)));
++  w.Put(device);
++  w.Put(pool);
++  w.Put(flags);
++  Commit();
++  return VK_SUCCESS;
++}
++
++VKAPI_ATTR VkResult VKAPI_CALL Rec_vkResetFences(VkDevice device, uint32_t count,
++                                                 const VkFence* fences)
++{
++  Writer w(Begin(OP_ResetFences, sizeof(device) + 4 + sizeof(VkFence) * count));
++  w.Put(device);
++  w.Put(count);
++  w.PutArray(fences, count);
++  Commit();
++  return VK_SUCCESS;
++}
++
++VKAPI_ATTR VkResult VKAPI_CALL Rec_vkQueueSubmit(VkQueue queue, uint32_t count,
++                                                 const VkSubmitInfo* submits, VkFence fence)
++{
++  size_t size = sizeof(queue) + sizeof(fence) + 4;
++  bool simple = count <= 4;
++  for (u32 i = 0; i < count; i++)
++  {
++    const VkSubmitInfo& s = submits[i];
++    simple &= s.pNext == nullptr;
++    size += 12 + s.waitSemaphoreCount * (sizeof(VkSemaphore) + sizeof(VkPipelineStageFlags)) +
++            s.commandBufferCount * sizeof(VkCommandBuffer) +
++            s.signalSemaphoreCount * sizeof(VkSemaphore);
++  }
++  if (!simple)
++  {
++    // Not expected from Dolphin: submit directly, in order.
++    PS4CommandRecorderDrain();
++    return s_real.real_vkQueueSubmit(queue, count, submits, fence);
++  }
++  Writer w(Begin(OP_QueueSubmit, size));
++  w.Put(queue);
++  w.Put(fence);
++  w.Put(count);
++  for (u32 i = 0; i < count; i++)
++  {
++    const VkSubmitInfo& s = submits[i];
++    w.Put(s.waitSemaphoreCount);
++    w.PutArray(s.pWaitSemaphores, s.waitSemaphoreCount);
++    w.PutArray(s.pWaitDstStageMask, s.waitSemaphoreCount);
++    w.Put(s.commandBufferCount);
++    w.PutArray(s.pCommandBuffers, s.commandBufferCount);
++    w.Put(s.signalSemaphoreCount);
++    w.PutArray(s.pSignalSemaphores, s.signalSemaphoreCount);
++  }
++  Commit();
++  return VK_SUCCESS;
++}
++
++VKAPI_ATTR void VKAPI_CALL Rec_vkCmdBindPipeline(VkCommandBuffer cb, VkPipelineBindPoint point,
++                                                 VkPipeline pipeline)
++{
++  Writer w(Begin(OP_CmdBindPipeline, sizeof(cb) + sizeof(point) + sizeof(pipeline)));
++  w.Put(cb);
++  w.Put(point);
++  w.Put(pipeline);
++  Commit();
++}
++
++VKAPI_ATTR void VKAPI_CALL Rec_vkCmdBindDescriptorSets(VkCommandBuffer cb,
++                                                       VkPipelineBindPoint point,
++                                                       VkPipelineLayout layout, uint32_t first,
++                                                       uint32_t count, const VkDescriptorSet* sets,
++                                                       uint32_t dynamic_count,
++                                                       const uint32_t* offsets)
++{
++  Writer w(Begin(OP_CmdBindDescriptorSets, sizeof(cb) + sizeof(point) + sizeof(layout) + 12 +
++                                               sizeof(VkDescriptorSet) * count + 4 * dynamic_count));
++  w.Put(cb);
++  w.Put(point);
++  w.Put(layout);
++  w.Put(first);
++  w.Put(count);
++  w.Put(dynamic_count);
++  w.PutArray(sets, count);
++  w.PutArray(offsets, dynamic_count);
++  Commit();
++}
++
++VKAPI_ATTR void VKAPI_CALL Rec_vkCmdBindVertexBuffers(VkCommandBuffer cb, uint32_t first,
++                                                      uint32_t count, const VkBuffer* buffers,
++                                                      const VkDeviceSize* offsets)
++{
++  Writer w(Begin(OP_CmdBindVertexBuffers,
++                 sizeof(cb) + 8 + (sizeof(VkBuffer) + sizeof(VkDeviceSize)) * count));
++  w.Put(cb);
++  w.Put(first);
++  w.Put(count);
++  w.PutArray(buffers, count);
++  w.PutArray(offsets, count);
++  Commit();
++}
++
++VKAPI_ATTR void VKAPI_CALL Rec_vkCmdBindIndexBuffer(VkCommandBuffer cb, VkBuffer buffer,
++                                                    VkDeviceSize offset, VkIndexType type)
++{
++  Writer w(Begin(OP_CmdBindIndexBuffer,
++                 sizeof(cb) + sizeof(buffer) + sizeof(offset) + sizeof(type)));
++  w.Put(cb);
++  w.Put(buffer);
++  w.Put(offset);
++  w.Put(type);
++  Commit();
++}
++
++VKAPI_ATTR void VKAPI_CALL Rec_vkCmdDraw(VkCommandBuffer cb, uint32_t a, uint32_t b, uint32_t c,
++                                         uint32_t d)
++{
++  Writer w(Begin(OP_CmdDraw, sizeof(cb) + 16));
++  w.Put(cb);
++  w.Put(a);
++  w.Put(b);
++  w.Put(c);
++  w.Put(d);
++  Commit();
++}
++
++VKAPI_ATTR void VKAPI_CALL Rec_vkCmdDrawIndexed(VkCommandBuffer cb, uint32_t a, uint32_t b,
++                                                uint32_t c, int32_t d, uint32_t e)
++{
++  Writer w(Begin(OP_CmdDrawIndexed, sizeof(cb) + 20));
++  w.Put(cb);
++  w.Put(a);
++  w.Put(b);
++  w.Put(c);
++  w.Put(d);
++  w.Put(e);
++  Commit();
++}
++
++VKAPI_ATTR void VKAPI_CALL Rec_vkCmdDispatch(VkCommandBuffer cb, uint32_t x, uint32_t y,
++                                             uint32_t z)
++{
++  Writer w(Begin(OP_CmdDispatch, sizeof(cb) + 12));
++  w.Put(cb);
++  w.Put(x);
++  w.Put(y);
++  w.Put(z);
++  Commit();
++}
++
++VKAPI_ATTR void VKAPI_CALL Rec_vkCmdSetViewport(VkCommandBuffer cb, uint32_t first, uint32_t count,
++                                                const VkViewport* viewports)
++{
++  Writer w(Begin(OP_CmdSetViewport, sizeof(cb) + 8 + sizeof(VkViewport) * count));
++  w.Put(cb);
++  w.Put(first);
++  w.Put(count);
++  w.PutArray(viewports, count);
++  Commit();
++}
++
++VKAPI_ATTR void VKAPI_CALL Rec_vkCmdSetScissor(VkCommandBuffer cb, uint32_t first, uint32_t count,
++                                               const VkRect2D* rects)
++{
++  Writer w(Begin(OP_CmdSetScissor, sizeof(cb) + 8 + sizeof(VkRect2D) * count));
++  w.Put(cb);
++  w.Put(first);
++  w.Put(count);
++  w.PutArray(rects, count);
++  Commit();
++}
++
++VKAPI_ATTR void VKAPI_CALL Rec_vkCmdBeginRenderPass(VkCommandBuffer cb,
++                                                    const VkRenderPassBeginInfo* info,
++                                                    VkSubpassContents contents)
++{
++  Writer w(Begin(OP_CmdBeginRenderPass, sizeof(cb) + sizeof(VkRenderPass) +
++                                            sizeof(VkFramebuffer) + sizeof(VkRect2D) + 4 +
++                                            sizeof(contents) +
++                                            sizeof(VkClearValue) * info->clearValueCount));
++  w.Put(cb);
++  w.Put(info->renderPass);
++  w.Put(info->framebuffer);
++  w.Put(info->renderArea);
++  w.Put(info->clearValueCount);
++  w.Put(contents);
++  w.PutArray(info->pClearValues, info->clearValueCount);
++  Commit();
++}
++
++VKAPI_ATTR void VKAPI_CALL Rec_vkCmdEndRenderPass(VkCommandBuffer cb)
++{
++  Writer w(Begin(OP_CmdEndRenderPass, sizeof(cb)));
++  w.Put(cb);
++  Commit();
++}
++
++VKAPI_ATTR void VKAPI_CALL Rec_vkCmdPipelineBarrier(
++    VkCommandBuffer cb, VkPipelineStageFlags src, VkPipelineStageFlags dst,
++    VkDependencyFlags flags, uint32_t nm, const VkMemoryBarrier* m, uint32_t nb,
++    const VkBufferMemoryBarrier* b, uint32_t ni, const VkImageMemoryBarrier* i)
++{
++  Writer w(Begin(OP_CmdPipelineBarrier,
++                 sizeof(cb) + sizeof(src) + sizeof(dst) + sizeof(flags) + 12 +
++                     sizeof(VkMemoryBarrier) * nm + sizeof(VkBufferMemoryBarrier) * nb +
++                     sizeof(VkImageMemoryBarrier) * ni));
++  w.Put(cb);
++  w.Put(src);
++  w.Put(dst);
++  w.Put(flags);
++  w.Put(nm);
++  w.Put(nb);
++  w.Put(ni);
++  w.PutArray(m, nm);
++  w.PutArray(b, nb);
++  w.PutArray(i, ni);
++  Commit();
++}
++
++VKAPI_ATTR void VKAPI_CALL Rec_vkCmdClearAttachments(VkCommandBuffer cb, uint32_t na,
++                                                     const VkClearAttachment* a, uint32_t nr,
++                                                     const VkClearRect* rects)
++{
++  Writer w(Begin(OP_CmdClearAttachments,
++                 sizeof(cb) + 8 + sizeof(VkClearAttachment) * na + sizeof(VkClearRect) * nr));
++  w.Put(cb);
++  w.Put(na);
++  w.Put(nr);
++  w.PutArray(a, na);
++  w.PutArray(rects, nr);
++  Commit();
++}
++
++VKAPI_ATTR void VKAPI_CALL Rec_vkCmdUpdateBuffer(VkCommandBuffer cb, VkBuffer buffer,
++                                                 VkDeviceSize offset, VkDeviceSize size,
++                                                 const void* data)
++{
++  Writer w(Begin(OP_CmdUpdateBuffer, sizeof(cb) + sizeof(buffer) + 16 + size));
++  w.Put(cb);
++  w.Put(buffer);
++  w.Put(offset);
++  w.Put(size);
++  w.PutArray(static_cast<const u8*>(data), static_cast<u32>(size));
++  Commit();
++}
++
++VKAPI_ATTR void VKAPI_CALL Rec_vkCmdResetQueryPool(VkCommandBuffer cb, VkQueryPool pool,
++                                                   uint32_t first, uint32_t count)
++{
++  Writer w(Begin(OP_CmdResetQueryPool, sizeof(cb) + sizeof(pool) + 8));
++  w.Put(cb);
++  w.Put(pool);
++  w.Put(first);
++  w.Put(count);
++  Commit();
++}
++
++VKAPI_ATTR void VKAPI_CALL Rec_vkCmdBeginQuery(VkCommandBuffer cb, VkQueryPool pool,
++                                               uint32_t query, VkQueryControlFlags flags)
++{
++  Writer w(Begin(OP_CmdBeginQuery, sizeof(cb) + sizeof(pool) + 4 + sizeof(flags)));
++  w.Put(cb);
++  w.Put(pool);
++  w.Put(query);
++  w.Put(flags);
++  Commit();
++}
++
++VKAPI_ATTR void VKAPI_CALL Rec_vkCmdEndQuery(VkCommandBuffer cb, VkQueryPool pool, uint32_t query)
++{
++  Writer w(Begin(OP_CmdEndQuery, sizeof(cb) + sizeof(pool) + 4));
++  w.Put(cb);
++  w.Put(pool);
++  w.Put(query);
++  Commit();
++}
++
++VKAPI_ATTR void VKAPI_CALL Rec_vkCmdCopyBufferToImage(VkCommandBuffer cb, VkBuffer src,
++                                                      VkImage dst, VkImageLayout layout,
++                                                      uint32_t n, const VkBufferImageCopy* regions)
++{
++  Writer w(Begin(OP_CmdCopyBufferToImage, sizeof(cb) + sizeof(src) + sizeof(dst) +
++                                              sizeof(layout) + 4 + sizeof(VkBufferImageCopy) * n));
++  w.Put(cb);
++  w.Put(src);
++  w.Put(dst);
++  w.Put(layout);
++  w.Put(n);
++  w.PutArray(regions, n);
++  Commit();
++}
++
++VKAPI_ATTR void VKAPI_CALL Rec_vkCmdCopyImageToBuffer(VkCommandBuffer cb, VkImage src,
++                                                      VkImageLayout layout, VkBuffer dst,
++                                                      uint32_t n, const VkBufferImageCopy* regions)
++{
++  Writer w(Begin(OP_CmdCopyImageToBuffer, sizeof(cb) + sizeof(src) + sizeof(layout) +
++                                              sizeof(dst) + 4 + sizeof(VkBufferImageCopy) * n));
++  w.Put(cb);
++  w.Put(src);
++  w.Put(layout);
++  w.Put(dst);
++  w.Put(n);
++  w.PutArray(regions, n);
++  Commit();
++}
++
++VKAPI_ATTR void VKAPI_CALL Rec_vkCmdCopyImage(VkCommandBuffer cb, VkImage src,
++                                              VkImageLayout src_layout, VkImage dst,
++                                              VkImageLayout dst_layout, uint32_t n,
++                                              const VkImageCopy* regions)
++{
++  Writer w(Begin(OP_CmdCopyImage, sizeof(cb) + 2 * sizeof(VkImage) + 2 * sizeof(VkImageLayout) +
++                                      4 + sizeof(VkImageCopy) * n));
++  w.Put(cb);
++  w.Put(src);
++  w.Put(src_layout);
++  w.Put(dst);
++  w.Put(dst_layout);
++  w.Put(n);
++  w.PutArray(regions, n);
++  Commit();
++}
++
++VKAPI_ATTR void VKAPI_CALL Rec_vkCmdCopyBuffer(VkCommandBuffer cb, VkBuffer src, VkBuffer dst,
++                                               uint32_t n, const VkBufferCopy* regions)
++{
++  Writer w(Begin(OP_CmdCopyBuffer, sizeof(cb) + 2 * sizeof(VkBuffer) + 4 + sizeof(VkBufferCopy) * n));
++  w.Put(cb);
++  w.Put(src);
++  w.Put(dst);
++  w.Put(n);
++  w.PutArray(regions, n);
++  Commit();
++}
++
++VKAPI_ATTR void VKAPI_CALL Rec_vkCmdBlitImage(VkCommandBuffer cb, VkImage src,
++                                              VkImageLayout src_layout, VkImage dst,
++                                              VkImageLayout dst_layout, uint32_t n,
++                                              const VkImageBlit* regions, VkFilter filter)
++{
++  Writer w(Begin(OP_CmdBlitImage, sizeof(cb) + 2 * sizeof(VkImage) + 2 * sizeof(VkImageLayout) +
++                                      sizeof(filter) + 4 + sizeof(VkImageBlit) * n));
++  w.Put(cb);
++  w.Put(src);
++  w.Put(src_layout);
++  w.Put(dst);
++  w.Put(dst_layout);
++  w.Put(filter);
++  w.Put(n);
++  w.PutArray(regions, n);
++  Commit();
++}
++
++VKAPI_ATTR void VKAPI_CALL Rec_vkCmdResolveImage(VkCommandBuffer cb, VkImage src,
++                                                 VkImageLayout src_layout, VkImage dst,
++                                                 VkImageLayout dst_layout, uint32_t n,
++                                                 const VkImageResolve* regions)
++{
++  Writer w(Begin(OP_CmdResolveImage, sizeof(cb) + 2 * sizeof(VkImage) +
++                                         2 * sizeof(VkImageLayout) + 4 +
++                                         sizeof(VkImageResolve) * n));
++  w.Put(cb);
++  w.Put(src);
++  w.Put(src_layout);
++  w.Put(dst);
++  w.Put(dst_layout);
++  w.Put(n);
++  w.PutArray(regions, n);
++  Commit();
++}
++
++// ---------------------------------------------------------------------------------------------
++// Draining wrappers: wait for the worker, then call RADV directly.
++VKAPI_ATTR VkResult VKAPI_CALL Drain_vkWaitForFences(VkDevice d, uint32_t n, const VkFence* f,
++                                                     VkBool32 all, uint64_t timeout)
++{
++  PS4CommandRecorderDrain();
++  return s_real.real_vkWaitForFences(d, n, f, all, timeout);
++}
++VKAPI_ATTR VkResult VKAPI_CALL Drain_vkGetFenceStatus(VkDevice d, VkFence f)
++{
++  PS4CommandRecorderDrain();
++  return s_real.real_vkGetFenceStatus(d, f);
++}
++VKAPI_ATTR VkResult VKAPI_CALL Drain_vkQueueWaitIdle(VkQueue q)
++{
++  PS4CommandRecorderDrain();
++  return s_real.real_vkQueueWaitIdle(q);
++}
++VKAPI_ATTR VkResult VKAPI_CALL Drain_vkDeviceWaitIdle(VkDevice d)
++{
++  PS4CommandRecorderDrain();
++  return s_real.real_vkDeviceWaitIdle(d);
++}
++VKAPI_ATTR VkResult VKAPI_CALL Drain_vkGetQueryPoolResults(VkDevice d, VkQueryPool p, uint32_t first,
++                                                           uint32_t count, size_t size, void* data,
++                                                           VkDeviceSize stride,
++                                                           VkQueryResultFlags flags)
++{
++  PS4CommandRecorderDrain();
++  return s_real.real_vkGetQueryPoolResults(d, p, first, count, size, data, stride, flags);
++}
++VKAPI_ATTR VkResult VKAPI_CALL Drain_vkResetDescriptorPool(VkDevice d, VkDescriptorPool p,
++                                                           VkDescriptorPoolResetFlags flags)
++{
++  PS4CommandRecorderDrain();
++  return s_real.real_vkResetDescriptorPool(d, p, flags);
++}
++VKAPI_ATTR void VKAPI_CALL Drain_vkFreeCommandBuffers(VkDevice d, VkCommandPool p, uint32_t n,
++                                                      const VkCommandBuffer* cbs)
++{
++  PS4CommandRecorderDrain();
++  s_real.real_vkFreeCommandBuffers(d, p, n, cbs);
++}
++VKAPI_ATTR void VKAPI_CALL Drain_vkFreeMemory(VkDevice d, VkDeviceMemory m,
++                                              const VkAllocationCallbacks* a)
++{
++  PS4CommandRecorderDrain();
++  s_real.real_vkFreeMemory(d, m, a);
++}
++
++#define PS4_DRAIN_DESTROY(name, Type)                                                              \
++  VKAPI_ATTR void VKAPI_CALL Drain_##name(VkDevice d, Type o, const VkAllocationCallbacks* a)      \
++  {                                                                                                \
++    PS4CommandRecorderDrain();                                                                     \
++    s_real.real_##name(d, o, a);                                                                   \
++  }
++PS4_DRAIN_DESTROY(vkDestroyPipeline, VkPipeline)
++PS4_DRAIN_DESTROY(vkDestroyImage, VkImage)
++PS4_DRAIN_DESTROY(vkDestroyImageView, VkImageView)
++PS4_DRAIN_DESTROY(vkDestroyBuffer, VkBuffer)
++PS4_DRAIN_DESTROY(vkDestroyBufferView, VkBufferView)
++PS4_DRAIN_DESTROY(vkDestroyFramebuffer, VkFramebuffer)
++PS4_DRAIN_DESTROY(vkDestroyRenderPass, VkRenderPass)
++PS4_DRAIN_DESTROY(vkDestroySampler, VkSampler)
++PS4_DRAIN_DESTROY(vkDestroyDescriptorPool, VkDescriptorPool)
++PS4_DRAIN_DESTROY(vkDestroyPipelineLayout, VkPipelineLayout)
++PS4_DRAIN_DESTROY(vkDestroyDescriptorSetLayout, VkDescriptorSetLayout)
++PS4_DRAIN_DESTROY(vkDestroyQueryPool, VkQueryPool)
++PS4_DRAIN_DESTROY(vkDestroySemaphore, VkSemaphore)
++PS4_DRAIN_DESTROY(vkDestroyFence, VkFence)
++PS4_DRAIN_DESTROY(vkDestroyCommandPool, VkCommandPool)
++#undef PS4_DRAIN_DESTROY
++
++VKAPI_ATTR void VKAPI_CALL Drain_vkDestroyDevice(VkDevice d, const VkAllocationCallbacks* a)
++{
++  PS4ShutdownCommandRecorder();
++  s_real.real_vkDestroyDevice(d, a);
++}
++}  // namespace
++
++bool PS4CommandRecorderActive()
++{
++  return s_active;
++}
++
++void PS4CommandRecorderDrain()
++{
++  if (!s_active)
++    return;
++  // Everything published so far (any thread may drain, e.g. shader compiler threads destroying
++  // objects; only the video thread records).
++  const u64 target = s_write.load(std::memory_order_acquire);
++  u32 spins = 0;
++  while (s_read.load(std::memory_order_acquire) < target)
++  {
++    WakeWorker();
++    Pause(spins);
++  }
++}
++
++void PS4InstallCommandRecorder()
++{
++  if (!ps4_vk_thread || s_active)
++    return;
++  s_ring = static_cast<u8*>(::operator new(RING_SIZE, std::align_val_t{64}));
++  s_write = s_read = 0;
++  s_reserve = 0;
++  s_stop = false;
++
++#define PS4_SAVE(name) s_real.real_##name = ::name;
++  PS4_RECORDED(PS4_SAVE)
++  PS4_DRAINED(PS4_SAVE)
++#undef PS4_SAVE
++#define PS4_HOOK_REC(name) ::name = Rec_##name;
++  PS4_RECORDED(PS4_HOOK_REC)
++#undef PS4_HOOK_REC
++#define PS4_HOOK_DRAIN(name) ::name = Drain_##name;
++  PS4_DRAINED(PS4_HOOK_DRAIN)
++#undef PS4_HOOK_DRAIN
++
++  s_active = true;
++  s_worker = std::thread(WorkerLoop);
++  ps4_boot_trace("vk_thread: Vulkan commands are recorded on a worker thread");
++}
++
++void PS4ShutdownCommandRecorder()
++{
++  if (!s_active)
++    return;
++  PS4CommandRecorderDrain();
++  s_stop.store(true, std::memory_order_seq_cst);
++  {
++    std::lock_guard lk(s_wake_mutex);
++    s_wake.notify_one();
++  }
++  s_worker.join();
++  s_active = false;
++
++#define PS4_RESTORE(name) ::name = s_real.real_##name;
++  PS4_RECORDED(PS4_RESTORE)
++  PS4_DRAINED(PS4_RESTORE)
++#undef PS4_RESTORE
++  ::operator delete(s_ring, std::align_val_t{64});
++  s_ring = nullptr;
++}
++}  // namespace Vulkan
+diff --git a/Source/Core/VideoBackends/Vulkan/PS4CommandRecorder.h b/Source/Core/VideoBackends/Vulkan/PS4CommandRecorder.h
+new file mode 100755
+index 0000000..611315b
+--- /dev/null
++++ b/Source/Core/VideoBackends/Vulkan/PS4CommandRecorder.h
+@@ -0,0 +1,18 @@
++// Copyright 2026 Dolphin Emulator Project
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++#pragma once
++
++// PS4: Vulkan command recording thread (see PS4CommandRecorder.cpp).
++
++extern "C" int ps4_vk_thread, ps4_vk_thread_core;
++
++namespace Vulkan
++{
++// Replaces the device entry points (after LoadVulkanDeviceFunctions) when ps4_vk_thread is set.
++void PS4InstallCommandRecorder();
++// Waits until the worker has replayed everything queued so far.
++void PS4CommandRecorderDrain();
++bool PS4CommandRecorderActive();
++void PS4ShutdownCommandRecorder();
++}  // namespace Vulkan
 diff --git a/Source/Core/VideoBackends/Vulkan/VKMain.cpp b/Source/Core/VideoBackends/Vulkan/VKMain.cpp
-index 6338e52..8b389ce 100644
+index 6338e52..ad1953f 100644
 --- a/Source/Core/VideoBackends/Vulkan/VKMain.cpp
 +++ b/Source/Core/VideoBackends/Vulkan/VKMain.cpp
-@@ -16,6 +16,7 @@
+@@ -7,6 +7,9 @@
+ #include "Common/MsgHandler.h"
+ 
+ #include "VideoBackends/Vulkan/CommandBufferManager.h"
++#ifdef __ORBIS__
++#include "VideoBackends/Vulkan/PS4CommandRecorder.h"
++#endif
+ #include "VideoBackends/Vulkan/ObjectCache.h"
+ #include "VideoBackends/Vulkan/StateTracker.h"
+ #include "VideoBackends/Vulkan/VKBoundingBox.h"
+@@ -16,6 +19,7 @@
  #include "VideoBackends/Vulkan/VKVertexManager.h"
  #include "VideoBackends/Vulkan/VulkanContext.h"
  
@@ -6235,7 +7452,7 @@ index 6338e52..8b389ce 100644
  #include "VideoCommon/TextureCacheBase.h"
  #include "VideoCommon/VideoConfig.h"
  
-@@ -189,6 +190,12 @@ bool VideoBackend::Initialize(const WindowSystemInfo& wsi)
+@@ -189,6 +193,12 @@ bool VideoBackend::Initialize(const WindowSystemInfo& wsi)
  
    // Remaining classes are also dependent on object cache.
    g_object_cache = std::make_unique<ObjectCache>();
@@ -6248,11 +7465,26 @@ index 6338e52..8b389ce 100644
    if (!g_object_cache->Initialize())
    {
      PanicAlertFmt("Failed to initialize Vulkan object cache.");
+@@ -210,7 +220,14 @@ bool VideoBackend::Initialize(const WindowSystemInfo& wsi)
+   }
+ 
+   // Create command buffers. We do this separately because the other classes depend on it.
++#ifdef __ORBIS__
++  // With the PS4 command recorder the video thread must stay its only producer: Dolphin's own
++  // submission thread is off (the recorder's worker submits, in order).
++  g_command_buffer_mgr = std::make_unique<CommandBufferManager>(
++      g_Config.bBackendMultithreading && !PS4CommandRecorderActive());
++#else
+   g_command_buffer_mgr = std::make_unique<CommandBufferManager>(g_Config.bBackendMultithreading);
++#endif
+   size_t swapchain_image_count =
+       surface != VK_NULL_HANDLE ? swap_chain->GetSwapChainImageCount() : 0;
+   if (!g_command_buffer_mgr->Initialize(swapchain_image_count))
 diff --git a/Source/Core/VideoBackends/Vulkan/VKSwapChain.cpp b/Source/Core/VideoBackends/Vulkan/VKSwapChain.cpp
-index 370e22d..b31c24e 100644
+index 370e22d..18c06b5 100644
 --- a/Source/Core/VideoBackends/Vulkan/VKSwapChain.cpp
 +++ b/Source/Core/VideoBackends/Vulkan/VKSwapChain.cpp
-@@ -4,8 +4,10 @@
+@@ -4,14 +4,19 @@
  #include "VideoBackends/Vulkan/VKSwapChain.h"
  
  #include <algorithm>
@@ -6263,7 +7495,16 @@ index 370e22d..b31c24e 100644
  #include "Common/Assert.h"
  #include "Common/Contains.h"
  #include "Common/Logging/Log.h"
-@@ -21,8 +23,118 @@
+ #include "Common/MsgHandler.h"
+ 
+ #include "VideoBackends/Vulkan/CommandBufferManager.h"
++#ifdef __ORBIS__
++#include "VideoBackends/Vulkan/PS4CommandRecorder.h"
++#endif
+ #include "VideoBackends/Vulkan/ObjectCache.h"
+ #include "VideoBackends/Vulkan/VKTexture.h"
+ #include "VideoBackends/Vulkan/VulkanContext.h"
+@@ -21,8 +26,121 @@
  #include <X11/Xlib.h>
  #endif
  
@@ -6331,6 +7572,9 @@ index 370e22d..b31c24e 100644
 +
 +void PS4PresentSwapChainImage(u32 image_index, VkFence fence)
 +{
++  // The flip goes straight to the GPU: the frame's commands (queued by the command recorder)
++  // must have been submitted first.
++  PS4CommandRecorderDrain();
 +  static int s_traced = 0;
 +  const int mode = s_vsync ? ORBIS_VIDEO_OUT_FLIP_VSYNC : ORBIS_VIDEO_OUT_FLIP_HSYNC;
 +  const s64 arg = static_cast<s64>(s_flips_submitted + 1);
@@ -6382,7 +7626,7 @@ index 370e22d..b31c24e 100644
  SwapChain::SwapChain(const WindowSystemInfo& wsi, VkSurfaceKHR surface, bool vsync)
      : m_wsi(wsi), m_surface(surface), m_vsync_enabled(vsync),
        m_fullscreen_supported(g_vulkan_context->SupportsExclusiveFullscreen(wsi, surface))
-@@ -38,6 +150,11 @@ SwapChain::~SwapChain()
+@@ -38,6 +156,11 @@ SwapChain::~SwapChain()
  
  VkSurfaceKHR SwapChain::CreateVulkanSurface(VkInstance instance, const WindowSystemInfo& wsi)
  {
@@ -6394,7 +7638,7 @@ index 370e22d..b31c24e 100644
  #if defined(VK_USE_PLATFORM_WIN32_KHR)
    if (wsi.type == WindowSystemType::Windows)
    {
-@@ -273,6 +390,18 @@ bool SwapChain::SelectPresentMode()
+@@ -273,6 +396,18 @@ bool SwapChain::SelectPresentMode()
  
  bool SwapChain::CreateSwapChain()
  {
@@ -6413,7 +7657,7 @@ index 370e22d..b31c24e 100644
    // Look up surface properties to determine image count and dimensions
    VkSurfaceCapabilitiesKHR surface_capabilities;
    VkResult res = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(g_vulkan_context->GetPhysicalDevice(),
-@@ -407,6 +536,87 @@ bool SwapChain::CreateSwapChain()
+@@ -407,6 +542,87 @@ bool SwapChain::CreateSwapChain()
  bool SwapChain::SetupSwapChainImages()
  {
    ASSERT(m_swap_chain_images.empty());
@@ -6501,7 +7745,7 @@ index 370e22d..b31c24e 100644
  
    uint32_t image_count;
    VkResult res =
-@@ -464,6 +674,22 @@ bool SwapChain::SetupSwapChainImages()
+@@ -464,6 +680,22 @@ bool SwapChain::SetupSwapChainImages()
  
  void SwapChain::DestroySwapChainImages()
  {
@@ -6524,7 +7768,7 @@ index 370e22d..b31c24e 100644
    for (auto& it : m_swap_chain_images)
    {
      // Images themselves are cleaned up by the swap chain object
-@@ -477,6 +703,10 @@ void SwapChain::DestroySwapChain()
+@@ -477,6 +709,10 @@ void SwapChain::DestroySwapChain()
  {
    if (m_swap_chain == VK_NULL_HANDLE)
      return;
@@ -6535,7 +7779,7 @@ index 370e22d..b31c24e 100644
  
    // Release exclusive fullscreen before destroying.
    if (m_current_fullscreen_state)
-@@ -488,6 +718,14 @@ void SwapChain::DestroySwapChain()
+@@ -488,6 +724,14 @@ void SwapChain::DestroySwapChain()
  
  VkResult SwapChain::AcquireNextImage()
  {
@@ -6550,7 +7794,7 @@ index 370e22d..b31c24e 100644
    VkResult res = vkAcquireNextImageKHR(g_vulkan_context->GetDevice(), m_swap_chain, UINT64_MAX,
                                         g_command_buffer_mgr->GetCurrentCommandBufferSemaphore(),
                                         VK_NULL_HANDLE, &m_current_swap_chain_image_index);
-@@ -612,6 +850,10 @@ bool SwapChain::RecreateSurface(void* native_handle)
+@@ -612,6 +856,10 @@ bool SwapChain::RecreateSurface(void* native_handle)
  
  void SwapChain::DestroySurface()
  {
@@ -6669,10 +7913,20 @@ index d388300..a69781a 100644
  
    // convert std::string list to a char pointer list which we can feed in
 diff --git a/Source/Core/VideoBackends/Vulkan/VulkanLoader.cpp b/Source/Core/VideoBackends/Vulkan/VulkanLoader.cpp
-index a761a81..3416e1f 100644
+index a761a81..22dd606 100644
 --- a/Source/Core/VideoBackends/Vulkan/VulkanLoader.cpp
 +++ b/Source/Core/VideoBackends/Vulkan/VulkanLoader.cpp
-@@ -41,6 +41,15 @@ static void ResetVulkanLibraryFunctionPointers()
+@@ -3,6 +3,9 @@
+ 
+ #define VMA_IMPLEMENTATION
+ #include "VideoBackends/Vulkan/VulkanLoader.h"
++#ifdef __ORBIS__
++#include "VideoBackends/Vulkan/PS4CommandRecorder.h"
++#endif
+ 
+ #if defined(ANDROID)
+ #include <adrenotools/driver.h>
+@@ -41,6 +44,15 @@ static void ResetVulkanLibraryFunctionPointers()
  
  static Common::DynamicLibrary s_vulkan_module;
  
@@ -6688,7 +7942,7 @@ index a761a81..3416e1f 100644
  static bool OpenVulkanLibrary(bool force_system_library)
  {
  #if defined(__APPLE__)
-@@ -94,6 +103,25 @@ static bool OpenVulkanLibrary(bool force_system_library)
+@@ -94,6 +106,25 @@ static bool OpenVulkanLibrary(bool force_system_library)
  
  bool LoadVulkanLibrary(bool force_system_library)
  {
@@ -6713,6 +7967,18 @@ index a761a81..3416e1f 100644
 +#endif
    if (!s_vulkan_module.IsOpen() && !OpenVulkanLibrary(force_system_library))
      return false;
+ 
+@@ -155,6 +186,11 @@ bool LoadVulkanDeviceFunctions(VkDevice device)
+ #include "VideoBackends/Vulkan/VulkanEntryPoints.inl"
+ #undef VULKAN_DEVICE_ENTRY_POINT
+ 
++#ifdef __ORBIS__
++  // ps4.ini vk_thread=on: record Vulkan commands on a worker thread (PS4CommandRecorder.cpp).
++  if (!required_functions_missing)
++    PS4InstallCommandRecorder();
++#endif
+   return !required_functions_missing;
+ }
  
 diff --git a/Source/Core/VideoCommon/CommandProcessor.cpp b/Source/Core/VideoCommon/CommandProcessor.cpp
 index 1dbf466..b66cbac 100644
