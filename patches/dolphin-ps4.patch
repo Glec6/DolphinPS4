@@ -10001,7 +10001,7 @@ index 92f7c1f..3378a49 100644
      m_default_pixel_shader = g_gfx->CreateShaderFromSource(
          ShaderStage::Pixel, GetHeader(false) + default_pixel_shader_code + GetFooter(), nullptr,
 diff --git a/Source/Core/VideoCommon/Present.cpp b/Source/Core/VideoCommon/Present.cpp
-index 41d05f3..214eb4b 100644
+index 41d05f3..97712cc 100644
 --- a/Source/Core/VideoCommon/Present.cpp
 +++ b/Source/Core/VideoCommon/Present.cpp
 @@ -3,6 +3,11 @@
@@ -10043,7 +10043,25 @@ index 41d05f3..214eb4b 100644
  
      // Draw a blank frame (and complete OnScreenUI initialization)
      g_gfx->BindBackbuffer({{0.0f, 0.0f, 0.0f, 1.0f}});
-@@ -431,8 +446,23 @@ Presenter::ConvertStereoRectangle(const MathUtil::Rectangle<int>& rc) const
+@@ -136,8 +151,17 @@ bool Presenter::Initialize()
+   return true;
+ }
+ 
++#ifdef __ORBIS__
++extern "C" u32 ps4_tex_hash_epoch;  // TextureCacheBase.cpp
++#endif
++
+ bool Presenter::FetchXFB(u32 xfb_addr, u32 fb_width, u32 fb_stride, u32 fb_height, u64 ticks)
+ {
++#ifdef __ORBIS__
++  // Texture hash memo (tex_hash_once): the XFB may have been written by the CPU since the last
++  // lookup, even in a frame without draws.
++  ps4_tex_hash_epoch++;
++#endif
+   ReleaseXFBContentLock();
+   u64 old_xfb_id = m_last_xfb_id;
+ 
+@@ -431,8 +455,23 @@ Presenter::ConvertStereoRectangle(const MathUtil::Rectangle<int>& rc) const
    return std::make_tuple(left_rc, right_rc);
  }
  
@@ -10067,7 +10085,7 @@ index 41d05f3..214eb4b 100644
    if (!g_ActiveConfig.bCropCustom)
      return MathUtil::Rectangle<int>(0, 0, 0, 0);
  
-@@ -464,7 +494,11 @@ MathUtil::Rectangle<int> Presenter::AdjustForCustomCrop(const MathUtil::Rectangl
+@@ -464,7 +503,11 @@ MathUtil::Rectangle<int> Presenter::AdjustForCustomCrop(const MathUtil::Rectangl
  
  float Presenter::AdjustAspectRatioForCustomCrop(float input_aspect_ratio) const
  {
@@ -10079,7 +10097,7 @@ index 41d05f3..214eb4b 100644
      return input_aspect_ratio;
  
    const MathUtil::Rectangle<int> rect = m_xfb_rect;
-@@ -903,10 +937,131 @@ void Presenter::RenderXFBToScreen(const MathUtil::Rectangle<int>& target_rc,
+@@ -903,10 +946,131 @@ void Presenter::RenderXFBToScreen(const MathUtil::Rectangle<int>& target_rc,
    }
  }
  
@@ -10211,7 +10229,7 @@ index 41d05f3..214eb4b 100644
    if (g_gfx->IsHeadless() || (!m_onscreen_ui && !m_xfb_entry))
      return;
  
-@@ -934,7 +1089,18 @@ void Presenter::Present(PresentInfo* present_info)
+@@ -934,7 +1098,18 @@ void Presenter::Present(PresentInfo* present_info)
    UpdateDrawRectangle();
  
    g_gfx->BeginUtilityDrawing();
@@ -10230,7 +10248,7 @@ index 41d05f3..214eb4b 100644
  
    // Render the XFB to the screen.
    if (backbuffer_bound && m_xfb_entry)
-@@ -945,7 +1111,52 @@ void Presenter::Present(PresentInfo* present_info)
+@@ -945,7 +1120,52 @@ void Presenter::Present(PresentInfo* present_info)
      AdjustRectanglesToFitBounds(&render_target_rc, &render_source_rc, m_backbuffer_width,
                                  m_backbuffer_height);
      RenderXFBToScreen(render_target_rc, m_xfb_entry->texture.get(), render_source_rc);
