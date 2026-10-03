@@ -1533,7 +1533,7 @@ index 8f30be8..0d6a0e4 100644
  }
  
 diff --git a/Source/Core/Core/PowerPC/Jit64/Jit.cpp b/Source/Core/Core/PowerPC/Jit64/Jit.cpp
-index 1248b1a..4d5446a 100644
+index 1248b1a..522669b 100644
 --- a/Source/Core/Core/PowerPC/Jit64/Jit.cpp
 +++ b/Source/Core/Core/PowerPC/Jit64/Jit.cpp
 @@ -49,6 +49,11 @@
@@ -1568,7 +1568,66 @@ index 1248b1a..4d5446a 100644
  void Jit64::ImHere(Jit64& jit)
  {
    auto& ppc_state = jit.m_ppc_state;
-@@ -461,7 +479,13 @@ bool Jit64::Cleanup()
+@@ -453,6 +471,58 @@ void Jit64::ImHere(Jit64& jit)
+   been_here[ppc_state.pc] = 1;
+ }
+ 
++#ifdef __ORBIS__
++// PS4: lfs -> stfs forwarding. Games copy single-precision data with lfs/stfs (Crash Bandicoot:
++// The Wrath of Cortex sends its vertices to the gather pipe that way, ~9% of the CPU thread).
++// Each lfs converts single -> double and each stfs converts back (bit-exactly, which takes about
++// 20 x86 instructions per value on this path). When the stored register still holds what an lfs
++// in this block loaded, the stfs can store the loaded bits themselves: lfs keeps its 32 bits in
++// ppcState, stfs reloads them. Bit-exact by construction (the original memory contents).
++void Jit64::PS4AnalyzeRawSingles(u32 num_instructions)
++{
++  m_ps4_raw_single.assign(num_instructions, 0);
++  if (bJITLoadStoreFloatingOff)
++    return;
++  const auto is_lfs = [](UGeckoInstruction inst) {
++    // lfs, lfsu, lfsx, lfsux. lfs/lfsu with rA = 0 fall back to the interpreter (lfXXX).
++    if (inst.OPCD == 48 || inst.OPCD == 49)
++      return inst.RA != 0;
++    return inst.OPCD == 31 && (inst.SUBOP10 == 535 || inst.SUBOP10 == 567);
++  };
++  const auto is_stfs = [](UGeckoInstruction inst) {
++    // stfs, stfsu, stfsx, stfsux
++    return inst.OPCD == 52 || inst.OPCD == 53 ||
++           (inst.OPCD == 31 && (inst.SUBOP10 == 663 || inst.SUBOP10 == 695));
++  };
++  s32 producer[32];
++  for (s32& p : producer)
++    p = -1;
++  for (u32 i = 0; i < num_instructions; i++)
++  {
++    const PPCAnalyst::CodeOp& op = m_code_buffer[i];
++    if (op.skip)
++    {
++      if (op.fregOut >= 0)
++        producer[op.fregOut] = -1;
++      continue;
++    }
++    if (is_stfs(op.inst) && producer[op.inst.RS] >= 0)
++    {
++      m_ps4_raw_single[i] |= 2;
++      m_ps4_raw_single[producer[op.inst.RS]] |= 1;
++    }
++    if (op.fregOut >= 0)
++      producer[op.fregOut] = is_lfs(op.inst) ? static_cast<s32>(i) : -1;
++  }
++}
++
++u8 Jit64::PS4RawSingleFlags() const
++{
++  const size_t index = static_cast<size_t>(js.op - m_code_buffer.data());
++  return index < m_ps4_raw_single.size() ? m_ps4_raw_single[index] : 0;
++}
++#endif
++
+ bool Jit64::Cleanup()
+ {
+   bool did_something = false;
+@@ -461,7 +531,13 @@ bool Jit64::Cleanup()
    {
      MOV(64, R(RSCRATCH), PPCSTATE(gather_pipe_ptr));
      SUB(64, R(RSCRATCH), PPCSTATE(gather_pipe_base_ptr));
@@ -1582,7 +1641,18 @@ index 1248b1a..4d5446a 100644
      FixupBranch exit = J_CC(CC_L);
      ABI_PushRegistersAndAdjustStack({}, 0);
      ABI_CallFunctionP(GPFifo::UpdateGatherPipe, &m_system.GetGPFifo());
-@@ -1018,8 +1042,15 @@ bool Jit64::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
+@@ -992,6 +1068,10 @@ bool Jit64::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
+     IntializeSpeculativeConstants();
+   }
+ 
++#ifdef __ORBIS__
++  PS4AnalyzeRawSingles(code_block.m_num_instructions);
++#endif
++
+   // Translate instructions
+   for (u32 i = 0; i < code_block.m_num_instructions; i++)
+   {
+@@ -1018,8 +1098,15 @@ bool Jit64::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
        bool gatherPipeIntCheck = js.fifoWriteAddresses.contains(prev_address);
  
        // Gather pipe writes using an immediate address are explicitly tracked.
@@ -1600,7 +1670,7 @@ index 1248b1a..4d5446a 100644
          js.fifoBytesSinceCheck = 0;
          js.mustCheckFifo = false;
 diff --git a/Source/Core/Core/PowerPC/Jit64/Jit.h b/Source/Core/Core/PowerPC/Jit64/Jit.h
-index da1be2d..ad041b0 100644
+index da1be2d..26336a6 100644
 --- a/Source/Core/Core/PowerPC/Jit64/Jit.h
 +++ b/Source/Core/Core/PowerPC/Jit64/Jit.h
 @@ -167,6 +167,9 @@ public:
@@ -1613,6 +1683,20 @@ index da1be2d..ad041b0 100644
    void HLEFunction(u32 hook_index);
  
    void DynaRunTable4(UGeckoInstruction inst);
+@@ -238,6 +241,13 @@ public:
+   void cntlzwx(UGeckoInstruction inst);
+ 
+   void lfXXX(UGeckoInstruction inst);
++#ifdef __ORBIS__
++  // Per instruction of the block being compiled: 1 = an lfs whose raw bits a later stfs reuses,
++  // 2 = an stfs that stores those raw bits.
++  void PS4AnalyzeRawSingles(u32 num_instructions);
++  u8 PS4RawSingleFlags() const;
++  std::vector<u8> m_ps4_raw_single;
++#endif
+   void stfXXX(UGeckoInstruction inst);
+   void stfiwx(UGeckoInstruction inst);
+   void psq_lXX(UGeckoInstruction inst);
 diff --git a/Source/Core/Core/PowerPC/Jit64/Jit64_Tables.cpp b/Source/Core/Core/PowerPC/Jit64/Jit64_Tables.cpp
 index be5458b..a507294 100644
 --- a/Source/Core/Core/PowerPC/Jit64/Jit64_Tables.cpp
@@ -1654,10 +1738,46 @@ index be5458b..a507294 100644
  
  constexpr std::array<Jit64OpTemplate, 9> s_table59{{
 diff --git a/Source/Core/Core/PowerPC/Jit64/Jit_LoadStoreFloating.cpp b/Source/Core/Core/PowerPC/Jit64/Jit_LoadStoreFloating.cpp
-index 4d64010..f3a1816 100644
+index 4d64010..6b53156 100644
 --- a/Source/Core/Core/PowerPC/Jit64/Jit_LoadStoreFloating.cpp
 +++ b/Source/Core/Core/PowerPC/Jit64/Jit_LoadStoreFloating.cpp
-@@ -120,8 +120,37 @@ void Jit64::stfXXX(UGeckoInstruction inst)
+@@ -8,6 +8,7 @@
+ #include "Common/x64Emitter.h"
+ #include "Core/PowerPC/Jit64/RegCache/JitRegCache.h"
+ #include "Core/PowerPC/Jit64Common/Jit64Constants.h"
++#include "Core/PowerPC/Jit64Common/Jit64PowerPCState.h"
+ 
+ using namespace Gen;
+ 
+@@ -71,6 +72,12 @@ void Jit64::lfXXX(UGeckoInstruction inst)
+     registersInUse[RSCRATCH2] = true;
+   SafeLoadToReg(RSCRATCH, addr, single ? 32 : 64, offset, registersInUse, false);
+ 
++#ifdef __ORBIS__
++  // A later stfs in this block stores this value unchanged: keep the loaded bits for it.
++  if (single && (PS4RawSingleFlags() & 1))
++    MOV(32, MDisp(RPPCSTATE, PPCSTATE_OFF_ARRAY(ps4_raw_single, d)), R(RSCRATCH));
++#endif
++
+   if (single)
+   {
+     ConvertSingleToDouble(Rd, RSCRATCH, true);
+@@ -109,6 +116,14 @@ void Jit64::stfXXX(UGeckoInstruction inst)
+ 
+   if (single)
+   {
++#ifdef __ORBIS__
++    if (PS4RawSingleFlags() & 2)
++    {
++      // The register still holds what an lfs in this block loaded: store the loaded bits.
++      MOV(32, R(RSCRATCH), MDisp(RPPCSTATE, PPCSTATE_OFF_ARRAY(ps4_raw_single, s)));
++    }
++    else
++#endif
+     if (js.fpr_is_store_safe[s] && js.op->fprIsSingle[s])
+     {
+       RCOpArg Rs = fpr.Use(s, RCMode::Read);
+@@ -120,8 +135,37 @@ void Jit64::stfXXX(UGeckoInstruction inst)
      {
        RCX64Reg Rs = fpr.Bind(s, RCMode::Read);
        RegCache::Realize(Rs);
@@ -1683,14 +1803,14 @@ index 4d64010..f3a1816 100644
 +
 +      SwitchToFarCode();
 +      SetJumpTarget(denormal);
-       MOVAPD(XMM0, Rs);
-       CALL(asm_routines.cdts);
++      MOVAPD(XMM0, Rs);
++      CALL(asm_routines.cdts);
 +      FixupBranch back = J(Jump::Near);
 +      SwitchToNearCode();
 +      SetJumpTarget(back);
 +#else
-+      MOVAPD(XMM0, Rs);
-+      CALL(asm_routines.cdts);
+       MOVAPD(XMM0, Rs);
+       CALL(asm_routines.cdts);
 +#endif
      }
    }
@@ -2153,6 +2273,23 @@ index 564d74d..481ff15 100644
    ppc_state.feature_flags = static_cast<CPUEmuFeatureFlags>(((ppc_state.msr.Hex >> 4) & 0x3) |
                                                              (perfmon ? FEATURE_FLAG_PERFMON : 0));
  }
+diff --git a/Source/Core/Core/PowerPC/PowerPC.h b/Source/Core/Core/PowerPC/PowerPC.h
+index 8d84ed1..d1377b7 100644
+--- a/Source/Core/Core/PowerPC/PowerPC.h
++++ b/Source/Core/Core/PowerPC/PowerPC.h
+@@ -231,6 +231,12 @@ struct PowerPCState
+ 
+   void UpdateFPRFDouble(double dvalue);
+   void UpdateFPRFSingle(float fvalue);
++
++#ifdef __ORBIS__
++  // Jit64 on PS4: the raw 32 bits an lfs loaded, for a later stfs of the same, unchanged register
++  // in the same block (see Jit64::PS4AnalyzeRawSingles). Scratch storage, not guest state.
++  u32 ps4_raw_single[32] = {};
++#endif
+ };
+ 
+ #ifdef _M_X86_64
 diff --git a/Source/Core/DolphinNoGUI/CMakeLists.txt b/Source/Core/DolphinNoGUI/CMakeLists.txt
 index 51c3fff..8e91ab7 100644
 --- a/Source/Core/DolphinNoGUI/CMakeLists.txt
