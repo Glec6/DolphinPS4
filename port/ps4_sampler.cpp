@@ -485,6 +485,29 @@ extern "C" void ps4_dump_thread_stacks(const char* path, const char* reason) {
     close(fd);
 }
 
+// Per-thread CPU time for the monitor: busy threads (CPU thread 0, video thread 1) read their own
+// CPU clock now and then; the monitor divides the growth by wall time. Shows how close a thread
+// is to its limit and whether something else shares its core (the sampler can't see that).
+namespace {
+constexpr clockid_t kThreadCpuClock = 14;  // FreeBSD CLOCK_THREAD_CPUTIME_ID
+std::atomic<uint64_t> g_thread_cpu_ns[2];
+}  // namespace
+
+extern "C" void ps4_thread_cpu_sample(int slot) {
+    timespec ts;
+    if (slot < 0 || slot > 1 || clock_gettime(kThreadCpuClock, &ts) != 0)
+        return;
+    g_thread_cpu_ns[slot].store(static_cast<uint64_t>(ts.tv_sec) * 1000000000ull +
+                                    static_cast<uint64_t>(ts.tv_nsec),
+                                std::memory_order_relaxed);
+}
+
+extern "C" double ps4_thread_cpu_seconds(int slot) {
+    if (slot < 0 || slot > 1)
+        return 0;
+    return g_thread_cpu_ns[slot].load(std::memory_order_relaxed) / 1e9;
+}
+
 extern "C" void ps4_sampler_register_thread(const char* name) {
     ps4_watch_thread(name);
     const int index = g_thread_count.load();

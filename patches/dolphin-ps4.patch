@@ -1237,7 +1237,7 @@ index fc614fd..25a840f 100644
    {
      system.GetPowerPC().SetMode(PowerPC::CoreMode::JIT);
 diff --git a/Source/Core/Core/CoreTiming.cpp b/Source/Core/Core/CoreTiming.cpp
-index 1fa39d7..4122fa1 100644
+index 1fa39d7..92334cb 100644
 --- a/Source/Core/Core/CoreTiming.cpp
 +++ b/Source/Core/Core/CoreTiming.cpp
 @@ -21,6 +21,7 @@
@@ -1248,18 +1248,19 @@ index 1fa39d7..4122fa1 100644
  #include "Core/HW/SystemTimers.h"
  #include "Core/PowerPC/PowerPC.h"
  #include "Core/System.h"
-@@ -32,6 +33,10 @@
+@@ -32,6 +33,11 @@
  #include "VideoCommon/VideoConfig.h"
  #include "VideoCommon/VideoEvents.h"
  
 +#ifdef __ORBIS__
 +extern "C" int ps4_fifo_defer;  // VideoCommon/Fifo.cpp (ps4.ini fifo_defer)
++extern "C" void ps4_thread_cpu_sample(int slot);  // port/ps4_sampler.cpp
 +#endif
 +
  namespace CoreTiming
  {
  static constexpr int MAX_SLICE_LENGTH = 20000;
-@@ -346,6 +351,11 @@ void CoreTimingManager::MoveEvents()
+@@ -346,6 +352,16 @@ void CoreTimingManager::MoveEvents()
  
  void CoreTimingManager::Advance()
  {
@@ -1267,6 +1268,11 @@ index 1fa39d7..4122fa1 100644
 +  // fifo_defer: bursts left in the gather pipe by JIT blocks reach the GPU at least once per slice.
 +  if (ps4_fifo_defer)
 +    m_system.GetGPFifo().FastCheckGatherPipe();
++  {
++    static u32 s_advances = 0;
++    if ((++s_advances & 255) == 0)
++      ps4_thread_cpu_sample(0);  // CPU thread's own CPU time (DolphinNoGUI monitor)
++  }
 +#endif
    CPUThreadConfigCallback::CheckForConfigChanges();
  
@@ -2109,6 +2115,44 @@ index 8c12ead..679ffbd 100644
    enum class TranslateAddressResultEnum : u8
    {
      BAT_TRANSLATED,
+diff --git a/Source/Core/Core/PowerPC/PowerPC.cpp b/Source/Core/Core/PowerPC/PowerPC.cpp
+index 564d74d..481ff15 100644
+--- a/Source/Core/Core/PowerPC/PowerPC.cpp
++++ b/Source/Core/Core/PowerPC/PowerPC.cpp
+@@ -704,9 +704,22 @@ void RoundingModeUpdated(PowerPCState& ppc_state)
+   Common::FPU::SetSIMDMode(ppc_state.fpscr.RN, ppc_state.fpscr.NI);
+ }
+ 
++#ifdef __ORBIS__
++// ps4.ini perfmon=off: games that switch on the performance counters (Crash Bandicoot: The Wrath
++// of Cortex) make every JIT block exit call UpdatePerformanceMonitor - once per vertex in its
++// hottest loop. With this off the counters stay at zero (retail games only use them for debug
++// displays).
++extern "C" int ps4_perfmon;
++int ps4_perfmon = 1;
++#define PS4_PERFMON_ENABLED ps4_perfmon
++#else
++#define PS4_PERFMON_ENABLED 1
++#endif
++
+ void MMCRUpdated(PowerPCState& ppc_state)
+ {
+-  const bool perfmon = ppc_state.spr[SPR_MMCR0] || ppc_state.spr[SPR_MMCR1];
++  const bool perfmon =
++      PS4_PERFMON_ENABLED && (ppc_state.spr[SPR_MMCR0] || ppc_state.spr[SPR_MMCR1]);
+   ppc_state.feature_flags = static_cast<CPUEmuFeatureFlags>(
+       (ppc_state.feature_flags & ~FEATURE_FLAG_PERFMON) | (perfmon ? FEATURE_FLAG_PERFMON : 0));
+ }
+@@ -718,7 +731,8 @@ void RecalculateAllFeatureFlags(PowerPCState& ppc_state)
+   static_assert(FEATURE_FLAG_MSR_DR == 1 << 0);
+   static_assert(FEATURE_FLAG_MSR_IR == 1 << 1);
+ 
+-  const bool perfmon = ppc_state.spr[SPR_MMCR0] || ppc_state.spr[SPR_MMCR1];
++  const bool perfmon =
++      PS4_PERFMON_ENABLED && (ppc_state.spr[SPR_MMCR0] || ppc_state.spr[SPR_MMCR1]);
+   ppc_state.feature_flags = static_cast<CPUEmuFeatureFlags>(((ppc_state.msr.Hex >> 4) & 0x3) |
+                                                             (perfmon ? FEATURE_FLAG_PERFMON : 0));
+ }
 diff --git a/Source/Core/DolphinNoGUI/CMakeLists.txt b/Source/Core/DolphinNoGUI/CMakeLists.txt
 index 51c3fff..8e91ab7 100644
 --- a/Source/Core/DolphinNoGUI/CMakeLists.txt
@@ -2141,7 +2185,7 @@ index 51c3fff..8e91ab7 100644
 +  ps4_add_eboot(dolphin-nogui)
 +endif()
 diff --git a/Source/Core/DolphinNoGUI/MainNoGUI.cpp b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
-index 3bf40ea..95c74e1 100644
+index 3bf40ea..26e45a9 100644
 --- a/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 +++ b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 @@ -5,7 +5,9 @@
@@ -2176,7 +2220,7 @@ index 3bf40ea..95c74e1 100644
  #include "UICommon/CommandLineParse.h"
  #ifdef USE_DISCORD_PRESENCE
  #include "UICommon/DiscordPresence.h"
-@@ -31,6 +40,24 @@
+@@ -31,6 +40,25 @@
  
  static std::unique_ptr<Platform> s_platform;
  
@@ -2189,6 +2233,7 @@ index 3bf40ea..95c74e1 100644
 +extern "C" void ps4_sampler_start();  // DolphinPS4 port/ps4_sampler.cpp
 +extern "C" int ps4_fifo_batch;  // VideoCommon/Fifo.cpp
 +extern "C" int ps4_fifo_defer;  // VideoCommon/Fifo.cpp
++extern "C" int ps4_perfmon;     // Core/PowerPC/PowerPC.cpp
 +extern "C" size_t sceKernelGetDirectMemorySize();  // libkernel
 +extern "C" void ps4_boot_trace(const char* line);  // DolphinPS4 port/ps4_crashlog.cpp
 +extern "C" int ps4_uniform_merge_mode;  // VideoBackends/OGL/OGLGfx.cpp
@@ -2201,7 +2246,7 @@ index 3bf40ea..95c74e1 100644
  static void signal_handler(int)
  {
    constexpr char message[] = "A signal was received. A second signal will force Dolphin to stop.\n";
-@@ -173,6 +200,10 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
+@@ -173,6 +201,10 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
    if (platform_name == "macos" || platform_name.empty())
      return Platform::CreateMacOSPlatform();
  #endif
@@ -2212,7 +2257,7 @@ index 3bf40ea..95c74e1 100644
  
    if (platform_name == "headless" || platform_name.empty())
      return Platform::CreateHeadlessPlatform();
-@@ -184,8 +215,17 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
+@@ -184,8 +216,17 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
  #define main app_main
  #endif
  
@@ -2231,7 +2276,7 @@ index 3bf40ea..95c74e1 100644
    const auto parser =
        CommandLineParse::CreateParser(CommandLineParse::ParserOptions::OmitGUIOptions);
    parser->add_option("-p", "--platform")
-@@ -207,6 +247,10 @@ int main(const int argc, char* argv[])
+@@ -207,6 +248,10 @@ int main(const int argc, char* argv[])
  #ifdef __APPLE__
                  ,
                  "macos"
@@ -2242,7 +2287,7 @@ index 3bf40ea..95c74e1 100644
  #endif
        });
  
-@@ -270,7 +314,173 @@ int main(const int argc, char* argv[])
+@@ -270,7 +315,175 @@ int main(const int argc, char* argv[])
  
    UICommon::SetUserDirectory(user_directory);
    UICommon::Init();
@@ -2351,6 +2396,8 @@ index 3bf40ea..95c74e1 100644
 +    // 32 bytes (VideoCommon/Fifo.cpp). Faster for games that send lots of GPU commands (Crash);
 +    // FIFO watermark interrupts are then checked per batch.
 +    ps4_fifo_batch = Platform::GetPS4Option("fifo_batch", "off") == "on";
++    // perfmon=off: ignore the emulated CPU's performance counters (see PowerPC.cpp).
++    ps4_perfmon = Platform::GetPS4Option("perfmon", "on") == "on";
 +    // fifo_defer=on (with fifo_batch): JIT blocks leave GPU commands in the gather pipe until
 +    // 128 bytes collect (flushed before any hardware register access and every timing slice).
 +    ps4_fifo_defer = ps4_fifo_batch && Platform::GetPS4Option("fifo_defer", "off") == "on";
@@ -2416,7 +2463,7 @@ index 3bf40ea..95c74e1 100644
  
    Common::ScopeGuard ui_common_guard([] {
      UICommon::ShutdownControllers();
-@@ -284,6 +494,12 @@ int main(const int argc, char* argv[])
+@@ -284,6 +497,12 @@ int main(const int argc, char* argv[])
    }
  
    auto core_state_changed_hook = Core::AddOnStateChangedCallback([](const Core::State state) {
@@ -2429,7 +2476,7 @@ index 3bf40ea..95c74e1 100644
      if (state == Core::State::Uninitialized)
        s_platform->Stop();
    });
-@@ -303,6 +519,9 @@ int main(const int argc, char* argv[])
+@@ -303,6 +522,9 @@ int main(const int argc, char* argv[])
  
    DolphinAnalytics::Instance().ReportDolphinStart("nogui");
  
@@ -2470,10 +2517,10 @@ index f4dc8a9..4e5ff67 100644
  
 diff --git a/Source/Core/DolphinNoGUI/PlatformPS4.cpp b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
 new file mode 100644
-index 0000000..018599b
+index 0000000..c5e4142
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
-@@ -0,0 +1,554 @@
+@@ -0,0 +1,575 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -2513,6 +2560,7 @@ index 0000000..018599b
 +
 +extern "C" long long ps4_map_count, ps4_unmap_count, ps4_map_internal_bytes;  // MemArenaPS4
 +extern "C" long long ps4_pt_groups_mapped, ps4_pt_groups_refused;              // Memmap.cpp
++extern "C" double ps4_thread_cpu_seconds(int slot);  // port/ps4_sampler.cpp
 +extern "C" unsigned long long ps4_soft_tlb_hits, ps4_soft_tlb_misses;           // MMU.cpp
 +extern "C" long long ps4_compile_internal_bytes, ps4_link_internal_bytes;  // ProgramShaderCache
 +#include "Core/System.h"
@@ -2784,6 +2832,26 @@ index 0000000..018599b
 +                 ", page groups mapped %lld refused %lld, soft TLB hits %llu misses %llu",
 +                 ps4_pt_groups_mapped, ps4_pt_groups_refused, ps4_soft_tlb_hits,
 +                 ps4_soft_tlb_misses);
++      }
++      {
++        // How busy the CPU and video threads really are (their own CPU time per wall time):
++        // under ~95% at full speed means room for a higher cpu_clock.
++        static double s_last_wall = 0, s_last_cpu[2] = {};
++        const double wall = std::chrono::duration<double>(
++                                std::chrono::steady_clock::now().time_since_epoch())
++                                .count();
++        double busy[2] = {-1, -1};
++        for (int i = 0; i < 2; i++)
++        {
++          const double cpu = ps4_thread_cpu_seconds(i);
++          if (s_last_wall > 0 && cpu > 0 && s_last_cpu[i] > 0)
++            busy[i] = 100.0 * (cpu - s_last_cpu[i]) / (wall - s_last_wall);
++          s_last_cpu[i] = cpu;
++        }
++        s_last_wall = wall;
++        const size_t used = strlen(line);
++        snprintf(line + used, sizeof(line) - used, ", thread busy: cpu %.0f%% video %.0f%%",
++                 busy[0], busy[1]);
 +      }
 +      BootTrace(line);
 +      LogProfile();
@@ -6283,7 +6351,7 @@ index 976592c..a20137f 100644
    void UpdateInterruptsFromVideoBackend(u64 userdata);
  
 diff --git a/Source/Core/VideoCommon/Fifo.cpp b/Source/Core/VideoCommon/Fifo.cpp
-index f183c93..21763ca 100644
+index f183c93..e24ee59 100644
 --- a/Source/Core/VideoCommon/Fifo.cpp
 +++ b/Source/Core/VideoCommon/Fifo.cpp
 @@ -2,6 +2,7 @@
@@ -6320,7 +6388,7 @@ index f183c93..21763ca 100644
  }
  
  // The deterministic_gpu_thread version.
-@@ -283,6 +300,21 @@ void FifoManager::ResetVideoBuffer()
+@@ -283,10 +300,33 @@ void FifoManager::ResetVideoBuffer()
  
  // Description: Main FIFO update loop
  // Purpose: Keep the Core HW updated about the CPU-GPU distance
@@ -6335,6 +6403,7 @@ index f183c93..21763ca 100644
 +// reconfigure its FIFO.
 +extern "C" int ps4_fifo_defer;
 +int ps4_fifo_defer = 0;
++extern "C" void ps4_thread_cpu_sample(int slot);  // port/ps4_sampler.cpp
 +namespace Fifo
 +{
 +#endif
@@ -6342,7 +6411,18 @@ index f183c93..21763ca 100644
  void FifoManager::RunGpuLoop()
  {
    m_gpu_mainloop.Run(
-@@ -302,6 +334,7 @@ void FifoManager::RunGpuLoop()
+       [this] {
++#ifdef __ORBIS__
++        {
++          static u32 s_passes = 0;
++          if ((++s_passes & 255) == 0)
++            ps4_thread_cpu_sample(1);  // video thread's own CPU time (DolphinNoGUI monitor)
++        }
++#endif
+         // Run events from the CPU thread.
+         AsyncRequests::GetInstance()->PullEvents();
+ 
+@@ -302,6 +342,7 @@ void FifoManager::RunGpuLoop()
            // See comment in SyncGPU
            if (write_ptr > seen_ptr)
            {
@@ -6350,7 +6430,7 @@ index f183c93..21763ca 100644
              m_video_buffer_read_ptr =
                  OpcodeDecoder::RunFifo(DataReader(m_video_buffer_read_ptr, write_ptr), nullptr);
              m_video_buffer_seen_ptr = write_ptr;
-@@ -324,27 +357,56 @@ void FifoManager::RunGpuLoop()
+@@ -324,27 +365,56 @@ void FifoManager::RunGpuLoop()
  
              u32 cyclesExecuted = 0;
              u32 readPtr = fifo.CPReadPointer.load(std::memory_order_relaxed);
@@ -6416,7 +6496,7 @@ index f183c93..21763ca 100644
              if ((write_ptr - m_video_buffer_read_ptr) == 0)
              {
                fifo.SafeCPReadPointer.store(fifo.CPReadPointer.load(std::memory_order_relaxed),
-@@ -551,7 +613,10 @@ int FifoManager::WaitForGpuThread(int ticks)
+@@ -551,7 +621,10 @@ int FifoManager::WaitForGpuThread(int ticks)
  
    // Wait for GPU
    if (now >= m_config_sync_gpu_max_distance)
