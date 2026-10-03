@@ -223,6 +223,47 @@ index 0000000..c4a90ff
 +  std::array<std::array<s16, FRAMES_PER_BUFFER * 2>, 2> m_buffers{};
 +#endif
 +};
+diff --git a/Source/Core/Common/BlockingLoop.h b/Source/Core/Common/BlockingLoop.h
+index 472a84b..0fa7eb6 100644
+--- a/Source/Core/Common/BlockingLoop.h
++++ b/Source/Core/Common/BlockingLoop.h
+@@ -10,6 +10,11 @@
+ #include "Common/Event.h"
+ #include "Common/Flag.h"
+ 
++#ifdef __ORBIS__
++#include <time.h>
++extern "C" void ps4_wait_add(int slot, long long ns);  // port/ps4_sampler.cpp
++#endif
++
+ namespace Common
+ {
+ // This class provides a synchronized loop.
+@@ -177,6 +182,12 @@ public:
+ 
+       case STATE_SLEEPING:
+         // Just relax
++#ifdef __ORBIS__
++      {
++        // Time the worker sleeps for lack of work (monitor: "waits", the GPU loop).
++        timespec t0, t1;
++        clock_gettime(CLOCK_MONOTONIC, &t0);
++#endif
+         if (timeout > 0)
+         {
+           m_new_work_event.WaitFor(std::chrono::milliseconds(timeout));
+@@ -185,6 +196,11 @@ public:
+         {
+           m_new_work_event.Wait();
+         }
++#ifdef __ORBIS__
++        clock_gettime(CLOCK_MONOTONIC, &t1);
++        ps4_wait_add(1, (t1.tv_sec - t0.tv_sec) * 1000000000ll + (t1.tv_nsec - t0.tv_nsec));
++      }
++#endif
+         break;
+       }
+     }
 diff --git a/Source/Core/Common/CMakeLists.txt b/Source/Core/Common/CMakeLists.txt
 index 97d8ad8..eec1c4a 100644
 --- a/Source/Core/Common/CMakeLists.txt
@@ -3774,10 +3815,10 @@ index f4dc8a9..4e5ff67 100644
  
 diff --git a/Source/Core/DolphinNoGUI/PlatformPS4.cpp b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
 new file mode 100644
-index 0000000..6da7ad0
+index 0000000..25bcab0
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
-@@ -0,0 +1,641 @@
+@@ -0,0 +1,658 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -3822,6 +3863,7 @@ index 0000000..6da7ad0
 +extern "C" int ps4_auto_clock, ps4_auto_clock_min, ps4_auto_clock_max;
 +int ps4_auto_clock = 0, ps4_auto_clock_min = 60, ps4_auto_clock_max = 100;
 +extern "C" unsigned long long ps4_scene_stats[8];       // VideoCommon/Statistics.cpp
++extern "C" long long ps4_wait_total(int slot);            // port/ps4_sampler.cpp
 +extern "C" unsigned long long ps4_soft_tlb_hits, ps4_soft_tlb_misses;           // MMU.cpp
 +extern "C" long long ps4_compile_internal_bytes, ps4_link_internal_bytes;  // ProgramShaderCache
 +#include "Core/System.h"
@@ -4169,6 +4211,22 @@ index 0000000..6da7ad0
 +        {
 +          rate[i] = static_cast<unsigned long long>((ps4_scene_stats[i] - s_last_stats[i]) / period);
 +          s_last_stats[i] = ps4_scene_stats[i];
++        }
++        // Where the threads wait, ms per second: the CPU thread for the GPU thread (FlushGpu), the
++        // GPU thread for work, the video thread for the Vulkan recording thread, GPU fences.
++        {
++          static long long s_last_waits[4] = {};
++          const size_t used3 = strlen(line);
++          long long ms[4];
++          for (int i = 0; i < 4; i++)
++          {
++            const long long total = ps4_wait_total(i);
++            ms[i] = static_cast<long long>((total - s_last_waits[i]) / period / 1000000);
++            s_last_waits[i] = total;
++          }
++          snprintf(line + used3, sizeof(line) - used3,
++                   ", waits ms/s: cpu-for-gpu %lld gpu-idle %lld vk-drain %lld fences %lld", ms[0],
++                   ms[1], ms[2], ms[3]);
 +        }
 +        const size_t used2 = strlen(line);
 +        snprintf(line + used2, sizeof(line) - used2,
@@ -7076,10 +7134,10 @@ index c82417e..e72527d 100644
    {
 diff --git a/Source/Core/VideoBackends/Vulkan/PS4CommandRecorder.cpp b/Source/Core/VideoBackends/Vulkan/PS4CommandRecorder.cpp
 new file mode 100755
-index 0000000..7418c80
+index 0000000..ea6f5a6
 --- /dev/null
 +++ b/Source/Core/VideoBackends/Vulkan/PS4CommandRecorder.cpp
-@@ -0,0 +1,1159 @@
+@@ -0,0 +1,1171 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -7121,6 +7179,7 @@ index 0000000..7418c80
 +int ps4_vk_thread_core = 5;  // ps4.ini vk_thread_core
 +}
 +extern "C" void ps4_boot_trace(const char* stage);
++extern "C" void ps4_wait_add(int slot, long long ns);  // port/ps4_sampler.cpp
 +
 +namespace Vulkan
 +{
@@ -8099,7 +8158,12 @@ index 0000000..7418c80
 +                                                     VkBool32 all, uint64_t timeout)
 +{
 +  PS4CommandRecorderDrain();
-+  return s_real.real_vkWaitForFences(d, n, f, all, timeout);
++  timespec t0, t1;
++  clock_gettime(CLOCK_MONOTONIC, &t0);
++  const VkResult result = s_real.real_vkWaitForFences(d, n, f, all, timeout);
++  clock_gettime(CLOCK_MONOTONIC, &t1);
++  ps4_wait_add(3, (t1.tv_sec - t0.tv_sec) * 1000000000ll + (t1.tv_nsec - t0.tv_nsec));
++  return result;
 +}
 +VKAPI_ATTR VkResult VKAPI_CALL Drain_vkGetFenceStatus(VkDevice d, VkFence f)
 +{
@@ -8185,12 +8249,18 @@ index 0000000..7418c80
 +  // Everything published so far (any thread may drain, e.g. shader compiler threads destroying
 +  // objects; only the video thread records).
 +  const u64 target = s_write.load(std::memory_order_acquire);
++  if (s_read.load(std::memory_order_acquire) >= target)
++    return;
++  timespec t0, t1;
++  clock_gettime(CLOCK_MONOTONIC, &t0);
 +  u32 spins = 0;
 +  while (s_read.load(std::memory_order_acquire) < target)
 +  {
 +    WakeWorker();
 +    Pause(spins);
 +  }
++  clock_gettime(CLOCK_MONOTONIC, &t1);
++  ps4_wait_add(2, (t1.tv_sec - t0.tv_sec) * 1000000000ll + (t1.tv_nsec - t0.tv_nsec));
 +}
 +
 +void PS4InstallCommandRecorder()
@@ -8935,7 +9005,7 @@ index 976592c..a20137f 100644
    void UpdateInterruptsFromVideoBackend(u64 userdata);
  
 diff --git a/Source/Core/VideoCommon/Fifo.cpp b/Source/Core/VideoCommon/Fifo.cpp
-index f183c93..e24ee59 100644
+index f183c93..c34a2d4 100644
 --- a/Source/Core/VideoCommon/Fifo.cpp
 +++ b/Source/Core/VideoCommon/Fifo.cpp
 @@ -2,6 +2,7 @@
@@ -8972,7 +9042,7 @@ index f183c93..e24ee59 100644
  }
  
  // The deterministic_gpu_thread version.
-@@ -283,10 +300,33 @@ void FifoManager::ResetVideoBuffer()
+@@ -283,10 +300,34 @@ void FifoManager::ResetVideoBuffer()
  
  // Description: Main FIFO update loop
  // Purpose: Keep the Core HW updated about the CPU-GPU distance
@@ -8988,6 +9058,7 @@ index f183c93..e24ee59 100644
 +extern "C" int ps4_fifo_defer;
 +int ps4_fifo_defer = 0;
 +extern "C" void ps4_thread_cpu_sample(int slot);  // port/ps4_sampler.cpp
++extern "C" void ps4_wait_add(int slot, long long ns);  // port/ps4_sampler.cpp
 +namespace Fifo
 +{
 +#endif
@@ -9006,7 +9077,7 @@ index f183c93..e24ee59 100644
          // Run events from the CPU thread.
          AsyncRequests::GetInstance()->PullEvents();
  
-@@ -302,6 +342,7 @@ void FifoManager::RunGpuLoop()
+@@ -302,6 +343,7 @@ void FifoManager::RunGpuLoop()
            // See comment in SyncGPU
            if (write_ptr > seen_ptr)
            {
@@ -9014,7 +9085,7 @@ index f183c93..e24ee59 100644
              m_video_buffer_read_ptr =
                  OpcodeDecoder::RunFifo(DataReader(m_video_buffer_read_ptr, write_ptr), nullptr);
              m_video_buffer_seen_ptr = write_ptr;
-@@ -324,27 +365,56 @@ void FifoManager::RunGpuLoop()
+@@ -324,27 +366,56 @@ void FifoManager::RunGpuLoop()
  
              u32 cyclesExecuted = 0;
              u32 readPtr = fifo.CPReadPointer.load(std::memory_order_relaxed);
@@ -9080,7 +9151,24 @@ index f183c93..e24ee59 100644
              if ((write_ptr - m_video_buffer_read_ptr) == 0)
              {
                fifo.SafeCPReadPointer.store(fifo.CPReadPointer.load(std::memory_order_relaxed),
-@@ -551,7 +621,10 @@ int FifoManager::WaitForGpuThread(int ticks)
+@@ -393,7 +464,16 @@ void FifoManager::FlushGpu()
+   if (!m_system.IsDualCoreMode() || m_use_deterministic_gpu_thread)
+     return;
+ 
++#ifdef __ORBIS__
++  // Time the CPU thread waits for the GPU thread (monitor: "waits").
++  timespec t0, t1;
++  clock_gettime(CLOCK_MONOTONIC, &t0);
++  m_gpu_mainloop.Wait();
++  clock_gettime(CLOCK_MONOTONIC, &t1);
++  ps4_wait_add(0, (t1.tv_sec - t0.tv_sec) * 1000000000ll + (t1.tv_nsec - t0.tv_nsec));
++#else
+   m_gpu_mainloop.Wait();
++#endif
+ }
+ 
+ void FifoManager::GpuMaySleep()
+@@ -551,7 +631,10 @@ int FifoManager::WaitForGpuThread(int ticks)
  
    // Wait for GPU
    if (now >= m_config_sync_gpu_max_distance)
