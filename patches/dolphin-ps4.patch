@@ -1342,10 +1342,10 @@ index 31b6c2d..b581034 100644
  void PatchFunctions(Core::System& system)
 diff --git a/Source/Core/Core/HLE/HLE_PS4Games.cpp b/Source/Core/Core/HLE/HLE_PS4Games.cpp
 new file mode 100755
-index 0000000..779e5ee
+index 0000000..3c931fe
 --- /dev/null
 +++ b/Source/Core/Core/HLE/HLE_PS4Games.cpp
-@@ -0,0 +1,453 @@
+@@ -0,0 +1,473 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -1470,14 +1470,23 @@ index 0000000..779e5ee
 +  }
 +  // Hands complete bursts to the command processor once a few have collected (the pipe buffer
 +  // holds 512 bytes; callers write at most 64 bytes between checks).
-+  void PipeCheck()
++  //
++  // Returns true when the loop must stop for now: handing data to the command processor can
++  // raise the CP FIFO's high-watermark interrupt, which Dolphin delivers by ending the CPU's time
++  // slice (ForceExceptionCheck: downcount 0). The game's handler then waits for the GPU to catch
++  // up. A loop that kept going would overrun the FIFO (v02.55: 31 KB written in one call wrapped
++  // over data the GPU hadn't read). The caller then leaves the registers as the original loop has
++  // them at its head and continues there; the hook resumes after the interrupt.
++  bool PipeCheck()
 +  {
 +    if (m_pipe && m_ppc.gather_pipe_ptr - m_ppc.gather_pipe_base_ptr >= 256)
 +    {
 +      const u8* before = m_ppc.gather_pipe_ptr;
 +      m_gpfifo.UpdateGatherPipe();
 +      ps4_hle_flushed += static_cast<u32>(before - m_ppc.gather_pipe_ptr);
++      return m_ppc.downcount <= 0;
 +    }
++    return false;
 +  }
 +
 +  PowerPC::PowerPCState& ppc() { return m_ppc; }
@@ -1598,7 +1607,11 @@ index 0000000..779e5ee
 +    offset += 2;
 +    g.PipeMemory32(attribute + 0x30);
 +    g.PipeMemory32(attribute + 0x34);
-+    g.PipeCheck();
++    if (g.PipeCheck() && count > 1)
++    {
++      count--;
++      break;  // yield at the loop head (see PipeCheck)
++    }
 +  } while (--count != 0);
 +
 +  ppc.gpr[31] = positions;
@@ -1609,8 +1622,8 @@ index 0000000..779e5ee
 +  g.SetFloatRegister(13, attribute + 0x34);
 +  g.SetFloatRegister(12, attribute + 0x28);
 +  (void)last_position;
-+  CTR(ppc) = 0;
-+  ppc.npc = CRASH_CB5C4_EXIT;
++  CTR(ppc) = count;
++  ppc.npc = count != 0 ? CRASH_CB5C4 : CRASH_CB5C4_EXIT;
 +  {
 +    LogCall("cb5c4", s_calls, saved_for_log, ppc, log_count, saved_for_log.gpr[11], pipe_before, flushed_before);
 +  }
@@ -1643,15 +1656,19 @@ index 0000000..779e5ee
 +    g.PipeMemory32(positions + 8);
 +    positions += 24;
 +    g.PipeValue32(colour);
-+    g.PipeCheck();
++    if (g.PipeCheck() && count > 1)
++    {
++      count--;
++      break;  // yield at the loop head (see PipeCheck)
++    }
 +  } while (--count != 0);
 +
 +  ppc.gpr[31] = positions;
 +  g.SetFloatRegister(0, last);
 +  g.SetFloatRegister(13, last + 4);
 +  g.SetFloatRegister(12, last + 8);
-+  CTR(ppc) = 0;
-+  ppc.npc = CRASH_CB694_EXIT;
++  CTR(ppc) = count;
++  ppc.npc = count != 0 ? CRASH_CB694 : CRASH_CB694_EXIT;
 +  {
 +    LogCall("cb694", s_calls, saved_for_log, ppc, log_count, saved_for_log.gpr[9], pipe_before, flushed_before);
 +  }
@@ -1722,7 +1739,8 @@ index 0000000..779e5ee
 +    remaining--;
 +    g.PipeMemory32(record + 0x1c);
 +    g.PipeMemory32(record + 0x20);
-+    g.PipeCheck();
++    if (g.PipeCheck() && static_cast<s32>(remaining) > 0)
++      break;  // yield at the loop head (see PipeCheck)
 +  } while (static_cast<s32>(remaining) > 0);
 +
 +  ppc.gpr[31] = list;
@@ -1733,10 +1751,12 @@ index 0000000..779e5ee
 +  g.SetFloatRegister(0, record + 0x1c);
 +  g.SetFloatRegister(13, record + 0x20);
 +  g.SetFloatRegister(12, record + 0x14);
-+  // subic. r8, r8, 1 with r8 = 1: result 0 (EQ), carry set.
-+  ppc.cr.SetField(0, EQ | (ppc.GetXER_SO() ? 1 : 0));
++  // subic. r8, r8, 1 (r8 was >= 1): carry set; result 0 (EQ, loop done) or positive (GT, the
++  // loop head follows - a yield).
++  constexpr u32 GT = 0x4;
++  ppc.cr.SetField(0, (remaining == 0 ? EQ : GT) | (ppc.GetXER_SO() ? 1 : 0));
 +  ppc.SetCarry(1);
-+  ppc.npc = CRASH_CAF2C_EXIT;
++  ppc.npc = remaining == 0 ? CRASH_CAF2C_EXIT : CRASH_CAF2C;
 +  {
 +    LogCall("caf2c", s_calls, saved_for_log, ppc, log_count, saved_for_log.gpr[10], pipe_before, flushed_before);
 +  }
