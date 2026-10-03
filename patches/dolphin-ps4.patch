@@ -2654,10 +2654,10 @@ index f4dc8a9..4e5ff67 100644
  
 diff --git a/Source/Core/DolphinNoGUI/PlatformPS4.cpp b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
 new file mode 100644
-index 0000000..c5e4142
+index 0000000..1efeec9
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
-@@ -0,0 +1,575 @@
+@@ -0,0 +1,590 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -2698,6 +2698,7 @@ index 0000000..c5e4142
 +extern "C" long long ps4_map_count, ps4_unmap_count, ps4_map_internal_bytes;  // MemArenaPS4
 +extern "C" long long ps4_pt_groups_mapped, ps4_pt_groups_refused;              // Memmap.cpp
 +extern "C" double ps4_thread_cpu_seconds(int slot);  // port/ps4_sampler.cpp
++extern "C" unsigned long long ps4_scene_stats[8];       // VideoCommon/Statistics.cpp
 +extern "C" unsigned long long ps4_soft_tlb_hits, ps4_soft_tlb_misses;           // MMU.cpp
 +extern "C" long long ps4_compile_internal_bytes, ps4_link_internal_bytes;  // ProgramShaderCache
 +#include "Core/System.h"
@@ -2932,7 +2933,7 @@ index 0000000..c5e4142
 +      const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(
 +                               std::chrono::steady_clock::now() - start)
 +                               .count();
-+      char line[1024];
++      char line[2048];
 +      // speed: emulated time per real time; max speed: what the CPU thread could reach if it
 +      // never waited (below 100% means the emulated CPU itself is the bottleneck).
 +      snprintf(line, sizeof(line),
@@ -2989,6 +2990,20 @@ index 0000000..c5e4142
 +        const size_t used = strlen(line);
 +        snprintf(line + used, sizeof(line) - used, ", thread busy: cpu %.0f%% video %.0f%%",
 +                 busy[0], busy[1]);
++        // Scene composition, per second: what the video thread is working through.
++        static unsigned long long s_last_stats[8] = {};
++        unsigned long long rate[8];
++        const double period = s_last_wall > 0 ? 2.0 : 1.0;
++        for (int i = 0; i < 8; i++)
++        {
++          rate[i] = static_cast<unsigned long long>((ps4_scene_stats[i] - s_last_stats[i]) / period);
++          s_last_stats[i] = ps4_scene_stats[i];
++        }
++        const size_t used2 = strlen(line);
++        snprintf(line + used2, sizeof(line) - used2,
++                 ", per s: draws %llu prims %llu vertices %llu efb copies %llu peeks %llu "
++                 "pokes %llu reg loads %llu tex uploads %llu",
++                 rate[0], rate[1], rate[2], rate[6], rate[3], rate[4], rate[5], rate[7]);
 +      }
 +      BootTrace(line);
 +      LogProfile();
@@ -7375,8 +7390,38 @@ index c76f7da..f8afd04 100644
  private:
    static constexpr size_t NUM_PALETTE_CONVERSION_SHADERS = 3;
  
+diff --git a/Source/Core/VideoCommon/Statistics.cpp b/Source/Core/VideoCommon/Statistics.cpp
+index 4a58c6f..4c14379 100644
+--- a/Source/Core/VideoCommon/Statistics.cpp
++++ b/Source/Core/VideoCommon/Statistics.cpp
+@@ -25,8 +25,25 @@ static Common::EventHook s_after_frame_event;
+ 
+ static bool clear_scissors;
+ 
++#ifdef __ORBIS__
++// Scene composition for the PS4 port's monitor (per-second rates): the frame's counters are added
++// up here before they are cleared.
++extern "C" {
++unsigned long long ps4_scene_stats[8];
++}
++#endif
++
+ void Statistics::ResetFrame()
+ {
++#ifdef __ORBIS__
++  ps4_scene_stats[0] += this_frame.num_draw_calls;
++  ps4_scene_stats[1] += this_frame.num_prims + this_frame.num_dl_prims;
++  ps4_scene_stats[2] += this_frame.num_vertices_loaded;
++  ps4_scene_stats[3] += this_frame.num_efb_peeks;
++  ps4_scene_stats[4] += this_frame.num_efb_pokes;
++  ps4_scene_stats[5] += this_frame.num_xf_loads + this_frame.num_bp_loads + this_frame.num_cp_loads;
++  ps4_scene_stats[7] = num_textures_uploaded;
++#endif
+   this_frame = {};
+   clear_scissors = true;
+   if (scissors.size() > 1)
 diff --git a/Source/Core/VideoCommon/TextureCacheBase.cpp b/Source/Core/VideoCommon/TextureCacheBase.cpp
-index 4e4567d..92d5dbb 100644
+index 4e4567d..0286d0e 100644
 --- a/Source/Core/VideoCommon/TextureCacheBase.cpp
 +++ b/Source/Core/VideoCommon/TextureCacheBase.cpp
 @@ -2,6 +2,7 @@
@@ -7395,10 +7440,23 @@ index 4e4567d..92d5dbb 100644
    if (auto entry = LoadImpl(stage, false))
    {
      if (!DidLinkedAssetsChange(*entry))
-@@ -2151,6 +2153,7 @@ void TextureCacheBase::CopyRenderTargetToTexture(
+@@ -2145,12 +2147,20 @@ bool TextureCacheBase::CopyFilterCanOverflow(const std::array<u32, 3>& coefficie
+   return coefficients[0] + coefficients[1] + coefficients[2] >= 128;
+ }
+ 
++#ifdef __ORBIS__
++extern "C" unsigned long long ps4_scene_stats[8];  // Statistics.cpp ([6]: EFB copies)
++#endif
++
+ void TextureCacheBase::CopyRenderTargetToTexture(
+     u32 dstAddr, EFBCopyFormat dstFormat, u32 width, u32 height, u32 dstStride, bool is_depth_copy,
+     const MathUtil::Rectangle<int>& srcRect, bool isIntensity, bool scaleByHalf, float y_scale,
      float gamma, bool clamp_top, bool clamp_bottom,
      const CopyFilterCoefficients::Values& filter_coefficients)
  {
++#ifdef __ORBIS__
++  ps4_scene_stats[6]++;
++#endif
 +  PS4_PROFILE(PS4_PROF_EFB_COPY);
    // Emulation methods:
    //
