@@ -196,9 +196,14 @@ extern "C" void ps4_boot_trace(const char* stage) {
     const double seconds = static_cast<double>(now.tv_sec - s_start.tv_sec) +
                            static_cast<double>(now.tv_nsec - s_start.tv_nsec) / 1e9;
     // One write per line, so lines from different threads don't interleave.
-    char line[512];
+    // Room for the monitor's long lines; a cut line still ends with its newline (a truncated
+    // monitor line used to run into the next one).
+    char line[2048];
     const size_t length = strlen(stage);
     const bool newline = length == 0 || stage[length - 1] != '\n';
-    snprintf(line, sizeof(line), "[%8.3f] %s%s", seconds, stage, newline ? "\n" : "");
+    const int written =
+        snprintf(line, sizeof(line), "[%8.3f] %s%s", seconds, stage, newline ? "\n" : "");
+    if (written >= static_cast<int>(sizeof(line)))
+        line[sizeof(line) - 2] = '\n';
     writeAll(fd, line);
 }
