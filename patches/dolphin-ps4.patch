@@ -1112,10 +1112,19 @@ index 9d15477..ac60cc5 100644
  
  struct WindowSystemInfo
 diff --git a/Source/Core/Core/CMakeLists.txt b/Source/Core/Core/CMakeLists.txt
-index 56c8dba..0ddb2f9 100644
+index 56c8dba..90082fd 100644
 --- a/Source/Core/Core/CMakeLists.txt
 +++ b/Source/Core/Core/CMakeLists.txt
-@@ -784,7 +784,7 @@ elseif(APPLE)
+@@ -131,6 +131,8 @@ add_library(core
+   HLE/HLE_Misc.cpp
+   HLE/HLE_Misc.h
+   HLE/HLE_OS.cpp
++  HLE/HLE_PS4Games.cpp
++  HLE/HLE_PS4Games.h
+   HLE/HLE_OS.h
+   HLE/HLE_VarArgs.cpp
+   HLE/HLE_VarArgs.h
+@@ -784,7 +786,7 @@ elseif(APPLE)
      HW/EXI/BBA/TAP_Apple.cpp
    )
    target_link_libraries(core PUBLIC ${IOB_LIBRARY})
@@ -1277,6 +1286,484 @@ index 1fa39d7..92334cb 100644
    CPUThreadConfigCallback::CheckForConfigChanges();
  
    MoveEvents();
+diff --git a/Source/Core/Core/HLE/HLE.cpp b/Source/Core/Core/HLE/HLE.cpp
+index 31b6c2d..b581034 100644
+--- a/Source/Core/Core/HLE/HLE.cpp
++++ b/Source/Core/Core/HLE/HLE.cpp
+@@ -14,6 +14,9 @@
+ #include "Core/GeckoCode.h"
+ #include "Core/HLE/HLE_Misc.h"
+ #include "Core/HLE/HLE_OS.h"
++#ifdef __ORBIS__
++#include "Core/HLE/HLE_PS4Games.h"
++#endif
+ #include "Core/HW/Memmap.h"
+ #include "Core/Host.h"
+ #include "Core/PowerPC/PPCSymbolDB.h"
+@@ -26,7 +29,12 @@ namespace HLE
+ static std::map<u32, u32> s_hooked_addresses;
+ 
+ // clang-format off
+-constexpr std::array<Hook, 23> os_patches{{
++#ifdef __ORBIS__
++constexpr size_t PS4_GAME_HOOKS = 3;  // HLE_PS4Games::HOOKS
++#else
++constexpr size_t PS4_GAME_HOOKS = 0;
++#endif
++constexpr std::array<Hook, 23 + PS4_GAME_HOOKS> os_patches{{
+     // Placeholder, os_patches[0] is the "non-existent function" index
+     {"FAKE_TO_SKIP_0",               HLE_Misc::UnimplementedFunction,       HookType::Replace, HookFlag::Generic},
+ 
+@@ -58,7 +66,13 @@ constexpr std::array<Hook, 23> os_patches{{
+ 
+     {"GeckoCodehandler",             HLE_Misc::GeckoCodeHandlerICacheFlush, HookType::Start,   HookFlag::Fixed},
+     {"GeckoHandlerReturnTrampoline", HLE_Misc::GeckoReturnTrampoline,       HookType::Replace, HookFlag::Fixed},
+-    {"AppLoaderReport",              HLE_OS::HLE_GeneralDebugPrint,         HookType::Start,   HookFlag::Fixed} // apploader needs OSReport-like function
++    {"AppLoaderReport",              HLE_OS::HLE_GeneralDebugPrint,         HookType::Start,   HookFlag::Fixed}, // apploader needs OSReport-like function
++#ifdef __ORBIS__
++    // PS4 port: native versions of hot game loops, installed by address (HLE_PS4Games.cpp).
++    {"PS4_Crash_cb5c4",              HLE_PS4Games::CrashLoopCB5C4,          HookType::Replace, HookFlag::Fixed},
++    {"PS4_Crash_cb694",              HLE_PS4Games::CrashLoopCB694,          HookType::Replace, HookFlag::Fixed},
++    {"PS4_Crash_caf2c",              HLE_PS4Games::CrashLoopCAF2C,          HookType::Replace, HookFlag::Fixed},
++#endif
+ }};
+ // clang-format on
+ 
+@@ -104,6 +118,10 @@ void PatchFixedFunctions(Core::System& system)
+   // This has to always be installed even if cheats are not enabled because of the possibility of
+   // loading a savestate where PC is inside the code handler while cheats are disabled.
+   Patch(system, Gecko::HLE_TRAMPOLINE_ADDRESS, "GeckoHandlerReturnTrampoline");
++
++#ifdef __ORBIS__
++  HLE_PS4Games::PatchGame(system);
++#endif
+ }
+ 
+ void PatchFunctions(Core::System& system)
+diff --git a/Source/Core/Core/HLE/HLE_PS4Games.cpp b/Source/Core/Core/HLE/HLE_PS4Games.cpp
+new file mode 100755
+index 0000000..3569792
+--- /dev/null
++++ b/Source/Core/Core/HLE/HLE_PS4Games.cpp
+@@ -0,0 +1,380 @@
++// Copyright 2026 Dolphin Emulator Project
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++// PS4 port: native versions of a few game routines that dominate the emulated CPU on the PS4's
++// 1.6 GHz Jaguar cores (ps4.ini game_hle=off disables them).
++//
++// Each hook replaces the inner loop of a game function - never a whole function, so the GX
++// library calls around it stay emulated - and is only installed when the game ID matches and
++// every instruction word of the loop is exactly the expected code (any other version or region
++// runs normally). The native loop performs the same memory reads and gather pipe writes in the
++// same order, leaves the registers the loop leaves (including dead temporaries, to be safe) and
++// continues at the loop's exit. It costs no emulated cycles: the game gets that CPU time for the
++// rest of its frame, like a faster CPU.
++
++#include "Core/HLE/HLE_PS4Games.h"
++
++#include <cstring>
++#include <span>
++
++#include "Common/CommonTypes.h"
++#include "Common/Logging/Log.h"
++#include "Common/Swap.h"
++#include "Core/ConfigManager.h"
++#include "Core/Core.h"
++#include "Core/HLE/HLE.h"
++#include "Core/HW/GPFifo.h"
++#include "Core/HW/Memmap.h"
++#include "Core/PowerPC/Interpreter/Interpreter_FPUtils.h"
++#include "Core/PowerPC/MMU.h"
++#include "Core/PowerPC/PowerPC.h"
++#include "Core/System.h"
++
++extern "C" int ps4_game_hle;
++int ps4_game_hle = 1;
++extern "C" void ps4_boot_trace(const char* stage);
++
++namespace HLE_PS4Games
++{
++namespace
++{
++// Guest memory: MEM1 through the default BATs (0x8xxxxxxx / 0xCxxxxxxx) directly, anything else
++// through the MMU.
++class Guest
++{
++public:
++  Guest(const Core::CPUThreadGuard& guard)
++      : m_guard(guard), m_system(guard.GetSystem()), m_ram(m_system.GetMemory().GetRAM()),
++        m_ram_size(m_system.GetMemory().GetRamSizeReal()), m_ppc(m_system.GetPPCState()),
++        m_gpfifo(m_system.GetGPFifo())
++  {
++  }
++
++  // The 4 bytes at `address` as stored (big-endian).
++  void ReadRaw32(u32 address, u8* out) const
++  {
++    const u32 segment = address >> 28;
++    const u32 offset = address & 0x0FFFFFFF;
++    if ((segment == 0x8 || segment == 0xC) && offset + 4 <= m_ram_size)
++    {
++      std::memcpy(out, m_ram + offset, 4);
++      return;
++    }
++    const u32 value = Common::swap32(PowerPC::MMU::HostRead<u32>(m_guard, address));
++    std::memcpy(out, &value, 4);
++  }
++
++  u32 Read32(u32 address) const
++  {
++    u8 raw[4];
++    ReadRaw32(address, raw);
++    u32 value;
++    std::memcpy(&value, raw, 4);
++    return Common::swap32(value);
++  }
++
++  s16 Read16s(u32 address) const
++  {
++    const u32 segment = address >> 28;
++    const u32 offset = address & 0x0FFFFFFF;
++    if ((segment == 0x8 || segment == 0xC) && offset + 2 <= m_ram_size)
++    {
++      u16 value;
++      std::memcpy(&value, m_ram + offset, 2);
++      return static_cast<s16>(Common::swap16(value));
++    }
++    return static_cast<s16>(PowerPC::MMU::HostRead<u16>(m_guard, address));
++  }
++
++  // The loops store to -0x8000(rX) with rX = 0xCC010000: the gather pipe. Any other rX (not seen)
++  // gets ordinary stores through the MMU.
++  void SetStoreBase(u32 base) { m_store = base - 0x8000; m_pipe = base == 0xCC010000; }
++
++  void PipeRaw32(const u8* bytes)
++  {
++    if (!m_pipe)
++    {
++      u32 value;
++      std::memcpy(&value, bytes, 4);
++      PowerPC::MMU::HostWrite<u32>(m_guard, Common::swap32(value), m_store);
++      return;
++    }
++    std::memcpy(m_ppc.gather_pipe_ptr, bytes, 4);
++    m_ppc.gather_pipe_ptr += 4;
++  }
++  void PipeMemory32(u32 address)
++  {
++    u8 raw[4];
++    ReadRaw32(address, raw);
++    PipeRaw32(raw);
++  }
++  void PipeValue32(u32 value)
++  {
++    const u32 be = Common::swap32(value);
++    PipeRaw32(reinterpret_cast<const u8*>(&be));
++  }
++  // Hands complete bursts to the command processor once a few have collected (the pipe buffer
++  // holds 512 bytes; callers write at most 64 bytes between checks).
++  void PipeCheck()
++  {
++    if (m_pipe && m_ppc.gather_pipe_ptr - m_ppc.gather_pipe_base_ptr >= 256)
++      m_gpfifo.UpdateGatherPipe();
++  }
++
++  PowerPC::PowerPCState& ppc() { return m_ppc; }
++
++  // An lfs result: the single's bits as the double in both halves.
++  void SetFloatRegister(int reg, u32 address)
++  {
++    const u64 value = ConvertToDouble(Read32(address));
++    m_ppc.ps[reg].SetBoth(value, value);
++  }
++
++private:
++  const Core::CPUThreadGuard& m_guard;
++  Core::System& m_system;
++  u8* m_ram;
++  u32 m_ram_size;
++  PowerPC::PowerPCState& m_ppc;
++  GPFifo::GPFifoManager& m_gpfifo;
++  u32 m_store = 0;
++  bool m_pipe = true;
++};
++
++
++// -------------------------------------------------------------------------------------------
++// Crash Bandicoot: The Wrath of Cortex (GCBE7D)
++//
++// 0x800cb520 (submits skinned vertices, called with r3 = positions (24-byte stride),
++// r4 = count, r5 = attribute records (56 bytes), r6 = attribute indices):
++// loop A at 0x800cb5c4 - position, then normal, colour, texcoord through the index;
++// loop B at 0x800cb694 - position and a constant colour.
++}  // namespace
++
++constexpr u32 CRASH_CB5C4 = 0x800cb5c4;
++constexpr u32 CRASH_CB5C4_EXIT = 0x800cb6b8;  // its "b" after the bdnz
++constexpr u32 CRASH_CB694 = 0x800cb694;
++constexpr u32 CRASH_CB694_EXIT = 0x800cb6b8;
++constexpr std::array<u32, 31> CRASH_CB5C4_CODE = {
++    0xc01f0000, 0xc1bf0004, 0xc19f0008, 0xd00b8000, 0x3bff0018, 0xd1ab8000, 0xd18b8000,
++    0x7d2aeaae, 0x1d290038, 0x7d29e214, 0xc1a90020, 0xc0090024, 0xc1890028, 0xd1ab8000,
++    0xd00b8000, 0xd18b8000, 0x7d2aeaae, 0x1d290038, 0x7d29e214, 0x8009002c, 0x900b8000,
++    0x7d2aeaae, 0x394a0002, 0x1d290038, 0x7d29e214, 0xc0090030, 0xc1a90034, 0xd00b8000,
++    0xd1ab8000, 0x4200ff8c, 0x4800007c};
++constexpr std::array<u32, 10> CRASH_CB694_CODE = {0xc01f0000, 0xc1bf0004, 0xc19f0008,
++                                                  0xd0098000, 0x3bff0018, 0xd1a98000,
++                                                  0xd1898000, 0x90098000, 0x4200ffe0,
++                                                  0x3860001a};
++
++void CrashLoopCB5C4(const Core::CPUThreadGuard& guard)
++{
++  Guest g(guard);
++  auto& ppc = g.ppc();
++  u32 positions = ppc.gpr[31];
++  u32 offset = ppc.gpr[10];
++  const u32 indices = ppc.gpr[29];
++  const u32 attributes = ppc.gpr[28];
++  u32 count = CTR(ppc);
++  u32 attribute = ppc.gpr[9];
++  u32 last_position = positions;
++  g.SetStoreBase(ppc.gpr[11]);
++  if (count == 0)  // never: the function only enters the loop with a positive count
++  {
++    ppc.npc = CRASH_CB5C4_EXIT;
++    return;
++  }
++  do
++  {
++    last_position = positions;
++    g.PipeMemory32(positions);
++    g.PipeMemory32(positions + 4);
++    g.PipeMemory32(positions + 8);
++    positions += 24;
++    attribute = static_cast<u32>(static_cast<s32>(g.Read16s(offset + indices)) * 56) + attributes;
++    g.PipeMemory32(attribute + 0x20);
++    g.PipeMemory32(attribute + 0x24);
++    g.PipeMemory32(attribute + 0x28);
++    g.PipeMemory32(attribute + 0x2c);
++    offset += 2;
++    g.PipeMemory32(attribute + 0x30);
++    g.PipeMemory32(attribute + 0x34);
++    g.PipeCheck();
++  } while (--count != 0);
++
++  ppc.gpr[31] = positions;
++  ppc.gpr[10] = offset;
++  ppc.gpr[9] = attribute;
++  ppc.gpr[0] = g.Read32(attribute + 0x2c);
++  g.SetFloatRegister(0, attribute + 0x30);
++  g.SetFloatRegister(13, attribute + 0x34);
++  g.SetFloatRegister(12, attribute + 0x28);
++  (void)last_position;
++  CTR(ppc) = 0;
++  ppc.npc = CRASH_CB5C4_EXIT;
++}
++
++void CrashLoopCB694(const Core::CPUThreadGuard& guard)
++{
++  Guest g(guard);
++  auto& ppc = g.ppc();
++  u32 positions = ppc.gpr[31];
++  u32 count = CTR(ppc);
++  const u32 colour = ppc.gpr[0];
++  g.SetStoreBase(ppc.gpr[9]);
++  if (count == 0)
++  {
++    ppc.npc = CRASH_CB694_EXIT;
++    return;
++  }
++  u32 last = positions;
++  do
++  {
++    last = positions;
++    g.PipeMemory32(positions);
++    g.PipeMemory32(positions + 4);
++    g.PipeMemory32(positions + 8);
++    positions += 24;
++    g.PipeValue32(colour);
++    g.PipeCheck();
++  } while (--count != 0);
++
++  ppc.gpr[31] = positions;
++  g.SetFloatRegister(0, last);
++  g.SetFloatRegister(13, last + 4);
++  g.SetFloatRegister(12, last + 8);
++  CTR(ppc) = 0;
++  ppc.npc = CRASH_CB694_EXIT;
++}
++
++// 0x800cae70 (submits indexed triangle strips; r30 = vertex records (36 bytes), r31 = strip
++// lengths and indices): the inner loop at 0x800caf2c writes position, normal, colour (one of
++// three sources, chosen by CR1/CR6/CR7 set before the loop) and texcoord per index.
++constexpr u32 CRASH_CAF2C = 0x800caf2c;
++constexpr u32 CRASH_CAF2C_EXIT = 0x800cafd0;
++constexpr std::array<u32, 41> CRASH_CAF2C_CODE = {
++    0xa93f0000, 0x1d290024, 0x7da9f42e, 0x7d29f214, 0xc1890008, 0xc0090004, 0xd1aa8000,
++    0xd00a8000, 0xd18a8000, 0xa93f0000, 0x1d290024, 0x7d29f214, 0xc1a9000c, 0xc1890014,
++    0xc0090010, 0xd1aa8000, 0xd00a8000, 0xd18a8000, 0xa93f0000, 0x1d290024, 0x7d29f214,
++    0x80090018, 0x40860008, 0x419a000c, 0x90ea8000, 0x48000014, 0x419e000c, 0x900a8000,
++    0x48000008, 0x916a8000, 0xa93f0000, 0x3bbdffff, 0x3bff0002, 0x3508ffff, 0x1d290024,
++    0x7d29f214, 0xc009001c, 0xc1a90020, 0xd00a8000, 0xd1aa8000, 0x4181ff60};
++
++void CrashLoopCAF2C(const Core::CPUThreadGuard& guard)
++{
++  Guest g(guard);
++  auto& ppc = g.ppc();
++  u32 list = ppc.gpr[31];
++  const u32 records = ppc.gpr[30];
++  u32 remaining = ppc.gpr[8];
++  u32 total = ppc.gpr[29];
++  const u32 colour_r7 = ppc.gpr[7];
++  const u32 colour_r11 = ppc.gpr[11];
++  g.SetStoreBase(ppc.gpr[10]);
++  if (static_cast<s32>(remaining) <= 0)  // never: the loop is entered with a positive count
++  {
++    ppc.npc = CRASH_CAF2C_EXIT;
++    return;
++  }
++  constexpr u32 EQ = 0x2;  // CR field bits: LT 8, GT 4, EQ 2, SO 1
++  const bool cr1_eq = (ppc.cr.GetField(1) & EQ) != 0;
++  const bool cr6_eq = (ppc.cr.GetField(6) & EQ) != 0;
++  const bool cr7_eq = (ppc.cr.GetField(7) & EQ) != 0;
++  // bne cr1 -> r7; beq cr6 -> (beq cr7 -> r11 : vertex colour); else r7.
++  const int colour_source = (!cr1_eq || !cr6_eq) ? 0 : (cr7_eq ? 1 : 2);
++
++  u32 record = 0, last_colour = 0;
++  do
++  {
++    record = static_cast<u32>(static_cast<s32>(g.Read16s(list)) * 36) + records;
++    g.PipeMemory32(record + 0x00);
++    g.PipeMemory32(record + 0x04);
++    g.PipeMemory32(record + 0x08);
++    g.PipeMemory32(record + 0x0c);
++    g.PipeMemory32(record + 0x10);
++    g.PipeMemory32(record + 0x14);
++    last_colour = g.Read32(record + 0x18);
++    if (colour_source == 0)
++      g.PipeValue32(colour_r7);
++    else if (colour_source == 1)
++      g.PipeValue32(colour_r11);
++    else
++      g.PipeValue32(last_colour);
++    // The texcoord comes through the same index, read again by the game.
++    record = static_cast<u32>(static_cast<s32>(g.Read16s(list)) * 36) + records;
++    total--;
++    list += 2;
++    remaining--;
++    g.PipeMemory32(record + 0x1c);
++    g.PipeMemory32(record + 0x20);
++    g.PipeCheck();
++  } while (static_cast<s32>(remaining) > 0);
++
++  ppc.gpr[31] = list;
++  ppc.gpr[29] = total;
++  ppc.gpr[8] = remaining;
++  ppc.gpr[9] = record;
++  ppc.gpr[0] = last_colour;
++  g.SetFloatRegister(0, record + 0x1c);
++  g.SetFloatRegister(13, record + 0x20);
++  g.SetFloatRegister(12, record + 0x14);
++  // subic. r8, r8, 1 with r8 = 1: result 0 (EQ), carry set.
++  ppc.cr.SetField(0, EQ | (ppc.GetXER_SO() ? 1 : 0));
++  ppc.SetCarry(1);
++  ppc.npc = CRASH_CAF2C_EXIT;
++}
++
++namespace
++{
++template <size_t N>
++bool CodeMatches(Core::System& system, u32 address, const std::array<u32, N>& code)
++{
++  auto& memory = system.GetMemory();
++  const u32 offset = address & 0x01FFFFFF;
++  if (offset + N * 4 > memory.GetRamSizeReal())
++    return false;
++  for (size_t i = 0; i < N; i++)
++  {
++    u32 word;
++    std::memcpy(&word, memory.GetRAM() + offset + i * 4, 4);
++    if (Common::swap32(word) != code[i])
++      return false;
++  }
++  return true;
++}
++}  // namespace
++
++const std::array<PS4Hook, 3> HOOKS = {{
++    {"PS4_Crash_cb5c4", CrashLoopCB5C4},
++    {"PS4_Crash_cb694", CrashLoopCB694},
++    {"PS4_Crash_caf2c", CrashLoopCAF2C},
++}};
++
++void PatchGame(Core::System& system)
++{
++  if (!ps4_game_hle)
++    return;
++  const std::string game_id = SConfig::GetInstance().GetGameID();
++  if (game_id != "GCBE7D")
++    return;
++  struct Site
++  {
++    u32 address;
++    const char* name;
++    bool ok;
++  };
++  const Site sites[] = {
++      {CRASH_CB5C4, "PS4_Crash_cb5c4", CodeMatches(system, CRASH_CB5C4, CRASH_CB5C4_CODE)},
++      {CRASH_CB694, "PS4_Crash_cb694", CodeMatches(system, CRASH_CB694, CRASH_CB694_CODE)},
++      {CRASH_CAF2C, "PS4_Crash_caf2c", CodeMatches(system, CRASH_CAF2C, CRASH_CAF2C_CODE)},
++  };
++  for (const Site& site : sites)
++  {
++    if (site.ok)
++      HLE::Patch(system, site.address, site.name);
++    char line[160];
++    snprintf(line, sizeof(line), "game HLE: %s at %08x %s", site.name, site.address,
++             site.ok ? "installed" : "NOT installed (code differs)");
++    ps4_boot_trace(line);
++  }
++}
++}  // namespace HLE_PS4Games
+diff --git a/Source/Core/Core/HLE/HLE_PS4Games.h b/Source/Core/Core/HLE/HLE_PS4Games.h
+new file mode 100755
+index 0000000..6151aca
+--- /dev/null
++++ b/Source/Core/Core/HLE/HLE_PS4Games.h
+@@ -0,0 +1,32 @@
++// Copyright 2026 Dolphin Emulator Project
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++#pragma once
++
++#include <array>
++
++#include "Core/HLE/HLE.h"
++
++namespace Core
++{
++class CPUThreadGuard;
++class System;
++}
++
++// PS4 port: native versions of hot game loops (HLE_PS4Games.cpp).
++namespace HLE_PS4Games
++{
++struct PS4Hook
++{
++  const char* name;
++  HLE::HookFunction function;
++};
++extern const std::array<PS4Hook, 3> HOOKS;
++
++void CrashLoopCB5C4(const Core::CPUThreadGuard& guard);
++void CrashLoopCB694(const Core::CPUThreadGuard& guard);
++void CrashLoopCAF2C(const Core::CPUThreadGuard& guard);
++
++// Installs the hooks whose game and code match (from HLE::PatchFixedFunctions).
++void PatchGame(Core::System& system);
++}  // namespace HLE_PS4Games
 diff --git a/Source/Core/Core/HW/GPFifo.cpp b/Source/Core/Core/HW/GPFifo.cpp
 index 0de434b..8e0fd63 100644
 --- a/Source/Core/Core/HW/GPFifo.cpp
@@ -2581,7 +3068,7 @@ index 51c3fff..8e91ab7 100644
 +  ps4_add_eboot(dolphin-nogui)
 +endif()
 diff --git a/Source/Core/DolphinNoGUI/MainNoGUI.cpp b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
-index 3bf40ea..70b5eae 100644
+index 3bf40ea..779cd0f 100644
 --- a/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 +++ b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 @@ -5,7 +5,9 @@
@@ -2616,7 +3103,7 @@ index 3bf40ea..70b5eae 100644
  #include "UICommon/CommandLineParse.h"
  #ifdef USE_DISCORD_PRESENCE
  #include "UICommon/DiscordPresence.h"
-@@ -31,6 +40,35 @@
+@@ -31,6 +40,36 @@
  
  static std::unique_ptr<Platform> s_platform;
  
@@ -2639,6 +3126,7 @@ index 3bf40ea..70b5eae 100644
 +extern "C" int sceKernelIsNeoMode(void);
 +extern "C" int sceKernelIsAuthenticNeo(void);
 +extern "C" int ps4_vk_thread, ps4_vk_thread_core;  // VideoBackends/Vulkan/PS4CommandRecorder.cpp
++extern "C" int ps4_game_hle;                       // Core/HLE/HLE_PS4Games.cpp
 +extern "C" int ps4_auto_clock, ps4_auto_clock_min, ps4_auto_clock_max;  // PlatformPS4.cpp
 +extern "C" size_t sceKernelGetDirectMemorySize();  // libkernel
 +extern "C" void ps4_boot_trace(const char* line);  // DolphinPS4 port/ps4_crashlog.cpp
@@ -2652,7 +3140,7 @@ index 3bf40ea..70b5eae 100644
  static void signal_handler(int)
  {
    constexpr char message[] = "A signal was received. A second signal will force Dolphin to stop.\n";
-@@ -173,6 +211,10 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
+@@ -173,6 +212,10 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
    if (platform_name == "macos" || platform_name.empty())
      return Platform::CreateMacOSPlatform();
  #endif
@@ -2663,7 +3151,7 @@ index 3bf40ea..70b5eae 100644
  
    if (platform_name == "headless" || platform_name.empty())
      return Platform::CreateHeadlessPlatform();
-@@ -184,8 +226,17 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
+@@ -184,8 +227,17 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
  #define main app_main
  #endif
  
@@ -2682,7 +3170,7 @@ index 3bf40ea..70b5eae 100644
    const auto parser =
        CommandLineParse::CreateParser(CommandLineParse::ParserOptions::OmitGUIOptions);
    parser->add_option("-p", "--platform")
-@@ -207,6 +258,10 @@ int main(const int argc, char* argv[])
+@@ -207,6 +259,10 @@ int main(const int argc, char* argv[])
  #ifdef __APPLE__
                  ,
                  "macos"
@@ -2693,7 +3181,7 @@ index 3bf40ea..70b5eae 100644
  #endif
        });
  
-@@ -270,7 +325,223 @@ int main(const int argc, char* argv[])
+@@ -270,7 +326,225 @@ int main(const int argc, char* argv[])
  
    UICommon::SetUserDirectory(user_directory);
    UICommon::Init();
@@ -2826,6 +3314,8 @@ index 3bf40ea..70b5eae 100644
 +    // vk_thread=on: Vulkan commands are recorded on a worker thread on core vk_thread_core
 +    // (VideoBackends/Vulkan/PS4CommandRecorder.cpp).
 +    ps4_vk_thread = Platform::GetPS4Option("vk_thread", "off") == "on";
++    // game_hle=off: no native versions of hot game loops (Core/HLE/HLE_PS4Games.cpp).
++    ps4_game_hle = Platform::GetPS4Option("game_hle", "on") == "on";
 +    ps4_vk_thread_core = std::atoi(Platform::GetPS4Option("vk_thread_core", "5").c_str());
 +    // fifo_defer=on (with fifo_batch): JIT blocks leave GPU commands in the gather pipe until
 +    // 128 bytes collect (flushed before any hardware register access and every timing slice).
@@ -2917,7 +3407,7 @@ index 3bf40ea..70b5eae 100644
  
    Common::ScopeGuard ui_common_guard([] {
      UICommon::ShutdownControllers();
-@@ -284,6 +555,12 @@ int main(const int argc, char* argv[])
+@@ -284,6 +558,12 @@ int main(const int argc, char* argv[])
    }
  
    auto core_state_changed_hook = Core::AddOnStateChangedCallback([](const Core::State state) {
@@ -2930,7 +3420,7 @@ index 3bf40ea..70b5eae 100644
      if (state == Core::State::Uninitialized)
        s_platform->Stop();
    });
-@@ -303,6 +580,9 @@ int main(const int argc, char* argv[])
+@@ -303,6 +583,9 @@ int main(const int argc, char* argv[])
  
    DolphinAnalytics::Instance().ReportDolphinStart("nogui");
  
