@@ -166,6 +166,14 @@ struct ac_drm_device {
     * ring of fence IBs. */
    volatile uint64_t *fence;
    uint32_t *fence_ibs;
+   /* GPU busy time (ac_ps4_get_gpu_busy): per sequence slot, the GPU clock when the command
+    * processor started the submission (COPY_DATA in a small IB in front of it) and when all its
+    * work had finished (bottom-of-pipe timestamp in the fence IB). Busy = the union of those
+    * intervals; span = first start to last end. Both in GPU clock ticks, so the ratio needs no
+    * clock frequency. */
+   volatile uint64_t *ts_start, *ts_end;
+   uint32_t *ts_ibs;
+   uint64_t ts_accounted, ts_prev_end, ts_busy, ts_span_first, ts_span_last;
    uint64_t last_seq; /* last submitted */
 
    /* The last submissions' command buffers, for the GPU hang report. */
@@ -202,7 +210,8 @@ struct ac_drm_device {
    unsigned num_events;
 };
 
-#define FENCE_IB_DW 16
+#define FENCE_IB_DW 24 /* user fence EOP + timestamp EOP + fence EOP (6 each), padded */
+#define TS_IB_DW 8
 #define FENCE_IB_COUNT 512
 
 static void ps4_scan_tails(ac_drm_device *dev);
@@ -952,6 +961,17 @@ ac_drm_device_initialize(int fd, bool is_virtio, uint32_t *major_version, uint32
    }
    dev->fence_ibs = (uint32_t *)(page + 256);
    dev->flip_ibs = ps4_map_new(PS4_PAGE, PS4_WB_ONION, PS4_PROT_CPU_RW | PS4_PROT_GPU_RW, NULL);
+   {
+      /* Timestamps: [0, 4 KiB) start, [4, 8 KiB) end, then the start IBs (32 bytes each). */
+      STATIC_ASSERT(FENCE_IB_COUNT * 8 * 2 + FENCE_IB_COUNT * TS_IB_DW * 4 <= PS4_PAGE * 2);
+      uint8_t *ts = ps4_map_new(PS4_PAGE * 2, PS4_WB_ONION, PS4_PROT_CPU_RW | PS4_PROT_GPU_RW, NULL);
+      if (ts) {
+         memset(ts, 0, PS4_PAGE * 2);
+         dev->ts_start = (volatile uint64_t *)ts;
+         dev->ts_end = (volatile uint64_t *)(ts + FENCE_IB_COUNT * 8);
+         dev->ts_ibs = (uint32_t *)(ts + FENCE_IB_COUNT * 16);
+      }
+   }
    STATIC_ASSERT(256 + FENCE_IB_COUNT * FENCE_IB_DW * 4 <= PS4_PAGE * 4);
 
    ps4_sync_provider_init(dev);
@@ -1922,6 +1942,45 @@ ps4_emit_eop(uint32_t *cs, uint64_t addr, uint64_t value, bool interrupt)
    return cs;
 }
 
+/* Adds the finished submissions' timestamps to the busy time (called with dev->lock held). */
+static void
+ps4_account_gpu_time(ac_drm_device *dev)
+{
+   if (!dev->ts_start)
+      return;
+   const uint64_t done = ps4_completed(dev);
+   if (dev->ts_accounted + FENCE_IB_COUNT < done)
+      dev->ts_accounted = done - FENCE_IB_COUNT; /* slots already reused */
+   while (dev->ts_accounted < done) {
+      const unsigned i = ++dev->ts_accounted % FENCE_IB_COUNT;
+      const uint64_t start = dev->ts_start[i], end = dev->ts_end[i];
+      if (!start || end <= start)
+         continue; /* a flip (no timestamps) or not written */
+      const uint64_t from = MAX2(start, dev->ts_prev_end);
+      if (end > from)
+         dev->ts_busy += end - from;
+      dev->ts_prev_end = MAX2(dev->ts_prev_end, end);
+      if (!dev->ts_span_first)
+         dev->ts_span_first = start;
+      dev->ts_span_last = MAX2(dev->ts_span_last, end);
+   }
+}
+
+void ac_ps4_get_gpu_busy(uint64_t *busy_ticks, uint64_t *span_ticks);
+void
+ac_ps4_get_gpu_busy(uint64_t *busy_ticks, uint64_t *span_ticks)
+{
+   ac_drm_device *dev = ps4_last_device;
+   *busy_ticks = *span_ticks = 0;
+   if (!dev)
+      return;
+   simple_mtx_lock(&dev->lock);
+   ps4_account_gpu_time(dev);
+   *busy_ticks = dev->ts_busy;
+   *span_ticks = dev->ts_span_last - dev->ts_span_first;
+   simple_mtx_unlock(&dev->lock);
+}
+
 int
 ac_drm_cs_submit_raw2(ac_drm_device *dev, uint32_t ctx_id, uint32_t bo_list_handle,
                       int num_chunks, struct drm_amdgpu_cs_chunk *chunks, uint64_t *seq_no)
@@ -1940,7 +1999,7 @@ ac_drm_cs_submit_raw2(ac_drm_device *dev, uint32_t ctx_id, uint32_t bo_list_hand
       switch (c->chunk_id) {
       case AMDGPU_CHUNK_ID_IB: {
          struct drm_amdgpu_cs_chunk_ib *ib = data;
-         if (ib->ip_type != AMDGPU_HW_IP_GFX || num_ibs >= ARRAY_SIZE(dcb) - 1)
+         if (ib->ip_type != AMDGPU_HW_IP_GFX || num_ibs >= ARRAY_SIZE(dcb) - 2)
             return -EINVAL;
          dcb[num_ibs] = (void *)(uintptr_t)ib->va_start;
          dcb_sizes[num_ibs] = ib->ib_bytes;
@@ -2018,11 +2077,25 @@ ac_drm_cs_submit_raw2(ac_drm_device *dev, uint32_t ctx_id, uint32_t bo_list_hand
       ps4_wait_seq(dev, dev->last_seq + 1 - FENCE_IB_COUNT, INT64_MAX);
       simple_mtx_lock(&dev->lock);
    }
+   ps4_account_gpu_time(dev);
    const uint64_t seq = ++dev->last_seq;
    uint32_t *fence_ib = dev->fence_ibs + (seq % FENCE_IB_COUNT) * FENCE_IB_DW;
    uint32_t *cs = fence_ib;
    if (user_fence_addr)
       cs = ps4_emit_eop(cs, user_fence_addr, seq, false);
+   const unsigned ts_slot = seq % FENCE_IB_COUNT;
+   if (dev->ts_start) {
+      dev->ts_start[ts_slot] = 0;
+      dev->ts_end[ts_slot] = 0;
+      /* PKT3(EVENT_WRITE_EOP): BOTTOM_OF_PIPE_TS, DATA_SEL 3 = the 64-bit GPU clock. */
+      const uint64_t addr = (uintptr_t)&dev->ts_end[ts_slot];
+      *cs++ = 0xC0044700;
+      *cs++ = 0x28 | (5 << 8);
+      *cs++ = (uint32_t)addr;
+      *cs++ = ((addr >> 32) & 0xffff) | (3u << 29);
+      *cs++ = 0;
+      *cs++ = 0;
+   }
    cs = ps4_emit_eop(cs, (uintptr_t)dev->fence, seq, dev->eop_queue != NULL);
    while ((cs - fence_ib) % 8)
       *cs++ = 0xFFFF1000; /* type-2 NOP padding */
@@ -2038,7 +2111,27 @@ ac_drm_cs_submit_raw2(ac_drm_device *dev, uint32_t ctx_id, uint32_t bo_list_hand
          dev->recent[slot].bytes[i] = dcb_sizes[i];
       }
    }
-   int r = dev->submit(num_ibs + 1, dcb, dcb_sizes, ccb, ccb_sizes);
+   unsigned submit_ibs = num_ibs + 1;
+   if (dev->ts_ibs) {
+      /* In front: PKT3(COPY_DATA) of the GPU clock (SRC_SEL 9) to memory (DST_SEL 5), 64 bits,
+       * write-confirmed - when the command processor reaches this submission. */
+      uint32_t *ts_ib = dev->ts_ibs + ts_slot * TS_IB_DW, *t = ts_ib;
+      const uint64_t addr = (uintptr_t)&dev->ts_start[ts_slot];
+      *t++ = 0xC0044000;
+      *t++ = 9 | (5 << 8) | (1 << 16) | (1 << 20);
+      *t++ = 0;
+      *t++ = 0;
+      *t++ = (uint32_t)addr;
+      *t++ = (uint32_t)(addr >> 32);
+      while ((t - ts_ib) % 8)
+         *t++ = 0xFFFF1000;
+      memmove(dcb + 1, dcb, sizeof(dcb[0]) * submit_ibs);
+      memmove(dcb_sizes + 1, dcb_sizes, sizeof(dcb_sizes[0]) * submit_ibs);
+      dcb[0] = ts_ib;
+      dcb_sizes[0] = (uint32_t)(t - ts_ib) * 4;
+      submit_ibs++;
+   }
+   int r = dev->submit(submit_ibs, dcb, dcb_sizes, ccb, ccb_sizes);
    dev->submit_done();
    if (seq <= 40 || seq % 1000 == 0)
       ps4_log("radv/ps4: submit %llu: %u IBs (first %p, %u bytes) = %#x, GPU completed %llu, "

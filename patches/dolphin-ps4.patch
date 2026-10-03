@@ -2476,7 +2476,7 @@ index 51c3fff..8e91ab7 100644
 +  ps4_add_eboot(dolphin-nogui)
 +endif()
 diff --git a/Source/Core/DolphinNoGUI/MainNoGUI.cpp b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
-index 3bf40ea..591331a 100644
+index 3bf40ea..42fe2b7 100644
 --- a/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 +++ b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 @@ -5,7 +5,9 @@
@@ -2511,7 +2511,7 @@ index 3bf40ea..591331a 100644
  #include "UICommon/CommandLineParse.h"
  #ifdef USE_DISCORD_PRESENCE
  #include "UICommon/DiscordPresence.h"
-@@ -31,6 +40,27 @@
+@@ -31,6 +40,28 @@
  
  static std::unique_ptr<Platform> s_platform;
  
@@ -2526,6 +2526,7 @@ index 3bf40ea..591331a 100644
 +extern "C" int ps4_fifo_defer;  // VideoCommon/Fifo.cpp
 +extern "C" int ps4_perfmon;     // Core/PowerPC/PowerPC.cpp
 +extern "C" int ps4_gp_fuse;     // Core/PowerPC/Jit64/Jit.cpp
++extern "C" int ps4_tex_hash_once;  // VideoCommon/TextureCacheBase.cpp
 +extern "C" int ps4_auto_clock, ps4_auto_clock_min, ps4_auto_clock_max;  // PlatformPS4.cpp
 +extern "C" size_t sceKernelGetDirectMemorySize();  // libkernel
 +extern "C" void ps4_boot_trace(const char* line);  // DolphinPS4 port/ps4_crashlog.cpp
@@ -2539,7 +2540,7 @@ index 3bf40ea..591331a 100644
  static void signal_handler(int)
  {
    constexpr char message[] = "A signal was received. A second signal will force Dolphin to stop.\n";
-@@ -173,6 +203,10 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
+@@ -173,6 +204,10 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
    if (platform_name == "macos" || platform_name.empty())
      return Platform::CreateMacOSPlatform();
  #endif
@@ -2550,7 +2551,7 @@ index 3bf40ea..591331a 100644
  
    if (platform_name == "headless" || platform_name.empty())
      return Platform::CreateHeadlessPlatform();
-@@ -184,8 +218,17 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
+@@ -184,8 +219,17 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
  #define main app_main
  #endif
  
@@ -2569,7 +2570,7 @@ index 3bf40ea..591331a 100644
    const auto parser =
        CommandLineParse::CreateParser(CommandLineParse::ParserOptions::OmitGUIOptions);
    parser->add_option("-p", "--platform")
-@@ -207,6 +250,10 @@ int main(const int argc, char* argv[])
+@@ -207,6 +251,10 @@ int main(const int argc, char* argv[])
  #ifdef __APPLE__
                  ,
                  "macos"
@@ -2580,7 +2581,7 @@ index 3bf40ea..591331a 100644
  #endif
        });
  
-@@ -270,7 +317,190 @@ int main(const int argc, char* argv[])
+@@ -270,7 +318,192 @@ int main(const int argc, char* argv[])
  
    UICommon::SetUserDirectory(user_directory);
    UICommon::Init();
@@ -2706,6 +2707,8 @@ index 3bf40ea..591331a 100644
 +    ps4_perfmon = Platform::GetPS4Option("perfmon", "on") == "on";
 +    // jit_gp_fuse=off: the JIT updates the gather pipe pointer after every write again.
 +    ps4_gp_fuse = Platform::GetPS4Option("jit_gp_fuse", "on") == "on";
++    // tex_hash_once=off: hash textures on every lookup again (TextureCacheBase.cpp).
++    ps4_tex_hash_once = Platform::GetPS4Option("tex_hash_once", "on") == "on";
 +    // fifo_defer=on (with fifo_batch): JIT blocks leave GPU commands in the gather pipe until
 +    // 128 bytes collect (flushed before any hardware register access and every timing slice).
 +    ps4_fifo_defer = ps4_fifo_batch && Platform::GetPS4Option("fifo_defer", "off") == "on";
@@ -2771,7 +2774,7 @@ index 3bf40ea..591331a 100644
  
    Common::ScopeGuard ui_common_guard([] {
      UICommon::ShutdownControllers();
-@@ -284,6 +514,12 @@ int main(const int argc, char* argv[])
+@@ -284,6 +517,12 @@ int main(const int argc, char* argv[])
    }
  
    auto core_state_changed_hook = Core::AddOnStateChangedCallback([](const Core::State state) {
@@ -2784,7 +2787,7 @@ index 3bf40ea..591331a 100644
      if (state == Core::State::Uninitialized)
        s_platform->Stop();
    });
-@@ -303,6 +539,9 @@ int main(const int argc, char* argv[])
+@@ -303,6 +542,9 @@ int main(const int argc, char* argv[])
  
    DolphinAnalytics::Instance().ReportDolphinStart("nogui");
  
@@ -2825,10 +2828,10 @@ index f4dc8a9..4e5ff67 100644
  
 diff --git a/Source/Core/DolphinNoGUI/PlatformPS4.cpp b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
 new file mode 100644
-index 0000000..0213f4c
+index 0000000..6da7ad0
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
-@@ -0,0 +1,628 @@
+@@ -0,0 +1,641 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -2885,6 +2888,7 @@ index 0000000..0213f4c
 +
 +#ifdef HAS_VULKAN
 +// port/mesa/ac_ps4_drm.c (RADV on GNM).
++extern "C" void ac_ps4_get_gpu_busy(uint64_t* busy_ticks, uint64_t* span_ticks);
 +extern "C" void ac_ps4_get_stats(uint64_t* submitted, uint64_t* completed, uint64_t* bo_bytes,
 +                                 uint64_t* bo_count);
 +#endif
@@ -3158,9 +3162,21 @@ index 0000000..0213f4c
 +        // RADV on GNM: GPU progress (a stalled GPU shows completed falling behind) and memory.
 +        u64 submitted, completed, bo_bytes, bo_count;
 +        ac_ps4_get_stats(&submitted, &completed, &bo_bytes, &bo_count);
++        // GPU busy: share of GPU time spent on our submissions since the last report (from GPU
++        // timestamps; port/mesa/ac_ps4_drm.c).
++        static uint64_t s_last_busy = 0, s_last_span = 0;
++        uint64_t busy_ticks, span_ticks;
++        ac_ps4_get_gpu_busy(&busy_ticks, &span_ticks);
++        const double gpu_busy = span_ticks > s_last_span ?
++                                    100.0 * (busy_ticks - s_last_busy) / (span_ticks - s_last_span) :
++                                    -1.0;
++        s_last_busy = busy_ticks;
++        s_last_span = span_ticks;
 +        const size_t used = strlen(line);
 +        snprintf(line + used, sizeof(line) - used,
-+                 ", gpu submitted %llu completed %llu, gpu memory %llu MiB in %llu buffers",
++                 ", gpu busy %.0f%%, gpu submitted %llu completed %llu, gpu memory %llu MiB in "
++                 "%llu buffers",
++                 gpu_busy,
 +                 static_cast<unsigned long long>(submitted),
 +                 static_cast<unsigned long long>(completed),
 +                 static_cast<unsigned long long>(bo_bytes >> 20),
@@ -7600,10 +7616,10 @@ index c76f7da..f8afd04 100644
    static constexpr size_t NUM_PALETTE_CONVERSION_SHADERS = 3;
  
 diff --git a/Source/Core/VideoCommon/Statistics.cpp b/Source/Core/VideoCommon/Statistics.cpp
-index 4a58c6f..4c14379 100644
+index 4a58c6f..1493495 100644
 --- a/Source/Core/VideoCommon/Statistics.cpp
 +++ b/Source/Core/VideoCommon/Statistics.cpp
-@@ -25,8 +25,25 @@ static Common::EventHook s_after_frame_event;
+@@ -25,8 +25,27 @@ static Common::EventHook s_after_frame_event;
  
  static bool clear_scissors;
  
@@ -7612,12 +7628,14 @@ index 4a58c6f..4c14379 100644
 +// up here before they are cleared.
 +extern "C" {
 +unsigned long long ps4_scene_stats[8];
++extern u32 ps4_tex_hash_epoch;  // TextureCacheBase.cpp
 +}
 +#endif
 +
  void Statistics::ResetFrame()
  {
 +#ifdef __ORBIS__
++  ps4_tex_hash_epoch++;  // texture hash memo (TextureCacheBase.cpp) lasts one frame
 +  ps4_scene_stats[0] += this_frame.num_draw_calls;
 +  ps4_scene_stats[1] += this_frame.num_prims + this_frame.num_dl_prims;
 +  ps4_scene_stats[2] += this_frame.num_vertices_loaded;
@@ -7630,7 +7648,7 @@ index 4a58c6f..4c14379 100644
    clear_scissors = true;
    if (scissors.size() > 1)
 diff --git a/Source/Core/VideoCommon/TextureCacheBase.cpp b/Source/Core/VideoCommon/TextureCacheBase.cpp
-index 4e4567d..0286d0e 100644
+index 4e4567d..ed937ef 100644
 --- a/Source/Core/VideoCommon/TextureCacheBase.cpp
 +++ b/Source/Core/VideoCommon/TextureCacheBase.cpp
 @@ -2,6 +2,7 @@
@@ -7649,7 +7667,74 @@ index 4e4567d..0286d0e 100644
    if (auto entry = LoadImpl(stage, false))
    {
      if (!DidLinkedAssetsChange(*entry))
-@@ -2145,12 +2147,20 @@ bool TextureCacheBase::CopyFilterCanOverflow(const std::array<u32, 3>& coefficie
+@@ -1311,6 +1313,47 @@ TCacheEntry* TextureCacheBase::LoadImpl(u32 stage, bool force_reload)
+   return entry.get();
+ }
+ 
++#ifdef __ORBIS__
++// PS4: texture hash memo. Dolphin hashes a texture's memory every time it is looked up or
++// rebound (~7% of the video thread in Crash Bandicoot's busy scenes, ~4000 draws per frame).
++// Within one frame, a RAM texture at the same address and size is hashed once; later lookups
++// reuse the result. The memo is cleared every frame and on every EFB copy (which can write into
++// texture memory). Palettes and TMEM textures are never memoized. ps4.ini tex_hash_once=off
++// restores hashing on every lookup.
++extern "C" int ps4_tex_hash_once;
++int ps4_tex_hash_once = 1;
++extern "C" u32 ps4_tex_hash_epoch;
++u32 ps4_tex_hash_epoch = 1;
++
++namespace
++{
++struct TextureHashMemo
++{
++  u32 address;
++  u32 size;
++  u32 samples;
++  u32 epoch;
++  u64 hash;
++};
++TextureHashMemo s_texture_hash_memo[1024];
++}  // namespace
++
++static u64 PS4TextureHash(u32 address, const u8* data, u32 size, u32 samples)
++{
++  if (!ps4_tex_hash_once)
++    return Common::GetHash64(data, size, samples);
++  TextureHashMemo& memo = s_texture_hash_memo[((address >> 5) ^ (size << 3)) & 1023];
++  if (memo.epoch == ps4_tex_hash_epoch && memo.address == address && memo.size == size &&
++      memo.samples == samples)
++  {
++    return memo.hash;
++  }
++  const u64 hash = Common::GetHash64(data, size, samples);
++  memo = {address, size, samples, ps4_tex_hash_epoch, hash};
++  return hash;
++}
++#endif
++
+ RcTcacheEntry TextureCacheBase::GetTexture(const int textureCacheSafetyColorSampleSize,
+                                            const TextureInfo& texture_info)
+ {
+@@ -1347,8 +1390,16 @@ RcTcacheEntry TextureCacheBase::GetTexture(const int textureCacheSafetyColorSamp
+ 
+   // TODO: This doesn't hash GB tiles for preloaded RGBA8 textures (instead, it's hashing more data
+   // from the low tmem bank than it should)
+-  base_hash = Common::GetHash64(texture_info.GetData(), texture_info.GetTextureSize(),
+-                                textureCacheSafetyColorSampleSize);
++#ifdef __ORBIS__
++  if (!texture_info.IsFromTmem())
++  {
++    base_hash = PS4TextureHash(texture_info.GetRawAddress(), texture_info.GetData(),
++                               texture_info.GetTextureSize(), textureCacheSafetyColorSampleSize);
++  }
++  else
++#endif
++    base_hash = Common::GetHash64(texture_info.GetData(), texture_info.GetTextureSize(),
++                                  textureCacheSafetyColorSampleSize);
+   u32 palette_size = 0;
+   if (texture_info.GetPaletteSize())
+   {
+@@ -2145,12 +2196,21 @@ bool TextureCacheBase::CopyFilterCanOverflow(const std::array<u32, 3>& coefficie
    return coefficients[0] + coefficients[1] + coefficients[2] >= 128;
  }
  
@@ -7665,11 +7750,24 @@ index 4e4567d..0286d0e 100644
  {
 +#ifdef __ORBIS__
 +  ps4_scene_stats[6]++;
++  ps4_tex_hash_epoch++;  // the copy may write into texture memory: drop memoized hashes
 +#endif
 +  PS4_PROFILE(PS4_PROF_EFB_COPY);
    // Emulation methods:
    //
    // - EFB to RAM:
+@@ -3257,7 +3317,11 @@ u64 TCacheEntry::CalculateHash() const
+   u8* ptr = memory.GetPointerForRange(addr, size_in_bytes);
+   if (memory_stride == bytes_per_row)
+   {
++#ifdef __ORBIS__
++    return PS4TextureHash(addr, ptr, size_in_bytes, hash_sample_size);
++#else
+     return Common::GetHash64(ptr, size_in_bytes, hash_sample_size);
++#endif
+   }
+   else
+   {
 diff --git a/Source/Core/VideoCommon/VertexManagerBase.cpp b/Source/Core/VideoCommon/VertexManagerBase.cpp
 index 2bc6d58..06b5c3c 100644
 --- a/Source/Core/VideoCommon/VertexManagerBase.cpp
