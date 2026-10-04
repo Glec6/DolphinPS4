@@ -228,9 +228,6 @@ Also worth knowing:
 - Only the original PS4 has been tested so far. PS4 Pro reports are welcome.
 
 ## Thanks
-
-Ported to the PS4 by **ShiroKlein**.
-
 This port exists thanks to the **[Dolphin](https://dolphin-emu.org)** team, from its creators
 **F|RES** and **ector** to the hundreds of people who have contributed since. Thanks also to
 **[Mesa](https://mesa3d.org)** (RADV), the **[OpenOrbis](https://github.com/OpenOrbis)** and
