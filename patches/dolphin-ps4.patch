@@ -3969,10 +3969,10 @@ index 3bf40ea..4c32cd5 100644
      fprintf(stderr, "Could not boot the specified file\n");
 diff --git a/Source/Core/DolphinNoGUI/PS4IngameMenu.cpp b/Source/Core/DolphinNoGUI/PS4IngameMenu.cpp
 new file mode 100755
-index 0000000..f6d0d17
+index 0000000..65d2a4e
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4IngameMenu.cpp
-@@ -0,0 +1,690 @@
+@@ -0,0 +1,699 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -4120,8 +4120,11 @@ index 0000000..f6d0d17
 +            {"Quit Game"}};
 +    selected = s_main_selected;
 +    subtitle = "PAUSED";
-+    hints = {{Glyph::Cross, "Select"}, {Glyph::LeftRight, "Slot"}, {Glyph::Circle, "Resume"},
-+             {Glyph::L3R3, "Resume"}};
++    hints = {{Glyph::Cross, "Select"}};
++    if (s_main_selected == MAIN_SAVE || s_main_selected == MAIN_LOAD)
++      hints.push_back({Glyph::LeftRight, "Slot"});
++    hints.push_back({Glyph::Circle, "Resume"});
++    hints.push_back({Glyph::L3R3, "Resume"});
 +  }
 +  else
 +  {
@@ -4615,10 +4618,16 @@ index 0000000..f6d0d17
 +    if (nav & (ORBIS_PAD_BUTTON_LEFT | ORBIS_PAD_BUTTON_RIGHT))
 +    {
 +      const int direction = (nav & ORBIS_PAD_BUTTON_LEFT) ? -1 : 1;
++      // Main page: Left/Right pick the slot, on Save State and Load State only.
 +      if (s_page == Page::Main)
-+        s_slot = (s_slot - 1 + direction + 8) % 8 + 1;
++      {
++        if (s_main_selected == MAIN_SAVE || s_main_selected == MAIN_LOAD)
++          s_slot = (s_slot - 1 + direction + 8) % 8 + 1;
++      }
 +      else
++      {
 +        ChangeSetting(s_settings_selected, direction);
++      }
 +      s_last_action = "change";
 +      rebuild = true;
 +    }
