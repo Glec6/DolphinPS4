@@ -3555,7 +3555,7 @@ index 51c3fff..224556f 100644
 +  ps4_add_eboot(dolphin-nogui)
 +endif()
 diff --git a/Source/Core/DolphinNoGUI/MainNoGUI.cpp b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
-index 3bf40ea..92993f3 100644
+index 3bf40ea..d7e2dad 100644
 --- a/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 +++ b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 @@ -2,10 +2,17 @@
@@ -3680,7 +3680,7 @@ index 3bf40ea..92993f3 100644
  #endif
        });
  
-@@ -270,7 +335,293 @@ int main(const int argc, char* argv[])
+@@ -270,7 +335,294 @@ int main(const int argc, char* argv[])
  
    UICommon::SetUserDirectory(user_directory);
    UICommon::Init();
@@ -3970,11 +3970,12 @@ index 3bf40ea..92993f3 100644
    UICommon::InitControllers(wsi);
 +#ifdef __ORBIS__
 +  Platform::BootTrace("UICommon and controllers initialized");
++  Platform::ApplyPS4Players();
 +#endif
  
    Common::ScopeGuard ui_common_guard([] {
      UICommon::ShutdownControllers();
-@@ -284,6 +635,12 @@ int main(const int argc, char* argv[])
+@@ -284,6 +636,12 @@ int main(const int argc, char* argv[])
    }
  
    auto core_state_changed_hook = Core::AddOnStateChangedCallback([](const Core::State state) {
@@ -3987,7 +3988,7 @@ index 3bf40ea..92993f3 100644
      if (state == Core::State::Uninitialized)
        s_platform->Stop();
    });
-@@ -303,6 +660,9 @@ int main(const int argc, char* argv[])
+@@ -303,6 +661,9 @@ int main(const int argc, char* argv[])
  
    DolphinAnalytics::Instance().ReportDolphinStart("nogui");
  
@@ -4126,16 +4127,17 @@ index 0000000..1ec7543
 +}  // namespace PS4Cheats
 diff --git a/Source/Core/DolphinNoGUI/PS4Controls.cpp b/Source/Core/DolphinNoGUI/PS4Controls.cpp
 new file mode 100755
-index 0000000..0f40012
+index 0000000..7dff165
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4Controls.cpp
-@@ -0,0 +1,352 @@
+@@ -0,0 +1,379 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
 +#include "DolphinNoGUI/PS4Controls.h"
 +
 +#include <cstdio>
++#include <string>
 +#include <sys/stat.h>
 +
 +#include <orbis/Pad.h>
@@ -4319,6 +4321,8 @@ index 0000000..0f40012
 +  mkdir((s_user_dir + "/Config").c_str(), 0777);
 +  WriteIfMissing(Path(Device::GameCube), GCPAD_DEFAULTS);
 +  WriteIfMissing(Path(Device::Wii), WIIMOTE_DEFAULTS);
++  SyncPlayers(Device::GameCube);
++  SyncPlayers(Device::Wii);
 +}
 +
 +std::string Get(Device device, const Binding& binding)
@@ -4401,6 +4405,7 @@ index 0000000..0f40012
 +    section->Set(binding.key, expression);
 +  }
 +  ini.Save(Path(device));
++  SyncPlayers(device);
 +}
 +
 +std::vector<std::string> StickChoices()
@@ -4418,6 +4423,7 @@ index 0000000..0f40012
 +    fputs(DefaultsText(device), file);
 +    fclose(file);
 +  }
++  SyncPlayers(device);
 +}
 +
 +void SetWiiAttachment(const std::string& extension, bool sideways)
@@ -4428,6 +4434,28 @@ index 0000000..0f40012
 +  section->Set("Extension", std::string(extension == "none" ? "None" : "Nunchuk"));
 +  section->Set("Options/Sideways Wiimote", std::string(sideways ? "True" : "False"));
 +  ini.Save(Path(Device::Wii));
++  SyncPlayers(Device::Wii);
++}
++
++void SyncPlayers(Device device)
++{
++  Common::IniFile ini;
++  ini.Load(Path(device));
++  const Common::IniFile::Section* first = ini.GetSection(Section(device));
++  if (!first)
++    return;
++  const auto values = first->GetValues();  // a copy: the sections below are rewritten
++  const std::string base = device == Device::GameCube ? "GCPad" : "Wiimote";
++  for (int player = 2; player <= 4; player++)
++  {
++    const std::string name = base + std::to_string(player);
++    ini.DeleteSection(name);
++    Common::IniFile::Section* section = ini.GetOrCreateSection(name);
++    for (const auto& [key, value] : values)
++      section->Set(key, value);
++    section->Set("Device", "PS4/" + std::to_string(player - 1) + "/DualShock 4");
++  }
++  ini.Save(Path(device));
 +}
 +
 +bool IsAtRest(const OrbisPadData& now)
@@ -4484,10 +4512,10 @@ index 0000000..0f40012
 +}  // namespace PS4Controls
 diff --git a/Source/Core/DolphinNoGUI/PS4Controls.h b/Source/Core/DolphinNoGUI/PS4Controls.h
 new file mode 100755
-index 0000000..301c25a
+index 0000000..76fb2d3
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4Controls.h
-@@ -0,0 +1,56 @@
+@@ -0,0 +1,59 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -4537,6 +4565,9 @@ index 0000000..301c25a
 +void ResetToDefault(Device device);
 +// The Wii Remote's extension ("nunchuk" or "none") and sideways orientation.
 +void SetWiiAttachment(const std::string& extension, bool sideways);
++// Players 2-4 (GCPad2-4, Wiimote2-4): player 1's mapping, each on their own DualShock 4
++// ("PS4/<player - 1>/DualShock 4"). Done after every change to player 1's mapping.
++void SyncPlayers(Device device);
 +
 +// Capture: the expression for the first input that differs from the resting state (a button
 +// pressed, a trigger pulled or a stick pushed), or empty if nothing is pressed yet.
@@ -9390,7 +9421,7 @@ index 0000000..f15dbc7
 +};
 +}  // namespace PS4XMB
 diff --git a/Source/Core/DolphinNoGUI/Platform.h b/Source/Core/DolphinNoGUI/Platform.h
-index f4dc8a9..4e5ff67 100644
+index f4dc8a9..121376e 100644
 --- a/Source/Core/DolphinNoGUI/Platform.h
 +++ b/Source/Core/DolphinNoGUI/Platform.h
 @@ -5,6 +5,7 @@
@@ -9401,7 +9432,7 @@ index f4dc8a9..4e5ff67 100644
  
  #include "Common/Flag.h"
  #include "Common/WindowSystemInfo.h"
-@@ -47,6 +48,16 @@ public:
+@@ -47,6 +48,18 @@ public:
    static std::unique_ptr<Platform> CreateMacOSPlatform();
  #endif
  
@@ -9413,6 +9444,8 @@ index f4dc8a9..4e5ff67 100644
 +  static void BootTrace(const char* stage);
 +  // Port switches from /data/DolphinPS4/ps4.ini (key=value).
 +  static std::string GetPS4Option(const std::string& key, const std::string& default_value);
++  // One GameCube port / Wii Remote per connected DualShock 4 (up to 4 players).
++  static void ApplyPS4Players();
 +#endif
 +
  protected:
@@ -9420,10 +9453,10 @@ index f4dc8a9..4e5ff67 100644
  
 diff --git a/Source/Core/DolphinNoGUI/PlatformPS4.cpp b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
 new file mode 100644
-index 0000000..de58c2e
+index 0000000..27de5df
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
-@@ -0,0 +1,1083 @@
+@@ -0,0 +1,1169 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -9438,6 +9471,7 @@ index 0000000..de58c2e
 +#include <array>
 +#include <cstdarg>
 +#include <cstdio>
++#include <cstring>
 +#include <filesystem>
 +#include <map>
 +#include <string>
@@ -9446,6 +9480,7 @@ index 0000000..de58c2e
 +#include <vector>
 +
 +#include <orbis/Sysmodule.h>
++#include <orbis/UserService.h>
 +#include <orbis/libkernel.h>
 +#include <fcntl.h>
 +#include <sys/stat.h>
@@ -9464,6 +9499,10 @@ index 0000000..de58c2e
 +#include "DiscIO/Volume.h"
 +#include "DiscIO/VolumeDisc.h"
 +#include "Core/Config/MainSettings.h"
++#include "Core/Config/WiimoteSettings.h"
++#include "Core/HW/SI/SI_Device.h"
++#include "Core/HW/Wiimote.h"
++#include "InputCommon/ControllerInterface/ControllerInterface.h"
 +#include "Core/Core.h"
 +#include "Core/CoreTiming.h"
 +#include "VideoCommon/PerformanceMetrics.h"
@@ -9482,6 +9521,9 @@ index 0000000..de58c2e
 +extern "C" unsigned long long ps4_soft_tlb_hits, ps4_soft_tlb_misses;           // MMU.cpp
 +extern "C" long long ps4_compile_internal_bytes, ps4_link_internal_bytes;  // ProgramShaderCache
 +#include "Core/System.h"
++
++// The signed-in users (defined below; the main loop watches them for players joining).
++std::array<int32_t, 4> PS4LoginUsers();
 +
 +extern "C" int sceSystemServiceLoadExec(const char* path, char* const argv[]);
 +extern "C" void ps4_boot_trace(const char* stage);
@@ -9797,10 +9839,22 @@ index 0000000..de58c2e
 +  // Slow start: still starting after 4 s and 12 s -> boot-stacks-N.txt (where the boot waits).
 +  const auto boot_since = std::chrono::steady_clock::now();
 +  int boot_dumps = 0;
++  // Players joining / leaving (another DualShock 4 signed in or out).
++  auto login_users = PS4LoginUsers();
 +  while (m_running.IsSet())
 +  {
 +    UpdateRunningFlag();
 +    Core::HostDispatchJobs(Core::System::GetInstance());
++    if (frame % 60 == 30)
++    {
++      const auto users = PS4LoginUsers();
++      if (users != login_users)
++      {
++        login_users = users;
++        g_controller_interface.RefreshDevices();
++        ApplyPS4Players();
++      }
++    }
 +    {
 +      const auto now = std::chrono::steady_clock::now();
 +      if (ps4_freeze_reports && boot_dumps < 2 &&
@@ -9872,15 +9926,45 @@ index 0000000..de58c2e
 +                                  1.0;
 +      s_last_wall = wall;
 +      s_last_cpu = cpu;
++      // Too low a clock shows differently: the emulator keeps up (full speed) but the game
++      // itself drops frames, because its own code no longer fits in a frame's worth of the
++      // emulated CPU (Super Smash Bros. Melee: ~25 FPS at 30%, ~46 at 35%, 60 from 40%). Then the
++      // clock goes up again and stays at least there for ~30 s. The game's usual frame rate (60
++      // or 30) is learnt from what it shows at full speed.
++      static int s_normal_fps = 0;
++      static int s_lag_floor = 0, s_lag_floor_checks = 0;
++      const double fps = perf.GetFPS();
++      if (s_lag_floor_checks > 0 && --s_lag_floor_checks == 0)
++        s_lag_floor = 0;
++      if (Core::GetState(system) == Core::State::Running && speed >= 0.97)
++      {
++        if (fps >= 57.0)
++          s_normal_fps = 60;
++        else if (fps >= 28.5 && s_normal_fps == 0)
++          s_normal_fps = 30;
++      }
++      const int floor = std::max(ps4_auto_clock_min, s_lag_floor);
 +      if (Core::GetState(system) == Core::State::Running && speed > 0.1)
 +      {
-+        if (speed < 0.97 && max_speed < 1.0 && cpu_busy >= 0.90 && clock > ps4_auto_clock_min)
++        if (s_normal_fps > 0 && speed >= 0.97 && fps > 5.0 && fps < s_normal_fps * 0.85 &&
++            cpu_busy >= 0.90 && s_since_change >= 2 && clock < ps4_auto_clock_max)
++        {
++          clock = std::min(ps4_auto_clock_max, clock + 5);
++          s_lag_floor = clock;
++          s_lag_floor_checks = 30;
++          char line[128];
++          snprintf(line, sizeof(line),
++                   "auto clock: game dropping frames at full speed (%.0f of %d FPS) -> %d%%", fps,
++                   s_normal_fps, clock);
++          BootTrace(line);
++        }
++        else if (speed < 0.97 && max_speed < 1.0 && cpu_busy >= 0.90 && clock > floor)
 +        {
 +          // Straight to what the CPU thread sustains (its speed scales with the clock), not 5
 +          // points per second: a match starting at a clock raised during a menu stuttered for
 +          // ~15 s in Super Smash Bros. Melee while the clock came down.
 +          const int target = static_cast<int>(clock * max_speed * 0.98) / 5 * 5;
-+          clock = std::max(ps4_auto_clock_min, std::min(clock - 5, target));
++          clock = std::max(floor, std::min(clock - 5, target));
 +        }
 +        else if (s_since_change >= 3 && perf.GetFPS() > 5.0 &&
 +                 max_speed * clock / (clock + 5.0) > 1.06 && clock < ps4_auto_clock_max)
@@ -10355,6 +10439,41 @@ index 0000000..de58c2e
 +  return it == s_options.end() ? default_value : it->second;
 +}
 +
++extern "C" int ps4_pad_count;  // InputCommon/ControllerInterface/PS4Pad/PS4Pad.cpp
++
++// A game sees exactly the controllers that are there: player 1's port / Wii Remote always, and
++// one more for each other signed-in user with a DualShock 4. A player who joins mid-game gets
++// the next port (Dolphin checks the ports at every controller poll; a Wii Remote connects when
++// its player presses a button); one who signs out is unplugged.
++void Platform::ApplyPS4Players()
++{
++  const int players = std::clamp(ps4_pad_count, 1, 4);
++  for (int i = 0; i < 4; i++)
++  {
++    const auto si = i < players ? SerialInterface::SIDEVICE_GC_CONTROLLER :
++                                  SerialInterface::SIDEVICE_NONE;
++    if (Config::Get(Config::GetInfoForSIDevice(i)) != si)
++      Config::SetBase(Config::GetInfoForSIDevice(i), si);
++    const auto source = i < players ? WiimoteSource::Emulated : WiimoteSource::None;
++    if (Config::Get(Config::GetInfoForWiimoteSource(i)) != source)
++      Config::SetBase(Config::GetInfoForWiimoteSource(i), source);
++  }
++  BootTrace(fmt::format("players: {} (GameCube ports / Wii Remotes in use)", players).c_str());
++}
++
++// The signed-in users, to notice a player joining or leaving (cheap; checked about once a
++// second by the main loop).
++std::array<int32_t, 4> PS4LoginUsers()
++{
++  OrbisUserServiceLoginUserIdList users;
++  std::memset(&users, 0xFF, sizeof(users));
++  sceUserServiceGetLoginUserIdList(&users);
++  std::array<int32_t, 4> out;
++  for (size_t i = 0; i < out.size(); i++)
++    out[i] = users.userId[i];
++  return out;
++}
++
 +std::vector<std::string> Platform::GetPS4Arguments()
 +{
 +  BootTrace("main");
@@ -10586,10 +10705,10 @@ index 8f7f4ba..34feb8e 100644
  {
 diff --git a/Source/Core/InputCommon/ControllerInterface/PS4Pad/PS4Pad.cpp b/Source/Core/InputCommon/ControllerInterface/PS4Pad/PS4Pad.cpp
 new file mode 100644
-index 0000000..d2d6534
+index 0000000..1f1d6a7
 --- /dev/null
 +++ b/Source/Core/InputCommon/ControllerInterface/PS4Pad/PS4Pad.cpp
-@@ -0,0 +1,227 @@
+@@ -0,0 +1,272 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -10597,7 +10716,9 @@ index 0000000..d2d6534
 +
 +#include <algorithm>
 +#include <cstring>
++#include <map>
 +#include <string>
++#include <vector>
 +
 +#include <orbis/Pad.h>
 +#include <orbis/UserService.h>
@@ -10612,11 +10733,21 @@ index 0000000..d2d6534
 +int ps4_pad_handle = -1;
 +extern "C" int ps4_pad_block;
 +int ps4_pad_block = 0;
++// Players with a DualShock 4 (signed-in users, up to 4): DolphinNoGUI turns on that many
++// GameCube ports / Wii Remotes.
++extern "C" int ps4_pad_count;
++int ps4_pad_count = 0;
 +
 +namespace ciface::PS4Pad
 +{
 +constexpr std::string_view SOURCE_NAME = "PS4";
 +constexpr int32_t INVALID_USER = -1;
++constexpr int MAX_PLAYERS = 4;
++
++// Open pads by user. They stay open while the user is signed in, across device refreshes (a
++// player joining or leaving), so the first player's handle - read directly by the in-game menu -
++// stays valid.
++std::map<int32_t, int32_t> s_handles;
 +
 +class Device final : public Core::Device
 +{
@@ -10716,9 +10847,9 @@ index 0000000..d2d6534
 +
 +  ~Device() override
 +  {
++    // The pad itself stays open (s_handles); it is closed when its user signs out.
 +    OrbisPadVibeParam off = {0, 0};
 +    scePadSetVibration(m_handle, &off);
-+    scePadClose(m_handle);
 +  }
 +
 +  std::string GetName() const override { return "DualShock 4"; }
@@ -10783,32 +10914,65 @@ index 0000000..d2d6534
 +    GetControllerInterface().RemoveDevice(
 +        [](const auto* device) { return device->GetSource() == SOURCE_NAME; });
 +
++    // Players in order: the user who started the app first (player 1, who also has the in-game
++    // menu), then the other signed-in users in sign-in order. Each one's DualShock 4 becomes
++    // "PS4/<player - 1>/DualShock 4" (the controller mappings, DolphinNoGUI/PS4Controls.cpp).
++    int32_t initial = INVALID_USER;
++    sceUserServiceGetInitialUser(&initial);
 +    OrbisUserServiceLoginUserIdList users;
 +    std::memset(&users, 0xFF, sizeof(users));
 +    if (sceUserServiceGetLoginUserIdList(&users) != 0)
-+    {
-+      // Fall back to the user who started the app.
 +      std::memset(&users, 0xFF, sizeof(users));
-+      sceUserServiceGetInitialUser(&users.userId[0]);
-+    }
-+
++    std::vector<int32_t> players;
++    if (initial != INVALID_USER)
++      players.push_back(initial);
 +    for (const int32_t user : users.userId)
 +    {
-+      if (user == INVALID_USER)
-+        continue;
-+      const int32_t handle = scePadOpen(user, ORBIS_PAD_PORT_TYPE_STANDARD, 0, nullptr);
-+      if (handle < 0)
-+      {
-+        WARN_LOG_FMT(CONTROLLERINTERFACE, "scePadOpen(user {:#x}): {:#x}", static_cast<u32>(user),
-+                     static_cast<u32>(handle));
-+        continue;
-+      }
-+      INFO_LOG_FMT(CONTROLLERINTERFACE, "DualShock 4 of user {:#x} opened (handle {})",
-+                   static_cast<u32>(user), handle);
-+      if (ps4_pad_handle < 0)
-+        ps4_pad_handle = handle;
-+      GetControllerInterface().AddDevice(std::make_shared<Device>(user, handle));
++      if (user != INVALID_USER && user != initial && players.size() < MAX_PLAYERS)
++        players.push_back(user);
 +    }
++
++    // Users who signed out: close their pads.
++    for (auto it = s_handles.begin(); it != s_handles.end();)
++    {
++      if (std::find(players.begin(), players.end(), it->first) == players.end())
++      {
++        INFO_LOG_FMT(CONTROLLERINTERFACE, "DualShock 4 of user {:#x} closed",
++                     static_cast<u32>(it->first));
++        if (ps4_pad_handle == it->second)
++          ps4_pad_handle = -1;
++        scePadClose(it->second);
++        it = s_handles.erase(it);
++      }
++      else
++      {
++        ++it;
++      }
++    }
++
++    int count = 0;
++    for (const int32_t user : players)
++    {
++      auto it = s_handles.find(user);
++      if (it == s_handles.end())
++      {
++        const int32_t handle = scePadOpen(user, ORBIS_PAD_PORT_TYPE_STANDARD, 0, nullptr);
++        if (handle < 0)
++        {
++          WARN_LOG_FMT(CONTROLLERINTERFACE, "scePadOpen(user {:#x}): {:#x}",
++                       static_cast<u32>(user), static_cast<u32>(handle));
++          continue;
++        }
++        INFO_LOG_FMT(CONTROLLERINTERFACE, "DualShock 4 of user {:#x} opened (handle {})",
++                     static_cast<u32>(user), handle);
++        it = s_handles.emplace(user, handle).first;
++      }
++      if (count == 0)
++        ps4_pad_handle = it->second;
++      GetControllerInterface().AddDevice(std::make_shared<Device>(user, it->second));
++      count++;
++    }
++    ps4_pad_count = count;
 +  }
 +};
 +
@@ -15035,7 +15199,7 @@ index a761a81..22dd606 100644
  }
  
 diff --git a/Source/Core/VideoCommon/AsyncShaderCompiler.cpp b/Source/Core/VideoCommon/AsyncShaderCompiler.cpp
-index 83eaa2e..db577b2 100644
+index 83eaa2e..929127d 100644
 --- a/Source/Core/VideoCommon/AsyncShaderCompiler.cpp
 +++ b/Source/Core/VideoCommon/AsyncShaderCompiler.cpp
 @@ -3,6 +3,8 @@
@@ -15047,7 +15211,7 @@ index 83eaa2e..db577b2 100644
  #include <thread>
  
  #include "Common/Assert.h"
-@@ -12,6 +14,41 @@
+@@ -12,6 +14,45 @@
  #include "Core/Core.h"
  #include "Core/System.h"
  
@@ -15075,6 +15239,10 @@ index 83eaa2e..db577b2 100644
 +  if (mask == 0)
 +    mask = 0x3F;
 +  const int result = Common::PS4SetCurrentThreadCoreMask(mask);
++  // Below the default priority (700): the system lets a busy thread keep its core against
++  // threads of the same priority, so two compiling workers held cores 0 and 1 until the whole
++  // shader cache was compiled and anything else waiting there (Melee's start: 5 s) waited too.
++  Common::PS4SetCurrentThreadCoreAndPriority(-1, 750);
 +  static std::atomic<bool> s_logged{false};
 +  if (!s_logged.exchange(true))
 +  {
@@ -15089,7 +15257,7 @@ index 83eaa2e..db577b2 100644
  namespace VideoCommon
  {
  AsyncShaderCompiler::AsyncShaderCompiler()
-@@ -206,6 +243,9 @@ void AsyncShaderCompiler::WorkerThreadExit(void* param)
+@@ -206,6 +247,9 @@ void AsyncShaderCompiler::WorkerThreadExit(void* param)
  void AsyncShaderCompiler::WorkerThreadEntryPoint(void* param)
  {
    Common::SetCurrentThreadName("AsyncShaderCompiler Worker");
@@ -16302,10 +16470,10 @@ index 41d05f3..54b5154 100644
    if (m_onscreen_ui)
    {
 diff --git a/Source/Core/VideoCommon/Resources/CustomResourceManager.cpp b/Source/Core/VideoCommon/Resources/CustomResourceManager.cpp
-index 29e215b..536aa2e 100644
+index 29e215b..9993418 100644
 --- a/Source/Core/VideoCommon/Resources/CustomResourceManager.cpp
 +++ b/Source/Core/VideoCommon/Resources/CustomResourceManager.cpp
-@@ -10,14 +10,25 @@
+@@ -10,14 +10,30 @@
  
  namespace VideoCommon
  {
@@ -16326,12 +16494,17 @@ index 29e215b..536aa2e 100644
    m_async_shader_compiler = g_gfx->CreateAsyncShaderCompiler();
  
 +  PS4_VIDEO_MARK("video: custom resources: compiler thread");
++#ifndef __ORBIS__
    m_async_shader_compiler->StartWorkerThreads(1);  // TODO expose to config
++#endif
++  // PS4: no worker (custom resources are graphics mods, which the port doesn't load; without
++  // workers the compiler compiles on the caller). Starting one waited for a free core while the
++  // shader cache precompiled.
 +  PS4_VIDEO_MARK("video: custom resources: textures");
  
    m_xfb_event =
        GetVideoEvents().after_frame_event.Register([this](Core::System&) { XFBTriggered(); });
-@@ -26,6 +37,7 @@ void CustomResourceManager::Initialize()
+@@ -26,6 +42,7 @@ void CustomResourceManager::Initialize()
    m_invalid_color_texture = CreateInvalidColorTexture();
    m_invalid_cubemap_texture = CreateInvalidCubemapTexture();
    m_invalid_transparent_texture = CreateInvalidTransparentTexture();
