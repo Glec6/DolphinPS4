@@ -8884,10 +8884,10 @@ index f4dc8a9..4e5ff67 100644
  
 diff --git a/Source/Core/DolphinNoGUI/PlatformPS4.cpp b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
 new file mode 100644
-index 0000000..dd489ed
+index 0000000..cc6ec5a
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
-@@ -0,0 +1,1013 @@
+@@ -0,0 +1,1042 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -8941,6 +8941,7 @@ index 0000000..dd489ed
 +int ps4_auto_clock = 0, ps4_auto_clock_min = 60, ps4_auto_clock_max = 100;
 +extern "C" unsigned long long ps4_scene_stats[8];       // VideoCommon/Statistics.cpp
 +extern "C" long long ps4_wait_total(int slot);            // port/ps4_sampler.cpp
++extern "C" unsigned long long ps4_present_counter;        // VideoCommon/Present.cpp
 +extern "C" unsigned long long ps4_clock_reads;            // port/ps4_runtime.cpp
 +extern "C" unsigned long long ps4_soft_tlb_hits, ps4_soft_tlb_misses;           // MMU.cpp
 +extern "C" long long ps4_compile_internal_bytes, ps4_link_internal_bytes;  // ProgramShaderCache
@@ -9245,10 +9246,38 @@ index 0000000..dd489ed
 +  // thread's stack goes to /data/DolphinPS4/hang-stacks.txt (once per hang).
 +  u64 watchdog_ticks = 0;
 +  int watchdog_stalled = 0;
++  // Stall catcher: while running, no frame for 0.8 s (loading freezes, hitches) writes every
++  // thread's stack to /data/DolphinPS4/stall-stacks.txt, mid-stall (at most 3 per session).
++  unsigned long long stall_presents = 0;
++  auto stall_since = std::chrono::steady_clock::now();
++  int stall_dumps = 0;
++  bool stall_dumped = false;
 +  while (m_running.IsSet())
 +  {
 +    UpdateRunningFlag();
 +    Core::HostDispatchJobs(Core::System::GetInstance());
++    {
++      const auto now = std::chrono::steady_clock::now();
++      if (ps4_present_counter != stall_presents ||
++          Core::GetState(Core::System::GetInstance()) != Core::State::Running)
++      {
++        stall_presents = ps4_present_counter;
++        stall_since = now;
++        stall_dumped = false;
++      }
++      else if (!stall_dumped && stall_dumps < 3 && now - stall_since > std::chrono::milliseconds(800))
++      {
++        stall_dumped = true;
++        stall_dumps++;
++        char reason[96];
++        snprintf(reason, sizeof(reason), "stall %d: no frame for 0.8 s while running",
++                 stall_dumps);
++        BootTrace(reason);
++        const std::string path = std::string(PS4_DATA_DIR_PATH) + "/stall-stacks-" +
++                                 std::to_string(stall_dumps) + ".txt";
++        ps4_dump_thread_stacks(path.c_str(), reason);
++      }
++    }
 +    PS4IngameMenu::Poll(Core::System::GetInstance());
 +    std::this_thread::sleep_for(std::chrono::milliseconds(16));
 +    // Keeps the FPS average fresh for the on-screen counter (VideoCommon/Present.cpp).
@@ -15208,7 +15237,7 @@ index 92f7c1f..3378a49 100644
      m_default_pixel_shader = g_gfx->CreateShaderFromSource(
          ShaderStage::Pixel, GetHeader(false) + default_pixel_shader_code + GetFooter(), nullptr,
 diff --git a/Source/Core/VideoCommon/Present.cpp b/Source/Core/VideoCommon/Present.cpp
-index 41d05f3..48018e8 100644
+index 41d05f3..b882ac0 100644
 --- a/Source/Core/VideoCommon/Present.cpp
 +++ b/Source/Core/VideoCommon/Present.cpp
 @@ -3,6 +3,11 @@
@@ -15341,7 +15370,7 @@ index 41d05f3..48018e8 100644
      return input_aspect_ratio;
  
    const MathUtil::Rectangle<int> rect = m_xfb_rect;
-@@ -903,10 +969,131 @@ void Presenter::RenderXFBToScreen(const MathUtil::Rectangle<int>& target_rc,
+@@ -903,9 +969,139 @@ void Presenter::RenderXFBToScreen(const MathUtil::Rectangle<int>& target_rc,
    }
  }
  
@@ -15450,10 +15479,19 @@ index 41d05f3..48018e8 100644
 +int ps4_show_fps = 1;
 +#endif
 +
++#ifdef __ORBIS__
++// Frames presented (DolphinNoGUI/PlatformPS4.cpp's stall catcher watches it).
++extern "C" unsigned long long ps4_present_counter;
++unsigned long long ps4_present_counter = 0;
++#endif
++
  void Presenter::Present(PresentInfo* present_info)
  {
    m_present_count++;
- 
++#ifdef __ORBIS__
++  ps4_present_counter++;
++#endif
++
 +#ifdef __ORBIS__
 +  // Port diagnostics: is there an XFB to show at all?
 +  static u64 s_with_xfb = 0;
@@ -15469,17 +15507,16 @@ index 41d05f3..48018e8 100644
 +    ps4_boot_trace(line);
 +  }
 +#endif
-+
+ 
    if (g_gfx->IsHeadless() || (!m_onscreen_ui && !m_xfb_entry))
      return;
- 
-@@ -934,7 +1121,18 @@ void Presenter::Present(PresentInfo* present_info)
+@@ -934,7 +1130,18 @@ void Presenter::Present(PresentInfo* present_info)
    UpdateDrawRectangle();
  
    g_gfx->BeginUtilityDrawing();
 +#ifdef __ORBIS__
 +  // Port diagnostics are done: black around the game image, as on other platforms.
-+  const bool backbuffer_bound = g_gfx->BindBackbuffer({{0.0f, 0.0f, 0.0f, 1.0f}});
+   const bool backbuffer_bound = g_gfx->BindBackbuffer({{0.0f, 0.0f, 0.0f, 1.0f}});
 +  static bool s_reported_unbound = false;
 +  if (!backbuffer_bound && !s_reported_unbound)
 +  {
@@ -15487,12 +15524,12 @@ index 41d05f3..48018e8 100644
 +    ps4_boot_trace("present: backbuffer could not be bound");
 +  }
 +#else
-   const bool backbuffer_bound = g_gfx->BindBackbuffer({{0.0f, 0.0f, 0.0f, 1.0f}});
++  const bool backbuffer_bound = g_gfx->BindBackbuffer({{0.0f, 0.0f, 0.0f, 1.0f}});
 +#endif
  
    // Render the XFB to the screen.
    if (backbuffer_bound && m_xfb_entry)
-@@ -945,7 +1143,52 @@ void Presenter::Present(PresentInfo* present_info)
+@@ -945,7 +1152,52 @@ void Presenter::Present(PresentInfo* present_info)
      AdjustRectanglesToFitBounds(&render_target_rc, &render_source_rc, m_backbuffer_width,
                                  m_backbuffer_height);
      RenderXFBToScreen(render_target_rc, m_xfb_entry->texture.get(), render_source_rc);
