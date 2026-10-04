@@ -12731,7 +12731,7 @@ index 92f7c1f..3378a49 100644
      m_default_pixel_shader = g_gfx->CreateShaderFromSource(
          ShaderStage::Pixel, GetHeader(false) + default_pixel_shader_code + GetFooter(), nullptr,
 diff --git a/Source/Core/VideoCommon/Present.cpp b/Source/Core/VideoCommon/Present.cpp
-index 41d05f3..97712cc 100644
+index 41d05f3..2bc67f6 100644
 --- a/Source/Core/VideoCommon/Present.cpp
 +++ b/Source/Core/VideoCommon/Present.cpp
 @@ -3,6 +3,11 @@
@@ -12760,20 +12760,27 @@ index 41d05f3..97712cc 100644
  
  #include "InputCommon/ControllerInterface/ControllerInterface.h"
  
-@@ -124,9 +136,12 @@ bool Presenter::Initialize()
+@@ -124,9 +136,16 @@ bool Presenter::Initialize()
      if (!m_post_processor->Initialize(m_backbuffer_format))
        return false;
  
-+#ifndef __ORBIS__
-+    // PS4: no on-screen UI (ImGui OSD/statistics); the game's image only.
-     m_onscreen_ui = std::make_unique<OnScreenUI>();
-     if (!m_onscreen_ui->Initialize(m_backbuffer_width, m_backbuffer_height, m_backbuffer_scale))
-       return false;
+-    m_onscreen_ui = std::make_unique<OnScreenUI>();
+-    if (!m_onscreen_ui->Initialize(m_backbuffer_width, m_backbuffer_height, m_backbuffer_scale))
+-      return false;
++#ifdef __ORBIS__
++    // PS4: the on-screen UI (ImGui) on Vulkan only - it draws the in-game menu
++    // (DolphinNoGUI/PS4IngameMenu.cpp). Skipped on Piglet (OpenGL).
++    if (Config::Get(Config::MAIN_GFX_BACKEND) != "OGL")
 +#endif
++    {
++      m_onscreen_ui = std::make_unique<OnScreenUI>();
++      if (!m_onscreen_ui->Initialize(m_backbuffer_width, m_backbuffer_height, m_backbuffer_scale))
++        return false;
++    }
  
      // Draw a blank frame (and complete OnScreenUI initialization)
      g_gfx->BindBackbuffer({{0.0f, 0.0f, 0.0f, 1.0f}});
-@@ -136,8 +151,17 @@ bool Presenter::Initialize()
+@@ -136,8 +155,17 @@ bool Presenter::Initialize()
    return true;
  }
  
@@ -12791,7 +12798,7 @@ index 41d05f3..97712cc 100644
    ReleaseXFBContentLock();
    u64 old_xfb_id = m_last_xfb_id;
  
-@@ -431,8 +455,23 @@ Presenter::ConvertStereoRectangle(const MathUtil::Rectangle<int>& rc) const
+@@ -431,8 +459,23 @@ Presenter::ConvertStereoRectangle(const MathUtil::Rectangle<int>& rc) const
    return std::make_tuple(left_rc, right_rc);
  }
  
@@ -12815,7 +12822,7 @@ index 41d05f3..97712cc 100644
    if (!g_ActiveConfig.bCropCustom)
      return MathUtil::Rectangle<int>(0, 0, 0, 0);
  
-@@ -464,7 +503,11 @@ MathUtil::Rectangle<int> Presenter::AdjustForCustomCrop(const MathUtil::Rectangl
+@@ -464,7 +507,11 @@ MathUtil::Rectangle<int> Presenter::AdjustForCustomCrop(const MathUtil::Rectangl
  
  float Presenter::AdjustAspectRatioForCustomCrop(float input_aspect_ratio) const
  {
@@ -12827,7 +12834,7 @@ index 41d05f3..97712cc 100644
      return input_aspect_ratio;
  
    const MathUtil::Rectangle<int> rect = m_xfb_rect;
-@@ -903,10 +946,131 @@ void Presenter::RenderXFBToScreen(const MathUtil::Rectangle<int>& target_rc,
+@@ -903,10 +950,131 @@ void Presenter::RenderXFBToScreen(const MathUtil::Rectangle<int>& target_rc,
    }
  }
  
@@ -12959,13 +12966,13 @@ index 41d05f3..97712cc 100644
    if (g_gfx->IsHeadless() || (!m_onscreen_ui && !m_xfb_entry))
      return;
  
-@@ -934,7 +1098,18 @@ void Presenter::Present(PresentInfo* present_info)
+@@ -934,7 +1102,18 @@ void Presenter::Present(PresentInfo* present_info)
    UpdateDrawRectangle();
  
    g_gfx->BeginUtilityDrawing();
 +#ifdef __ORBIS__
 +  // Port diagnostics are done: black around the game image, as on other platforms.
-   const bool backbuffer_bound = g_gfx->BindBackbuffer({{0.0f, 0.0f, 0.0f, 1.0f}});
++  const bool backbuffer_bound = g_gfx->BindBackbuffer({{0.0f, 0.0f, 0.0f, 1.0f}});
 +  static bool s_reported_unbound = false;
 +  if (!backbuffer_bound && !s_reported_unbound)
 +  {
@@ -12973,12 +12980,12 @@ index 41d05f3..97712cc 100644
 +    ps4_boot_trace("present: backbuffer could not be bound");
 +  }
 +#else
-+  const bool backbuffer_bound = g_gfx->BindBackbuffer({{0.0f, 0.0f, 0.0f, 1.0f}});
+   const bool backbuffer_bound = g_gfx->BindBackbuffer({{0.0f, 0.0f, 0.0f, 1.0f}});
 +#endif
  
    // Render the XFB to the screen.
    if (backbuffer_bound && m_xfb_entry)
-@@ -945,7 +1120,52 @@ void Presenter::Present(PresentInfo* present_info)
+@@ -945,7 +1124,52 @@ void Presenter::Present(PresentInfo* present_info)
      AdjustRectanglesToFitBounds(&render_target_rc, &render_source_rc, m_backbuffer_width,
                                  m_backbuffer_height);
      RenderXFBToScreen(render_target_rc, m_xfb_entry->texture.get(), render_source_rc);
