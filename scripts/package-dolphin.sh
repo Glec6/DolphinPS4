@@ -21,6 +21,8 @@ cp -r "$SRC/Data/Sys" "$STAGE/Sys"
 # PkgTool's pkg_build crashes ("Sequence contains no elements") on these two folders. Themes are
 # Qt GUI icons (unused here); Load holds optional graphics mods.
 rm -rf "$STAGE/Sys/Themes" "$STAGE/Sys/Load"
+# The XMB launcher's fonts and sounds (DolphinNoGUI/PS4XMB.cpp reads /app0/xmb).
+cp -r "$HERE/../xmb" "$STAGE/xmb"
 # Vulkan (RADV on GNM) runs under the plain homebrew identity (4.5 GiB of direct memory);
 # SFO_STYLE=retroarch + PS4_PAID 0x3100000000000002 for the OpenGL (Piglet) backend.
 PKG="$(SFO_STYLE="${SFO_STYLE:-plain}" "$HERE/make-pkg.sh" "$STAGE" DLPH00010 "Dolphin" "$VERSION" DOLPHIN "$PS4_BUILD_ROOT/out" | tail -1)"
