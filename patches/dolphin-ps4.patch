@@ -3548,7 +3548,7 @@ index 51c3fff..7da3e74 100644
 +  ps4_add_eboot(dolphin-nogui)
 +endif()
 diff --git a/Source/Core/DolphinNoGUI/MainNoGUI.cpp b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
-index 3bf40ea..62bf6cd 100644
+index 3bf40ea..d43af8e 100644
 --- a/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 +++ b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 @@ -2,10 +2,17 @@
@@ -3673,7 +3673,7 @@ index 3bf40ea..62bf6cd 100644
  #endif
        });
  
-@@ -270,7 +335,291 @@ int main(const int argc, char* argv[])
+@@ -270,7 +335,295 @@ int main(const int argc, char* argv[])
  
    UICommon::SetUserDirectory(user_directory);
    UICommon::Init();
@@ -3781,11 +3781,15 @@ index 3bf40ea..62bf6cd 100644
 +    // the shader cache from earlier sessions is precompiled in the background at boot.
 +    // shader_compile=sync waits for each shader (OpenGL: Piglet can't compile off-thread).
 +    // compile_threads=<n> sets the background compiler threads (default 2).
-+    if (video != "opengl" && Platform::GetPS4Option("shader_compile", "async") == "async")
++    // shader_compile=hybrid: Dolphin's hybrid ubershaders - an ubershader draws until the
++    // specialized shader is compiled (no stutter, nothing missing; costs GPU time).
++    const std::string shader_compile = Platform::GetPS4Option("shader_compile", "async");
++    if (video != "opengl" && (shader_compile == "async" || shader_compile == "hybrid"))
 +    {
 +      const int threads = std::clamp(atoi(Platform::GetPS4Option("compile_threads", "2").c_str()), 1, 4);
 +      Config::SetBase(Config::GFX_SHADER_COMPILATION_MODE,
-+                      ShaderCompilationMode::AsynchronousSkipRendering);
++                      shader_compile == "hybrid" ? ShaderCompilationMode::AsynchronousUberShaders :
++                                                   ShaderCompilationMode::AsynchronousSkipRendering);
 +      Config::SetBase(Config::GFX_SHADER_COMPILER_THREADS, threads);
 +      Config::SetBase(Config::GFX_SHADER_PRECOMPILER_THREADS, threads);
 +    }
@@ -3965,7 +3969,7 @@ index 3bf40ea..62bf6cd 100644
  
    Common::ScopeGuard ui_common_guard([] {
      UICommon::ShutdownControllers();
-@@ -284,6 +633,12 @@ int main(const int argc, char* argv[])
+@@ -284,6 +637,12 @@ int main(const int argc, char* argv[])
    }
  
    auto core_state_changed_hook = Core::AddOnStateChangedCallback([](const Core::State state) {
@@ -3978,7 +3982,7 @@ index 3bf40ea..62bf6cd 100644
      if (state == Core::State::Uninitialized)
        s_platform->Stop();
    });
-@@ -303,6 +658,9 @@ int main(const int argc, char* argv[])
+@@ -303,6 +662,9 @@ int main(const int argc, char* argv[])
  
    DolphinAnalytics::Instance().ReportDolphinStart("nogui");
  
@@ -5698,10 +5702,10 @@ index 0000000..4af50c8
 +}  // namespace PS4IngameMenu
 diff --git a/Source/Core/DolphinNoGUI/PS4Settings.cpp b/Source/Core/DolphinNoGUI/PS4Settings.cpp
 new file mode 100755
-index 0000000..dd6ef30
+index 0000000..bc8a501
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4Settings.cpp
-@@ -0,0 +1,457 @@
+@@ -0,0 +1,467 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -5742,8 +5746,14 @@ index 0000000..dd6ef30
 +     {{"1", "Native (480p)"}, {"2", "2x (720p)"}, {"3", "3x (1080p)"}}, "1", true,
 +     "Sharper pictures at higher settings; costs GPU time."},
 +    {"fps_limit", "Frame Rate Limit", "Video",
-+     {{"0", "Unlimited"}, {"60", "60 FPS"}, {"45", "45 FPS"}, {"30", "30 FPS"}}, "0", true,
-+     "Caps the frames shown per second, for steadier pacing in games that drop frames."},
++     {{"0", "Unlimited"},
++      {"auto", "Auto (60/30)"},
++      {"60", "60 FPS"},
++      {"45", "45 FPS"},
++      {"30", "30 FPS"}},
++     "0", true,
++     "Caps the frames shown per second. Auto: 60 while the game keeps up, an even 30 when it "
++     "can't (steadier than a frame rate that bounces around)."},
 +    {"vsync", "V-Sync", "Video", {{"on", "On"}, {"off", "Off"}}, "on", true,
 +     "Waits for the TV's refresh (no tearing)."},
 +    {"show_fps", "FPS Counter", "Video", {{"on", "On"}, {"off", "Off"}}, "on", true,
@@ -5771,8 +5781,10 @@ index 0000000..dd6ef30
 +     {{"off", "Off"}, {"on", "On"}}, "off", true,
 +     "Exact texture sampling (fixes some videos, e.g. FIFA Street 2); slower."},
 +    {"shader_compile", "Shader Compilation", "Graphics",
-+     {{"async", "Asynchronous"}, {"sync", "Synchronous"}}, "async", false,
-+     "Asynchronous: no stutter, objects may appear a moment late."},
++     {{"async", "Asynchronous"}, {"hybrid", "Hybrid Ubershaders"}, {"sync", "Synchronous"}},
++     "async", false,
++     "Asynchronous: no stutter, objects may appear a moment late. Hybrid Ubershaders: no stutter "
++     "and nothing missing, costs GPU time. Synchronous: waits for each new shader."},
 +    // Performance
 +    {"cpu_clock", "Emulated CPU Clock", "Performance",
 +     {{"auto", "Auto"}, {"50", "50%"}, {"60", "60%"}, {"75", "75%"}, {"90", "90%"},
@@ -5803,7 +5815,9 @@ index 0000000..dd6ef30
 +    {"wii_sideways", "Sideways Wii Remote", "System", {{"off", "Off"}, {"on", "On"}}, "off",
 +     false, "For games played with the Wii Remote held sideways (NSMB Wii, Mario Kart Wii)."},
 +    {"audio_buffer", "Audio Buffer", "System",
-+     {{"100", "100 ms"}, {"150", "150 ms"}, {"200", "200 ms"}}, "150", false,
++     {{"100", "100 ms"}, {"150", "150 ms"}, {"200", "200 ms"}, {"250", "250 ms"},
++      {"300", "300 ms"}},
++     "150", false,
 +     "Larger is smoother when a game runs below full speed; smaller has less delay."},
 +};
 +
@@ -6095,7 +6109,7 @@ index 0000000..dd6ef30
 +  else if (key == "resolution")
 +    Config::SetBase(Config::GFX_EFB_SCALE, std::clamp(std::atoi(value.c_str()), 1, 4));
 +  else if (key == "fps_limit")
-+    ps4_fps_limit = std::max(0, std::atoi(value.c_str()));
++    ps4_fps_limit = value == "auto" ? -1 : std::max(0, std::atoi(value.c_str()));
 +  else if (key == "vsync")
 +    Config::SetBase(Config::GFX_VSYNC, on);
 +  else if (key == "show_fps")
@@ -15255,7 +15269,7 @@ index 92f7c1f..3378a49 100644
      m_default_pixel_shader = g_gfx->CreateShaderFromSource(
          ShaderStage::Pixel, GetHeader(false) + default_pixel_shader_code + GetFooter(), nullptr,
 diff --git a/Source/Core/VideoCommon/Present.cpp b/Source/Core/VideoCommon/Present.cpp
-index 41d05f3..b882ac0 100644
+index 41d05f3..26046bf 100644
 --- a/Source/Core/VideoCommon/Present.cpp
 +++ b/Source/Core/VideoCommon/Present.cpp
 @@ -3,6 +3,11 @@
@@ -15322,7 +15336,7 @@ index 41d05f3..b882ac0 100644
    ReleaseXFBContentLock();
    u64 old_xfb_id = m_last_xfb_id;
  
-@@ -165,10 +193,29 @@ bool Presenter::FetchXFB(u32 xfb_addr, u32 fb_width, u32 fb_stride, u32 fb_heigh
+@@ -165,10 +193,73 @@ bool Presenter::FetchXFB(u32 xfb_addr, u32 fb_width, u32 fb_stride, u32 fb_heigh
    return old_xfb_id == m_last_xfb_id;
  }
  
@@ -15330,7 +15344,8 @@ index 41d05f3..b882ac0 100644
 +// Menu setting fps_limit (DolphinNoGUI/PS4Settings.cpp): frames that come sooner than
 +// 1/limit after the last shown one are not presented (0 = no limit).
 +extern "C" int ps4_fps_limit;
-+int ps4_fps_limit = 0;
++int ps4_fps_limit = 0;  // -1: Auto (60/30)
++extern "C" void ps4_boot_trace(const char* line);  // port/ps4_crashlog.cpp
 +#endif
 +
  void Presenter::ViSwap(u32 xfb_addr, u32 fb_width, u32 fb_stride, u32 fb_height, u64 ticks,
@@ -15338,21 +15353,64 @@ index 41d05f3..b882ac0 100644
  {
    bool is_duplicate = FetchXFB(xfb_addr, fb_width, fb_stride, fb_height, ticks);
 +#ifdef __ORBIS__
-+  if (ps4_fps_limit > 0)
++  if (ps4_fps_limit != 0)
 +  {
-+    static Clock::time_point s_next;
 +    const auto now = Clock::now();
-+    const auto interval = std::chrono::duration_cast<Clock::duration>(
-+        std::chrono::duration<double>(1.0 / ps4_fps_limit));
-+    if (now + std::chrono::milliseconds(2) < s_next)
-+      return;
-+    s_next = (now - s_next > interval) ? now + interval : s_next + interval;
++    int limit = ps4_fps_limit;
++    if (limit < 0)
++    {
++      // Auto (60/30): the game's own frame rate (new XFBs per second) decides. Below ~52 for
++      // 2 s: an even 30; back to 60 after 3 s at 57 or more.
++      static Clock::time_point s_window = now;
++      static int s_frames = 0, s_low = 0, s_high = 0, s_cap = 0;
++      if (!is_duplicate)
++        s_frames++;
++      const double seconds = std::chrono::duration<double>(now - s_window).count();
++      if (seconds >= 1.0)
++      {
++        const double rate = s_frames / seconds;
++        if (rate < 52.0)
++        {
++          s_high = 0;
++          if (++s_low >= 2 && s_cap != 30)
++          {
++            s_cap = 30;
++            ps4_boot_trace("frame rate limit auto: 30");
++          }
++        }
++        else if (rate >= 57.0)
++        {
++          s_low = 0;
++          if (++s_high >= 3 && s_cap != 0)
++          {
++            s_cap = 0;
++            ps4_boot_trace("frame rate limit auto: 60");
++          }
++        }
++        else
++        {
++          s_low = s_high = 0;
++        }
++        s_frames = 0;
++        s_window = now;
++      }
++      limit = s_cap;
++    }
++    if (limit > 0)
++    {
++      static Clock::time_point s_next;
++      const auto interval = std::chrono::duration_cast<Clock::duration>(
++          std::chrono::duration<double>(1.0 / limit));
++      if (now + std::chrono::milliseconds(2) < s_next)
++        return;
++      s_next = (now - s_next > interval) ? now + interval : s_next + interval;
++    }
 +  }
 +#endif
  
    PresentInfo present_info{
        .present_count = m_present_count++,
-@@ -431,8 +478,23 @@ Presenter::ConvertStereoRectangle(const MathUtil::Rectangle<int>& rc) const
+@@ -431,8 +522,23 @@ Presenter::ConvertStereoRectangle(const MathUtil::Rectangle<int>& rc) const
    return std::make_tuple(left_rc, right_rc);
  }
  
@@ -15376,7 +15434,7 @@ index 41d05f3..b882ac0 100644
    if (!g_ActiveConfig.bCropCustom)
      return MathUtil::Rectangle<int>(0, 0, 0, 0);
  
-@@ -464,7 +526,11 @@ MathUtil::Rectangle<int> Presenter::AdjustForCustomCrop(const MathUtil::Rectangl
+@@ -464,7 +570,11 @@ MathUtil::Rectangle<int> Presenter::AdjustForCustomCrop(const MathUtil::Rectangl
  
  float Presenter::AdjustAspectRatioForCustomCrop(float input_aspect_ratio) const
  {
@@ -15388,7 +15446,7 @@ index 41d05f3..b882ac0 100644
      return input_aspect_ratio;
  
    const MathUtil::Rectangle<int> rect = m_xfb_rect;
-@@ -903,9 +969,139 @@ void Presenter::RenderXFBToScreen(const MathUtil::Rectangle<int>& target_rc,
+@@ -903,9 +1013,139 @@ void Presenter::RenderXFBToScreen(const MathUtil::Rectangle<int>& target_rc,
    }
  }
  
@@ -15528,7 +15586,7 @@ index 41d05f3..b882ac0 100644
  
    if (g_gfx->IsHeadless() || (!m_onscreen_ui && !m_xfb_entry))
      return;
-@@ -934,7 +1130,18 @@ void Presenter::Present(PresentInfo* present_info)
+@@ -934,7 +1174,18 @@ void Presenter::Present(PresentInfo* present_info)
    UpdateDrawRectangle();
  
    g_gfx->BeginUtilityDrawing();
@@ -15547,7 +15605,7 @@ index 41d05f3..b882ac0 100644
  
    // Render the XFB to the screen.
    if (backbuffer_bound && m_xfb_entry)
-@@ -945,7 +1152,52 @@ void Presenter::Present(PresentInfo* present_info)
+@@ -945,7 +1196,52 @@ void Presenter::Present(PresentInfo* present_info)
      AdjustRectanglesToFitBounds(&render_target_rc, &render_source_rc, m_backbuffer_width,
                                  m_backbuffer_height);
      RenderXFBToScreen(render_target_rc, m_xfb_entry->texture.get(), render_source_rc);
