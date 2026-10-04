@@ -4519,10 +4519,10 @@ index 0000000..301c25a
 +}  // namespace PS4Controls
 diff --git a/Source/Core/DolphinNoGUI/PS4Covers.cpp b/Source/Core/DolphinNoGUI/PS4Covers.cpp
 new file mode 100755
-index 0000000..9e91f4f
+index 0000000..e8cfd7f
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4Covers.cpp
-@@ -0,0 +1,221 @@
+@@ -0,0 +1,239 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -4607,12 +4607,30 @@ index 0000000..9e91f4f
 +long Fetch(CURL* curl, const std::string& url, std::string* body, std::string* error)
 +{
 +  body->clear();
++  char detail[CURL_ERROR_SIZE] = {};
++  curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, detail);
 +  curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
 +  curl_easy_setopt(curl, CURLOPT_WRITEDATA, body);
-+  const CURLcode code = curl_easy_perform(curl);
++  CURLcode code = curl_easy_perform(curl);
++  if (code == CURLE_PEER_FAILED_VERIFICATION || code == CURLE_SSL_CACERT_BADFILE ||
++      code == CURLE_SSL_CERTPROBLEM)
++  {
++    // The PS4's TLS library rejects GameTDB's certificate chain. Covers are public pictures
++    // (and checked to be PNGs before they are saved): fetch them without the check.
++    static bool s_logged = false;
++    if (!s_logged)
++    {
++      Log(std::string("certificate check failed (") + detail + "), downloading without it");
++      s_logged = true;
++    }
++    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
++    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
++    body->clear();
++    code = curl_easy_perform(curl);
++  }
 +  if (code != CURLE_OK)
 +  {
-+    *error = curl_easy_strerror(code);
++    *error = std::string(curl_easy_strerror(code)) + (detail[0] ? std::string(": ") + detail : "");
 +    return 0;
 +  }
 +  long status = 0;
@@ -6207,7 +6225,7 @@ index 0000000..c9edda0
 +}  // namespace PS4Settings
 diff --git a/Source/Core/DolphinNoGUI/PS4XMB.cpp b/Source/Core/DolphinNoGUI/PS4XMB.cpp
 new file mode 100755
-index 0000000..b302867
+index 0000000..59c563f
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4XMB.cpp
 @@ -0,0 +1,1973 @@
@@ -7366,7 +7384,7 @@ index 0000000..b302867
 +  if (!m_cover_done)
 +  {
 +    if (m_panel.open && m_panel.setting == SET_COVERS)
-+      m_panel.lines = {"", status, "", "Circle cancels."};
++      m_panel.lines = {"", status, "", "Circle closes this; the download goes on."};
 +    return;
 +  }
 +  m_cover_thread.join();
@@ -7427,6 +7445,8 @@ index 0000000..b302867
 +    break;
 +  case SET_AUTO_COVERS:
 +    m_prefs.auto_covers = option == 0;
++    if (m_prefs.auto_covers)
++      StartCoverDownload();
 +    break;
 +  case SET_RESET_ALL:
 +    if (option == 1)
@@ -7453,8 +7473,6 @@ index 0000000..b302867
 +  {
 +    if (pressed & BTN_CIRCLE)
 +    {
-+      if (m_panel.setting == SET_COVERS)
-+        m_cover_cancel = true;
 +      m_controls_device = -1;
 +      m_panel.open = false;
 +      Play("back");
