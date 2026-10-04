@@ -3506,7 +3506,7 @@ index 2dcd2ca..f6a75df 100644
      if (movie.IsMovieActive())
        movie.SaveRecording(dtmpath);
 diff --git a/Source/Core/DolphinNoGUI/CMakeLists.txt b/Source/Core/DolphinNoGUI/CMakeLists.txt
-index 51c3fff..7da3e74 100644
+index 51c3fff..224556f 100644
 --- a/Source/Core/DolphinNoGUI/CMakeLists.txt
 +++ b/Source/Core/DolphinNoGUI/CMakeLists.txt
 @@ -23,6 +23,29 @@ if(${CMAKE_SYSTEM_NAME} STREQUAL "Linux")
@@ -3519,7 +3519,7 @@ index 51c3fff..7da3e74 100644
 +  target_sources(dolphin-nogui PRIVATE PlatformPS4.cpp ${PS4_RUNTIME_SOURCES})
 +  # The XMB launcher: Dear ImGui drawn with Vulkan (PS4XMBDisplay.cpp) through Dolphin's loader.
 +  target_sources(dolphin-nogui PRIVATE PS4XMB.cpp PS4XMBDisplay.cpp PS4IngameMenu.cpp PS4Settings.cpp
-+    PS4Controls.cpp PS4Cheats.cpp PS4Covers.cpp
++    PS4Controls.cpp PS4Cheats.cpp PS4Covers.cpp PS4Glyphs.cpp
 +    ${CMAKE_SOURCE_DIR}/Externals/imgui/imgui/backends/imgui_impl_vulkan.cpp)
 +  set_source_files_properties(
 +    ${CMAKE_SOURCE_DIR}/Externals/imgui/imgui/backends/imgui_impl_vulkan.cpp
@@ -3548,7 +3548,7 @@ index 51c3fff..7da3e74 100644
 +  ps4_add_eboot(dolphin-nogui)
 +endif()
 diff --git a/Source/Core/DolphinNoGUI/MainNoGUI.cpp b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
-index 3bf40ea..d43af8e 100644
+index 3bf40ea..92993f3 100644
 --- a/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 +++ b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 @@ -2,10 +2,17 @@
@@ -3673,7 +3673,7 @@ index 3bf40ea..d43af8e 100644
  #endif
        });
  
-@@ -270,7 +335,295 @@ int main(const int argc, char* argv[])
+@@ -270,7 +335,293 @@ int main(const int argc, char* argv[])
  
    UICommon::SetUserDirectory(user_directory);
    UICommon::Init();
@@ -3899,12 +3899,10 @@ index 3bf40ea..d43af8e 100644
 +    // profile=on samples the CPU and video threads (/data/DolphinPS4/samples.log).
 +    // It also writes the JIT block map (/data/DolphinPS4/perf-<pid>.map: host address, size,
 +    // guest address) for the sampled JIT code.
++    // (Settings > Diagnostics; the sampler itself is started / paused by PS4Settings::ApplyLive.)
 +    Config::SetBase(Config::MAIN_PERF_MAP_DIR, std::string());
-+    if (Platform::GetPS4Option("profile", "off") == "on")
-+    {
++    if (PS4Settings::DiagnosticOn("profile"))
 +      Config::SetBase(Config::MAIN_PERF_MAP_DIR, "/data/DolphinPS4");
-+      ps4_sampler_start();
-+    }
 +    {
 +      const std::string cpu = cpu_info.Summarize();
 +      Platform::BootTrace(("host CPU: " + cpu).c_str());
@@ -3969,7 +3967,7 @@ index 3bf40ea..d43af8e 100644
  
    Common::ScopeGuard ui_common_guard([] {
      UICommon::ShutdownControllers();
-@@ -284,6 +637,12 @@ int main(const int argc, char* argv[])
+@@ -284,6 +635,12 @@ int main(const int argc, char* argv[])
    }
  
    auto core_state_changed_hook = Core::AddOnStateChangedCallback([](const Core::State state) {
@@ -3982,7 +3980,7 @@ index 3bf40ea..d43af8e 100644
      if (state == Core::State::Uninitialized)
        s_platform->Stop();
    });
-@@ -303,6 +662,9 @@ int main(const int argc, char* argv[])
+@@ -303,6 +660,9 @@ int main(const int argc, char* argv[])
  
    DolphinAnalytics::Instance().ReportDolphinStart("nogui");
  
@@ -4821,6 +4819,334 @@ index 0000000..d02913e
 +                const std::function<void(int, int, const std::string&)>& progress,
 +                const std::atomic<bool>& cancel);
 +}  // namespace PS4Covers
+diff --git a/Source/Core/DolphinNoGUI/PS4Glyphs.cpp b/Source/Core/DolphinNoGUI/PS4Glyphs.cpp
+new file mode 100755
+index 0000000..8713605
+--- /dev/null
++++ b/Source/Core/DolphinNoGUI/PS4Glyphs.cpp
+@@ -0,0 +1,294 @@
++// Copyright 2026 Dolphin Emulator Project
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++#include "DolphinNoGUI/PS4Glyphs.h"
++
++#include <algorithm>
++#include <cmath>
++#include <cstring>
++
++namespace PS4Glyphs
++{
++namespace
++{
++enum class Kind
++{
++  None,
++  Cross,
++  Circle,
++  Square,
++  Triangle,
++  Shoulder,  // L1 / R1
++  Trigger,   // L2 / R2 (click or analog)
++  StickPress,  // L3 / R3
++  StickDir,    // a stick pushed one way
++  Stick,       // a whole stick (stick groups)
++  DPadDir,
++  DPad,
++  Options,
++  Touchpad,
++};
++
++struct Info
++{
++  Kind kind = Kind::None;
++  const char* label = "";  // L1, R2, L, R...
++  int dir = -1;            // 0 up, 1 down, 2 left, 3 right
++  bool analog = false;     // L2 / R2 as an axis
++};
++
++Info Lookup(const std::string& name)
++{
++  struct Entry
++  {
++    const char* name;
++    Info info;
++  };
++  static const Entry ENTRIES[] = {
++      {"Cross", {Kind::Cross}},
++      {"Circle", {Kind::Circle}},
++      {"Square", {Kind::Square}},
++      {"Triangle", {Kind::Triangle}},
++      {"L1", {Kind::Shoulder, "L1"}},
++      {"R1", {Kind::Shoulder, "R1"}},
++      {"L2 Click", {Kind::Trigger, "L2"}},
++      {"R2 Click", {Kind::Trigger, "R2"}},
++      {"L2", {Kind::Trigger, "L2", -1, true}},
++      {"R2", {Kind::Trigger, "R2", -1, true}},
++      {"L3", {Kind::StickPress, "L"}},
++      {"R3", {Kind::StickPress, "R"}},
++      {"Options", {Kind::Options}},
++      {"Touchpad", {Kind::Touchpad}},
++      {"Pad N", {Kind::DPadDir, "", 0}},
++      {"Pad S", {Kind::DPadDir, "", 1}},
++      {"Pad W", {Kind::DPadDir, "", 2}},
++      {"Pad E", {Kind::DPadDir, "", 3}},
++      {"Left Y-", {Kind::StickDir, "L", 0}},
++      {"Left Y+", {Kind::StickDir, "L", 1}},
++      {"Left X-", {Kind::StickDir, "L", 2}},
++      {"Left X+", {Kind::StickDir, "L", 3}},
++      {"Right Y-", {Kind::StickDir, "R", 0}},
++      {"Right Y+", {Kind::StickDir, "R", 1}},
++      {"Right X-", {Kind::StickDir, "R", 2}},
++      {"Right X+", {Kind::StickDir, "R", 3}},
++      {"Left Stick", {Kind::Stick, "L"}},
++      {"Right Stick", {Kind::Stick, "R"}},
++      {"D-Pad", {Kind::DPad}},
++  };
++  std::string stripped;
++  for (char c : name)
++  {
++    if (c != '`')
++      stripped += c;
++  }
++  for (const Entry& entry : ENTRIES)
++  {
++    if (stripped == entry.name)
++      return entry.info;
++  }
++  return {};
++}
++
++ImU32 Colour(int r, int g, int b, float alpha)
++{
++  return IM_COL32(r, g, b, static_cast<int>(255 * alpha));
++}
++
++void CentredText(ImDrawList* dl, ImFont* font, float size, ImVec2 centre, ImU32 colour,
++                 const char* text)
++{
++  if (!font || !*text)
++    return;
++  const ImVec2 extent = font->CalcTextSizeA(size, 10000.0f, 0.0f, text);
++  dl->AddText(font, size, ImVec2(centre.x - extent.x * 0.5f, centre.y - extent.y * 0.5f), colour,
++              text);
++}
++
++// A filled triangle pointing in direction dir (0 up, 1 down, 2 left, 3 right).
++void Arrow(ImDrawList* dl, ImVec2 c, float s, int dir, ImU32 colour)
++{
++  const float dx[] = {0, 0, -1, 1}, dy[] = {-1, 1, 0, 0};
++  const ImVec2 tip(c.x + dx[dir] * s, c.y + dy[dir] * s);
++  const ImVec2 base(c.x - dx[dir] * s * 0.4f, c.y - dy[dir] * s * 0.4f);
++  const ImVec2 side(dy[dir] * s * 0.8f, dx[dir] * s * 0.8f);
++  dl->AddTriangleFilled(tip, ImVec2(base.x + side.x, base.y + side.y),
++                        ImVec2(base.x - side.x, base.y - side.y), colour);
++}
++
++void DPadShape(ImDrawList* dl, ImVec2 c, float r, int lit_dir, bool all_lit, float alpha)
++{
++  const float arm = r * 0.42f;
++  const ImU32 dim = Colour(255, 255, 255, 0.28f * alpha);
++  const ImU32 lit = Colour(255, 255, 255, alpha);
++  const ImVec2 mins[] = {{c.x - arm * 0.5f, c.y - r},
++                         {c.x - arm * 0.5f, c.y + arm * 0.5f},
++                         {c.x - r, c.y - arm * 0.5f},
++                         {c.x + arm * 0.5f, c.y - arm * 0.5f}};
++  const ImVec2 maxs[] = {{c.x + arm * 0.5f, c.y - arm * 0.5f},
++                         {c.x + arm * 0.5f, c.y + r},
++                         {c.x - arm * 0.5f, c.y + arm * 0.5f},
++                         {c.x + r, c.y + arm * 0.5f}};
++  for (int i = 0; i < 4; i++)
++    dl->AddRectFilled(mins[i], maxs[i], all_lit || i == lit_dir ? lit : dim, r * 0.12f);
++  dl->AddRectFilled(ImVec2(c.x - arm * 0.5f, c.y - arm * 0.5f),
++                    ImVec2(c.x + arm * 0.5f, c.y + arm * 0.5f), all_lit ? lit : dim);
++}
++}  // namespace
++
++float Width(const std::string& name, float h)
++{
++  switch (Lookup(name).kind)
++  {
++  case Kind::None:
++    return 0.0f;
++  case Kind::Shoulder:
++  case Kind::Trigger:
++    return h * 1.35f;
++  case Kind::Options:
++    return h * 1.15f;
++  case Kind::Touchpad:
++    return h * 1.7f;
++  default:
++    return h;
++  }
++}
++
++float Draw(ImDrawList* dl, ImFont* font, const std::string& name, float x, float cy, float h,
++           float alpha)
++{
++  const Info info = Lookup(name);
++  const float w = Width(name, h);
++  if (info.kind == Kind::None)
++    return 0.0f;
++  const float r = h * 0.5f;
++  const ImVec2 c(x + w * 0.5f, cy);
++  const ImU32 white = Colour(255, 255, 255, alpha);
++  const ImU32 disc = Colour(20, 24, 34, 0.85f * alpha);
++  const ImU32 rim = Colour(255, 255, 255, 0.35f * alpha);
++  const float line = std::max(1.5f, h * 0.085f);
++
++  switch (info.kind)
++  {
++  case Kind::Cross:
++  case Kind::Circle:
++  case Kind::Square:
++  case Kind::Triangle:
++  {
++    dl->AddCircleFilled(c, r, disc, 32);
++    dl->AddCircle(c, r, rim, 32, 1.5f);
++    const float s = r * 0.48f;
++    if (info.kind == Kind::Cross)
++    {
++      const ImU32 blue = Colour(124, 178, 232, alpha);
++      dl->AddLine(ImVec2(c.x - s, c.y - s), ImVec2(c.x + s, c.y + s), blue, line);
++      dl->AddLine(ImVec2(c.x - s, c.y + s), ImVec2(c.x + s, c.y - s), blue, line);
++    }
++    else if (info.kind == Kind::Circle)
++    {
++      dl->AddCircle(c, s, Colour(255, 102, 102, alpha), 28, line);
++    }
++    else if (info.kind == Kind::Square)
++    {
++      dl->AddRect(ImVec2(c.x - s * 0.9f, c.y - s * 0.9f), ImVec2(c.x + s * 0.9f, c.y + s * 0.9f),
++                  Colour(216, 143, 201, alpha), 0.0f, 0, line);
++    }
++    else
++    {
++      const ImU32 green = Colour(64, 224, 176, alpha);
++      dl->AddTriangle(ImVec2(c.x, c.y - s * 1.05f), ImVec2(c.x - s * 1.05f, c.y + s * 0.75f),
++                      ImVec2(c.x + s * 1.05f, c.y + s * 0.75f), green, line);
++    }
++    break;
++  }
++  case Kind::Shoulder:
++  {
++    // A flat bumper.
++    const ImVec2 a(x, cy - r * 0.62f), b(x + w, cy + r * 0.62f);
++    dl->AddRectFilled(a, b, disc, r * 0.5f);
++    dl->AddRect(a, b, rim, r * 0.5f, 0, 1.5f);
++    CentredText(dl, font, h * 0.55f, c, white, info.label);
++    break;
++  }
++  case Kind::Trigger:
++  {
++    // A trigger: rounded on top, square at the bottom; analog ones get a pressure bar.
++    const ImVec2 a(x, cy - r), b(x + w, cy + r);
++    dl->AddRectFilled(a, b, disc, r * 0.7f, ImDrawFlags_RoundCornersTop);
++    dl->AddRect(a, b, rim, r * 0.7f, ImDrawFlags_RoundCornersTop, 1.5f);
++    CentredText(dl, font, h * 0.55f, ImVec2(c.x, c.y - (info.analog ? r * 0.12f : 0.0f)), white,
++                info.label);
++    if (info.analog)
++    {
++      const float bar_y = cy + r * 0.62f;
++      dl->AddRectFilledMultiColor(ImVec2(x + w * 0.2f, bar_y - line * 0.5f),
++                                  ImVec2(x + w * 0.8f, bar_y + line * 0.5f),
++                                  Colour(255, 255, 255, 0.15f * alpha), white, white,
++                                  Colour(255, 255, 255, 0.15f * alpha));
++    }
++    break;
++  }
++  case Kind::StickPress:
++  case Kind::StickDir:
++  case Kind::Stick:
++  {
++    dl->AddCircleFilled(c, r, disc, 32);
++    dl->AddCircle(c, r, rim, 32, 1.5f);
++    dl->AddCircle(c, r * 0.68f, Colour(255, 255, 255, 0.5f * alpha), 28, 1.5f);
++    if (info.kind == Kind::StickPress)
++    {
++      // L3 / R3: the stick top pushed in.
++      CentredText(dl, font, h * 0.42f, ImVec2(c.x, c.y - r * 0.05f), white,
++                  info.label[0] == 'L' ? "L3" : "R3");
++    }
++    else
++    {
++      CentredText(dl, font, h * 0.42f, c, white, info.label);
++      if (info.kind == Kind::StickDir)
++      {
++        const float dx[] = {0, 0, -1, 1}, dy[] = {-1, 1, 0, 0};
++        Arrow(dl, ImVec2(c.x + dx[info.dir] * r * 0.84f, c.y + dy[info.dir] * r * 0.84f),
++              r * 0.26f, info.dir, Colour(255, 214, 102, alpha));
++      }
++      else
++      {
++        for (int d = 0; d < 4; d++)
++        {
++          const float dx[] = {0, 0, -1, 1}, dy[] = {-1, 1, 0, 0};
++          Arrow(dl, ImVec2(c.x + dx[d] * r * 0.84f, c.y + dy[d] * r * 0.84f), r * 0.18f, d,
++                Colour(255, 255, 255, 0.7f * alpha));
++        }
++      }
++    }
++    break;
++  }
++  case Kind::DPadDir:
++  case Kind::DPad:
++    DPadShape(dl, c, r * 0.95f, info.dir, info.kind == Kind::DPad, alpha);
++    break;
++  case Kind::Options:
++  {
++    // A small pill with the three-line OPTIONS mark.
++    const ImVec2 a(x + w * 0.18f, cy - r * 0.8f), b(x + w * 0.82f, cy + r * 0.8f);
++    dl->AddRectFilled(a, b, disc, r * 0.3f);
++    dl->AddRect(a, b, rim, r * 0.3f, 0, 1.5f);
++    for (int i = -1; i <= 1; i++)
++    {
++      const float y = cy + i * r * 0.32f;
++      dl->AddLine(ImVec2(c.x - r * 0.3f, y), ImVec2(c.x + r * 0.3f, y), white, line * 0.8f);
++    }
++    break;
++  }
++  case Kind::Touchpad:
++  {
++    const ImVec2 a(x, cy - r * 0.7f), b(x + w, cy + r * 0.7f);
++    dl->AddRectFilled(a, b, disc, r * 0.25f);
++    dl->AddRect(a, b, white, r * 0.25f, 0, line * 0.8f);
++    dl->AddCircleFilled(ImVec2(c.x, cy), r * 0.14f, white, 12);
++    break;
++  }
++  case Kind::None:
++    break;
++  }
++  return w;
++}
++}  // namespace PS4Glyphs
+diff --git a/Source/Core/DolphinNoGUI/PS4Glyphs.h b/Source/Core/DolphinNoGUI/PS4Glyphs.h
+new file mode 100755
+index 0000000..5157e21
+--- /dev/null
++++ b/Source/Core/DolphinNoGUI/PS4Glyphs.h
+@@ -0,0 +1,22 @@
++// Copyright 2026 Dolphin Emulator Project
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++// DualShock 4 control icons drawn with ImGui primitives (no image assets): face buttons in their
++// PlayStation colours, shoulder buttons, sticks, D-pad, Options and touch pad. Used by the XMB's
++// Controls lists.
++
++#pragma once
++
++#include <string>
++
++#include <imgui.h>
++
++namespace PS4Glyphs
++{
++// Width of the icon for a PS4Pad input name ("Cross", "L2 Click", "Pad N", "Left X-") or stick
++// group ("Left Stick", "Right Stick", "D-Pad") at height h; 0 when it has no icon (show text).
++float Width(const std::string& name, float h);
++// Draws it with its left edge at x, centred vertically on cy. Returns the width drawn.
++float Draw(ImDrawList* dl, ImFont* font, const std::string& name, float x, float cy, float h,
++           float alpha);
++}  // namespace PS4Glyphs
 diff --git a/Source/Core/DolphinNoGUI/PS4IngameMenu.cpp b/Source/Core/DolphinNoGUI/PS4IngameMenu.cpp
 new file mode 100755
 index 0000000..5546538
@@ -5702,10 +6028,10 @@ index 0000000..4af50c8
 +}  // namespace PS4IngameMenu
 diff --git a/Source/Core/DolphinNoGUI/PS4Settings.cpp b/Source/Core/DolphinNoGUI/PS4Settings.cpp
 new file mode 100755
-index 0000000..bc8a501
+index 0000000..3827c7d
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4Settings.cpp
-@@ -0,0 +1,467 @@
+@@ -0,0 +1,519 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -5718,6 +6044,7 @@ index 0000000..bc8a501
 +#include <mutex>
 +
 +#include "Common/Config/Config.h"
++#include "Common/Logging/LogManager.h"
 +#include "Core/Config/GraphicsSettings.h"
 +#include "Core/Config/MainSettings.h"
 +#include "VideoCommon/VideoConfig.h"
@@ -5726,6 +6053,9 @@ index 0000000..bc8a501
 +extern "C" int ps4_zoom_letterbox;  // VideoCommon/Present.cpp
 +extern "C" int ps4_fps_limit;       // VideoCommon/Present.cpp
 +extern "C" int ps4_auto_clock;      // DolphinNoGUI/PlatformPS4.cpp
++extern "C" int ps4_perf_log;        // VideoCommon/Present.cpp
++extern "C" int ps4_freeze_reports;  // DolphinNoGUI/PlatformPS4.cpp
++extern "C" void ps4_sampler_set_enabled(int on);  // DolphinPS4 port/ps4_sampler.cpp
 +
 +namespace PS4Settings
 +{
@@ -5802,8 +6132,6 @@ index 0000000..bc8a501
 +     "Shorter loading pauses (rarely breaks a game)."},
 +    {"perf_overlay", "Performance Graphs", "Performance", {{"off", "Off"}, {"on", "On"}}, "off",
 +     true, "Frame time and speed graphs on screen."},
-+    {"profile", "Profiler Logging", "Performance", {{"off", "Off"}, {"on", "On"}}, "off", false,
-+     "Records where the time goes (samples.log), for diagnosing slow games."},
 +    // System
 +    {"volume", "Game Volume", "System",
 +     {{"100", "100"}, {"90", "90"}, {"80", "80"}, {"70", "70"}, {"60", "60"}, {"50", "50"},
@@ -5819,9 +6147,21 @@ index 0000000..bc8a501
 +      {"300", "300 ms"}},
 +     "150", false,
 +     "Larger is smoother when a game runs below full speed; smaller has less delay."},
++    // Diagnostics
++    {"diagnostics_all", "All Diagnostics", "Diagnostics", {{"on", "On"}, {"off", "Off"}}, "on",
++     true, "Every switch below at once. Off: nothing is recorded while you play."},
++    {"perf_log", "Performance Log", "Diagnostics", {{"on", "On"}, {"off", "Off"}}, "on", true,
++     "Speed, FPS and hitches every 2 seconds (boot-trace.log)."},
++    {"freeze_reports", "Freeze Reports", "Diagnostics", {{"on", "On"}, {"off", "Off"}}, "on",
++     true, "Where the emulator was stuck when a game freezes, stalls or starts slowly."},
++    {"emu_log", "Emulator Log", "Diagnostics", {{"on", "On"}, {"off", "Off"}}, "on", true,
++     "Dolphin's own messages (dolphin.log)."},
++    {"profile", "Profiler", "Diagnostics", {{"off", "Off"}, {"on", "On"}}, "off", true,
++     "Records where the time goes (samples.log). Costs speed - only for diagnosing slow games."},
 +};
 +
-+const std::vector<const char*> CATEGORIES = {"Video", "Graphics", "Performance", "System"};
++const std::vector<const char*> CATEGORIES = {"Video", "Graphics", "Performance", "System",
++                                             "Diagnostics"};
 +
 +std::mutex s_mutex;
 +std::string s_path;
@@ -6090,10 +6430,48 @@ index 0000000..bc8a501
 +  return setting.choices[index].value;
 +}
 +
++// Diagnostics: each switch's own value; what applies also needs All Diagnostics on.
++std::map<std::string, bool> s_diagnostics;
++
++bool DiagnosticRaw(const std::string& key)
++{
++  const auto it = s_diagnostics.find(key);
++  if (it != s_diagnostics.end())
++    return it->second;
++  const Setting* setting = Find(key);
++  return setting && std::string(setting->fallback) == "on";
++}
++
++void ApplyDiagnostics()
++{
++  ps4_perf_log = DiagnosticOn("perf_log") ? 1 : 0;
++  ps4_freeze_reports = DiagnosticOn("freeze_reports") ? 1 : 0;
++  ps4_sampler_set_enabled(DiagnosticOn("profile") ? 1 : 0);
++  // Dolphin's own log (dolphin.log): the listeners stay registered, only their output stops.
++  const bool emu_log = DiagnosticOn("emu_log");
++  auto* log_manager = Common::Log::LogManager::GetInstance();
++  if (log_manager)
++  {
++    log_manager->EnableListener(Common::Log::LogListener::CONSOLE_LISTENER, emu_log);
++    log_manager->EnableListener(Common::Log::LogListener::FILE_LISTENER, emu_log);
++  }
++}
++
++bool DiagnosticOn(const std::string& key)
++{
++  return DiagnosticRaw("diagnostics_all") && DiagnosticRaw(key);
++}
++
 +void ApplyLive(const std::string& key, const std::string& value)
 +{
 +  const bool on = value == "on";
-+  if (key == "aspect")
++  if (key == "diagnostics_all" || key == "perf_log" || key == "freeze_reports" ||
++      key == "emu_log" || key == "profile")
++  {
++    s_diagnostics[key] = on;
++    ApplyDiagnostics();
++  }
++  else if (key == "aspect")
 +  {
 +    Config::SetBase(Config::GFX_ASPECT_RATIO, value == "wide"     ? AspectMode::ForceWide :
 +                                              value == "standard" ? AspectMode::ForceStandard :
@@ -6175,10 +6553,10 @@ index 0000000..bc8a501
 +}  // namespace PS4Settings
 diff --git a/Source/Core/DolphinNoGUI/PS4Settings.h b/Source/Core/DolphinNoGUI/PS4Settings.h
 new file mode 100755
-index 0000000..c9edda0
+index 0000000..41d2bb2
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4Settings.h
-@@ -0,0 +1,76 @@
+@@ -0,0 +1,78 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -6254,13 +6632,15 @@ index 0000000..c9edda0
 +
 +// Game process only: applies a live setting to the running emulator (Config / port globals).
 +void ApplyLive(const std::string& key, const std::string& value);
++// A Diagnostics switch as applied (its own value and All Diagnostics), after ApplyLive.
++bool DiagnosticOn(const std::string& key);
 +}  // namespace PS4Settings
 diff --git a/Source/Core/DolphinNoGUI/PS4XMB.cpp b/Source/Core/DolphinNoGUI/PS4XMB.cpp
 new file mode 100755
-index 0000000..59c563f
+index 0000000..eac4174
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4XMB.cpp
-@@ -0,0 +1,1973 @@
+@@ -0,0 +1,2090 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -6297,6 +6677,7 @@ index 0000000..59c563f
 +#include "DolphinNoGUI/PS4Cheats.h"
 +#include "DolphinNoGUI/PS4Controls.h"
 +#include "DolphinNoGUI/PS4Covers.h"
++#include "DolphinNoGUI/PS4Glyphs.h"
 +#include "DolphinNoGUI/PS4Settings.h"
 +#include "DolphinNoGUI/PS4XMBDisplay.h"
 +
@@ -6635,7 +7016,6 @@ index 0000000..59c563f
 +  bool sounds = true;
 +  int volume = 80;
 +  bool clock = true;
-+  bool auto_covers = true;  // fetch missing covers in the background when the XMB opens
 +  std::string last_game;
 +
 +  void Load(const std::string& path)
@@ -6660,8 +7040,6 @@ index 0000000..59c563f
 +        volume = std::clamp(std::atoi(value.c_str()), 0, 100);
 +      else if (key == "clock")
 +        clock = value == "on";
-+      else if (key == "auto_covers")
-+        auto_covers = value == "on";
 +      else if (key == "last_game")
 +        last_game = value;
 +    }
@@ -6672,7 +7050,7 @@ index 0000000..59c563f
 +    file << "# Dolphin XMB preferences (edited by the menu)\n";
 +    file << "theme=" << theme << "\nwallpaper=" << wallpaper << "\nsounds="
 +         << (sounds ? "on" : "off") << "\nvolume=" << volume << "\nclock="
-+         << (clock ? "on" : "off") << "\nauto_covers=" << (auto_covers ? "on" : "off")
++         << (clock ? "on" : "off")
 +         << "\nlast_game=" << last_game << "\n";
 +  }
 +};
@@ -6721,7 +7099,6 @@ index 0000000..59c563f
 +  SET_RESET_ALL,
 +  SET_CONTROLS,
 +  SET_COVERS,
-+  SET_AUTO_COVERS,
 +  SET_GROUP = 100,  // + index into PS4Settings::Categories(): an emulation settings list
 +};
 +
@@ -6734,6 +7111,7 @@ index 0000000..59c563f
 +  bool header = false;  // category title
 +  bool scope = false;   // "Apply To: All Games / This Game" (game settings)
 +  bool note = false;    // takes effect at the next game start
++  std::string glyph;    // Controls: the DualShock 4 control, drawn as its icon
 +};
 +
 +// A PSP-style panel on the right: options to pick from, information text, or a settings list.
@@ -6796,6 +7174,7 @@ index 0000000..59c563f
 +  void DrawItem(ImDrawList* dl, const Item& item, float y, bool selected, float alpha);
 +  void DrawSidePanel(ImDrawList* dl, float dt);
 +  void DrawHints(ImDrawList* dl);
++  void DrawIntro(ImDrawList* dl, float dt);
 +  void Text(ImDrawList* dl, ImFont* font, float size, ImVec2 pos, ImU32 color,
 +            const std::string& text, bool shadow = true);
 +  float TextWidth(ImFont* font, float size, const std::string& text);
@@ -6840,6 +7219,12 @@ index 0000000..59c563f
 +  PS4Covers::Result m_cover_result;
 +  float m_time = 0.0f;
 +  float m_fade = 1.0f;  // black overlay: fades in at start, out at launch
++  // Start-up animation (app start and back from a game): the dolphin leaps in, lands with a
++  // ripple, the title appears, then it all dissolves into the XMB. Any button skips it.
++  bool m_intro = true;
++  float m_intro_time = 0.0f;
++  ImTextureID m_intro_dolphin{}, m_intro_title{};
++  float m_intro_dolphin_aspect = 2.0f, m_intro_title_aspect = 5.4f;
 +  int m_launch = -1;
 +  float m_launch_time = 0.0f;
 +  bool m_quit = false;
@@ -6918,7 +7303,8 @@ index 0000000..59c563f
 +  if (!m_bold)
 +    m_bold = m_font;
 +
-+  for (const char* name : {"move", "category", "confirm", "back", "launch", "error", "menu"})
++  for (const char* name :
++       {"move", "category", "confirm", "back", "launch", "error", "menu", "intro"})
 +  {
 +    // A sound in data_dir/themes/sounds replaces the built-in one.
 +    std::unique_ptr<Sound> sound = LoadWav(m_data_dir + "/themes/sounds/" + name + ".wav");
@@ -6935,6 +7321,9 @@ index 0000000..59c563f
 +  m_icon_gc = LoadPngTexture(resources + "Platform_Gamecube@4x.png");
 +  m_icon_wii = LoadPngTexture(resources + "Platform_Wii@4x.png");
 +  m_logo = LoadPngTexture(resources + "dolphin_logo@2x.png");
++  m_intro_dolphin =
++      LoadPngTexture(m_assets_dir + "/xmb/intro-dolphin.png", &m_intro_dolphin_aspect);
++  m_intro_title = LoadPngTexture(m_assets_dir + "/xmb/intro-title.png", &m_intro_title_aspect);
 +  LoadCovers();
 +
 +  // Banners from the discs (GameCube; Wii discs carry none Dolphin can read without a NAND).
@@ -7027,7 +7416,8 @@ index 0000000..59c563f
 +  constexpr const char* GROUP_HELP[] = {"Picture, resolution, frame rate",
 +                                        "Filtering, anti-aliasing, effects",
 +                                        "CPU clock, speed features, profiler",
-+                                        "Game volume, audio"};
++                                        "Game volume, audio",
++                                        "Logs, freeze reports, profiler - on or off"};
 +  for (size_t i = 0; i < categories.size(); i++)
 +  {
 +    settings.push_back({categories[i], i < std::size(GROUP_HELP) ? GROUP_HELP[i] : "", -1, -1,
@@ -7039,8 +7429,6 @@ index 0000000..59c563f
 +  settings.push_back({"Controls", "Remap the GameCube and Wii buttons", -1, -1, SET_CONTROLS});
 +  settings.push_back({"Download Covers", "Box art from GameTDB for your games", -1, -1,
 +                      SET_COVERS});
-+  settings.push_back({"Automatic Covers", m_prefs.auto_covers ? "On" : "Off", -1, -1,
-+                      SET_AUTO_COVERS});
 +  settings.push_back({"Reset All Settings", "Every setting back to the defaults", -1, -1,
 +                      SET_RESET_ALL});
 +  settings.push_back({"About", "", -1, -1, SET_ABOUT});
@@ -7102,12 +7490,6 @@ index 0000000..59c563f
 +  case SET_COVERS:
 +    m_panel.title = "Download Covers";
 +    StartCoverDownload();
-+    break;
-+  case SET_AUTO_COVERS:
-+    m_panel.title = "Automatic Covers";
-+    m_panel.options = {"On", "Off"};
-+    m_panel.selected = m_prefs.auto_covers ? 0 : 1;
-+    m_panel.lines = {"", "Downloads missing covers in the", "background when the XMB opens."};
 +    break;
 +  case SET_RESET_ALL:
 +    m_panel.title = "Reset All Settings";
@@ -7298,9 +7680,11 @@ index 0000000..59c563f
 +  for (size_t i = 0; i < bindings.size(); i++)
 +  {
 +    const std::string value = PS4Controls::Get(device, bindings[i]);
-+    rows.push_back({bindings[i].label,
-+                    bindings[i].stick_group ? value : PS4Controls::Describe(value),
-+                    "ctl:" + std::to_string(i)});
++    SettingRow row{bindings[i].label,
++                   bindings[i].stick_group ? value : PS4Controls::Describe(value),
++                   "ctl:" + std::to_string(i)};
++    row.glyph = value;
++    rows.push_back(std::move(row));
 +  }
 +  rows.push_back({"", "", "", true});
 +  rows.push_back({"Reset to Default", "", "__ctlreset__"});
@@ -7474,11 +7858,6 @@ index 0000000..59c563f
 +    break;
 +  case SET_CLOCK:
 +    m_prefs.clock = option == 0;
-+    break;
-+  case SET_AUTO_COVERS:
-+    m_prefs.auto_covers = option == 0;
-+    if (m_prefs.auto_covers)
-+      StartCoverDownload();
 +    break;
 +  case SET_RESET_ALL:
 +    if (option == 1)
@@ -7972,10 +8351,35 @@ index 0000000..59c563f
 +      }
 +      Text(dl, sel ? m_bold : m_font, sel ? 32.0f : 30.0f, ImVec2(x0 + 60, ry + 4), text,
 +           row.label);
-+      const std::string value = sel ? "< " + row.value + " >" : row.value;
-+      const float tw = TextWidth(m_font, 28, value);
-+      const ImU32 colour = row.note ? Rgba(0xFFC870, m_panel.slide) : text;
-+      Text(dl, m_font, 28, ImVec2(W - 70 - tw, ry + 7), colour, value);
++      // Controls: the DualShock 4 control's icon instead of its name (names without an icon,
++      // such as combinations, stay text).
++      constexpr float GLYPH_H = 38.0f;
++      const float gw = row.glyph.empty() || (sel && m_capture) ?
++                           0.0f :
++                           PS4Glyphs::Width(row.glyph, GLYPH_H);
++      if (gw > 0.0f)
++      {
++        float right = W - 70;
++        if (sel)
++        {
++          const float aw = TextWidth(m_font, 28, " >");
++          Text(dl, m_font, 28, ImVec2(right - aw, ry + 7), text, " >");
++          right -= aw;
++        }
++        PS4Glyphs::Draw(dl, m_bold, row.glyph, right - gw, ry + 23, GLYPH_H, m_panel.slide);
++        if (sel)
++        {
++          const float lw = TextWidth(m_font, 28, "< ");
++          Text(dl, m_font, 28, ImVec2(right - gw - lw, ry + 7), text, "< ");
++        }
++      }
++      else
++      {
++        const std::string value = sel ? "< " + row.value + " >" : row.value;
++        const float tw = TextWidth(m_font, 28, value);
++        const ImU32 colour = row.note ? Rgba(0xFFC870, m_panel.slide) : text;
++        Text(dl, m_font, 28, ImVec2(W - 70 - tw, ry + 7), colour, value);
++      }
 +    }
 +    dl->PopClipRect();
 +    if (m_panel.selected >= 0 && m_panel.selected < static_cast<int>(m_panel.rows.size()))
@@ -8136,6 +8540,93 @@ index 0000000..59c563f
 +  }
 +  if (m_fade > 0.005f)
 +    dl->AddRectFilled(ImVec2(0, 0), ImVec2(W, H), IM_COL32(0, 0, 0, static_cast<int>(m_fade * 255)));
++  DrawIntro(dl, dt);
++}
++
++void Menu::DrawIntro(ImDrawList* dl, float dt)
++{
++  if (!m_intro)
++    return;
++  if (m_intro_dolphin == ImTextureID{})
++  {
++    m_intro = false;  // the images are missing: no intro
++    return;
++  }
++  if (m_intro_time == 0.0f)
++    Play("intro");
++  m_intro_time += dt;
++  const float t = m_intro_time;
++  constexpr float LAND = 0.95f, OUT_START = 1.9f, END = 2.5f;
++  if (t >= END)
++  {
++    m_intro = false;
++    return;
++  }
++  auto clamp01 = [](float v) { return std::clamp(v, 0.0f, 1.0f); };
++  auto smooth = [](float v) { return v * v * (3.0f - 2.0f * v); };
++  auto alpha = [](float a) { return static_cast<int>(std::clamp(a, 0.0f, 1.0f) * 255.0f); };
++  const float out = smooth(clamp01((t - OUT_START) / (END - OUT_START)));
++  const float vis = 1.0f - out;
++
++  // Night-sea background with a soft glow where the dolphin lands.
++  const ImVec2 centre(W * 0.5f, H * 0.40f);
++  dl->AddRectFilledMultiColor(ImVec2(0, 0), ImVec2(W, H), IM_COL32(4, 10, 28, alpha(vis)),
++                              IM_COL32(4, 10, 28, alpha(vis)), IM_COL32(0, 0, 0, alpha(vis)),
++                              IM_COL32(0, 0, 0, alpha(vis)));
++  const float glow = clamp01((t - 0.3f) / 0.8f) * vis;
++  for (int i = 0; i < 6; i++)
++  {
++    const float r = 260.0f + i * 70.0f;
++    dl->AddCircleFilled(centre, r, IM_COL32(60, 110, 190, alpha(0.05f * glow)), 64);
++  }
++
++  // The leap: from below the bottom-right corner, over an arc, head first (the artwork faces
++  // left), easing out into the centre; the body follows the arc and levels out as it lands.
++  const float p = 1.0f - std::pow(1.0f - clamp01((t - 0.05f) / (LAND - 0.05f)), 3.0f);
++  const ImVec2 p0(W * 0.98f, H * 1.10f), p1(W * 0.70f, H * -0.05f), p2 = centre;
++  const float u = 1.0f - p;
++  ImVec2 pos(u * u * p0.x + 2 * u * p * p1.x + p * p * p2.x,
++             u * u * p0.y + 2 * u * p * p1.y + p * p * p2.y);
++  const ImVec2 vel(2 * u * (p1.x - p0.x) + 2 * p * (p2.x - p1.x),
++                   2 * u * (p1.y - p0.y) + 2 * p * (p2.y - p1.y));
++  const float heading = std::atan2(vel.y, vel.x) - 3.14159265f;  // the head points -x
++  float angle = std::remainder(heading, 6.2831853f) * (1.0f - p);
++  // After landing it floats gently.
++  if (t > LAND)
++    pos.y += std::sin((t - LAND) * 3.2f) * 6.0f * clamp01((t - LAND) / 0.3f);
++  const float scale = (0.55f + 0.45f * p) * (1.0f + 0.12f * out);
++  const float dw = 760.0f * scale, dh = dw / m_intro_dolphin_aspect;
++  const float c = std::cos(angle), s = std::sin(angle);
++  auto corner = [&](float x, float y) {
++    return ImVec2(pos.x + x * c - y * s, pos.y + x * s + y * c);
++  };
++  const int dolphin_alpha = alpha(clamp01((t - 0.05f) / 0.25f) * vis);
++  dl->AddImageQuad(ImTextureRef(m_intro_dolphin), corner(-dw / 2, -dh / 2), corner(dw / 2, -dh / 2),
++                   corner(dw / 2, dh / 2), corner(-dw / 2, dh / 2), ImVec2(0, 0), ImVec2(1, 0),
++                   ImVec2(1, 1), ImVec2(0, 1), IM_COL32(255, 255, 255, dolphin_alpha));
++
++  // Ripples spreading out where it landed (flattened rings, cyan and pink like the artwork).
++  for (int i = 0; i < 3; i++)
++  {
++    const float q = clamp01((t - LAND - i * 0.18f) / 1.0f);
++    if (q <= 0.0f || q >= 1.0f)
++      continue;
++    const float r = 120.0f + 620.0f * (1.0f - (1.0f - q) * (1.0f - q));
++    const ImU32 colour = i % 2 == 0 ? IM_COL32(110, 220, 255, alpha(0.55f * (1.0f - q) * vis)) :
++                                      IM_COL32(255, 170, 210, alpha(0.45f * (1.0f - q) * vis));
++    dl->AddEllipse(ImVec2(centre.x, centre.y + 175.0f), ImVec2(r, r * 0.16f), colour, 0.0f, 96,
++                   3.0f);
++  }
++
++  // The title rises into place under the dolphin.
++  if (m_intro_title != ImTextureID{})
++  {
++    const float q = smooth(clamp01((t - 1.0f) / 0.45f));
++    const float tw = 820.0f, th = tw / m_intro_title_aspect;
++    const ImVec2 at(W * 0.5f - tw / 2, H * 0.71f + 24.0f * (1.0f - q));
++    dl->AddImage(ImTextureRef(m_intro_title), at, ImVec2(at.x + tw, at.y + th), ImVec2(0, 0),
++                 ImVec2(1, 1), IM_COL32(255, 255, 255, alpha(q * vis)));
++  }
 +}
 +
 +std::string Menu::Run()
@@ -8174,16 +8665,14 @@ index 0000000..59c563f
 +      m_item_pos[static_cast<int>(Category::Games)] = static_cast<float>(i);
 +    }
 +  }
-+  if (m_prefs.auto_covers)
++  // Covers missing for any game are fetched in the background every time the app opens.
++  for (const Game& game : m_games)
 +  {
-+    for (const Game& game : m_games)
++    if (!game.id.empty() && game.cover == ImTextureID{})
 +    {
-+      if (!game.id.empty() && game.cover == ImTextureID{})
-+      {
-+        Log("covers: downloading the missing ones in the background");
-+        StartCoverDownload();
-+        break;
-+      }
++      Log("covers: downloading the missing ones in the background");
++      StartCoverDownload();
++      break;
 +    }
 +  }
 +  Log("menu: " + std::to_string(m_games.size()) + " games, " +
@@ -8200,8 +8689,16 @@ index 0000000..59c563f
 +    io.DeltaTime = dt > 0.0f ? dt : 1.0f / 60.0f;
 +
 +    UpdateCapture(dt);
-+    if (!m_capture)
++    if (m_intro)
++    {
++      // Any button: straight to the dissolve.
++      if (m_input.Poll(dt) != 0)
++        m_intro_time = std::max(m_intro_time, 1.9f);
++    }
++    else if (!m_capture)
++    {
 +      HandleInput(m_input.Poll(dt));
++    }
 +    UpdateCoverDownload();
 +
 +    m_display.BeginFrame();
@@ -8916,10 +9413,10 @@ index f4dc8a9..4e5ff67 100644
  
 diff --git a/Source/Core/DolphinNoGUI/PlatformPS4.cpp b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
 new file mode 100644
-index 0000000..df3c53c
+index 0000000..03e899d
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
-@@ -0,0 +1,1066 @@
+@@ -0,0 +1,1077 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -8982,6 +9479,12 @@ index 0000000..df3c53c
 +extern "C" int sceSystemServiceLoadExec(const char* path, char* const argv[]);
 +extern "C" void ps4_boot_trace(const char* stage);
 +extern "C" void ps4_dump_thread_stacks(const char* path, const char* reason);  // ps4_sampler.cpp
++// Settings > Diagnostics (PS4Settings.cpp): Performance Log (VideoCommon/Present.cpp) and Freeze
++// Reports (stall, slow start and hang stack dumps, below).
++extern "C" int ps4_perf_log;
++extern "C" {
++int ps4_freeze_reports = 1;
++}
 +extern "C" int ps4_jit_in_system_pool;           // DolphinPS4 port/ps4_runtime.cpp
 +extern "C" unsigned long long ps4_fault_count;
 +
@@ -9293,7 +9796,8 @@ index 0000000..df3c53c
 +    Core::HostDispatchJobs(Core::System::GetInstance());
 +    {
 +      const auto now = std::chrono::steady_clock::now();
-+      if (boot_dumps < 2 && Core::GetState(Core::System::GetInstance()) == Core::State::Starting &&
++      if (ps4_freeze_reports && boot_dumps < 2 &&
++          Core::GetState(Core::System::GetInstance()) == Core::State::Starting &&
 +          now - boot_since > std::chrono::seconds(boot_dumps == 0 ? 4 : 12))
 +      {
 +        boot_dumps++;
@@ -9312,7 +9816,8 @@ index 0000000..df3c53c
 +        stall_since = now;
 +        stall_dumped = false;
 +      }
-+      else if (!stall_dumped && stall_dumps < 3 && now - stall_since > std::chrono::milliseconds(800))
++      else if (ps4_freeze_reports && !stall_dumped && stall_dumps < 3 &&
++               now - stall_since > std::chrono::milliseconds(800))
 +      {
 +        stall_dumped = true;
 +        stall_dumps++;
@@ -9507,15 +10012,18 @@ index 0000000..df3c53c
 +                 "pokes %llu reg loads %llu tex uploads %llu",
 +                 rate[0], rate[1], rate[2], rate[6], rate[3], rate[4], rate[5], rate[7]);
 +      }
-+      BootTrace(line);
-+      LogProfile();
++      if (ps4_perf_log)
++      {
++        BootTrace(line);
++        LogProfile();
++      }
 +
 +      auto& system = Core::System::GetInstance();
 +      const u64 ticks = system.GetCoreTiming().GetTicks();
 +      // Armed after 40 s: emulation legitimately stands still for a few seconds while booting.
 +      if (seconds > 40 && Core::GetState(system) == Core::State::Running && ticks == watchdog_ticks)
 +      {
-+        if (++watchdog_stalled == 2)  // ~4 s: people close a frozen app quickly
++        if (++watchdog_stalled == 2 && ps4_freeze_reports)  // ~4 s: people close a frozen app quickly
 +        {
 +          char reason[96];
 +          snprintf(reason, sizeof(reason), "emulation stalled ~4 s at %lld s",
@@ -15321,7 +15829,7 @@ index 92f7c1f..3378a49 100644
      m_default_pixel_shader = g_gfx->CreateShaderFromSource(
          ShaderStage::Pixel, GetHeader(false) + default_pixel_shader_code + GetFooter(), nullptr,
 diff --git a/Source/Core/VideoCommon/Present.cpp b/Source/Core/VideoCommon/Present.cpp
-index 41d05f3..26046bf 100644
+index 41d05f3..17d066b 100644
 --- a/Source/Core/VideoCommon/Present.cpp
 +++ b/Source/Core/VideoCommon/Present.cpp
 @@ -3,6 +3,11 @@
@@ -15498,12 +16006,17 @@ index 41d05f3..26046bf 100644
      return input_aspect_ratio;
  
    const MathUtil::Rectangle<int> rect = m_xfb_rect;
-@@ -903,9 +1013,139 @@ void Presenter::RenderXFBToScreen(const MathUtil::Rectangle<int>& target_rc,
+@@ -903,9 +1013,144 @@ void Presenter::RenderXFBToScreen(const MathUtil::Rectangle<int>& target_rc,
    }
  }
  
 +#ifdef __ORBIS__
 +extern "C" void ps4_boot_trace(const char* stage);
++// Settings > Diagnostics > Performance Log (DolphinNoGUI/PS4Settings.cpp): the monitor, hitch and
++// present lines in boot-trace.log.
++extern "C" {
++int ps4_perf_log = 1;
++}
 +
 +// Hitch detector (PS4 port): a gap of more than 150 ms between presented frames is logged to
 +// boot-trace.log with what happened in it - how much emulated time passed (little = the CPU
@@ -15523,7 +16036,7 @@ index 41d05f3..26046bf 100644
 +  const unsigned long long tsc = __rdtsc();
 +  const u64 emu = Core::System::GetInstance().GetCoreTiming().GetTicks();
 +  const double gap_ms = std::chrono::duration<double, std::milli>(now - s_last).count();
-+  if (gap_ms > 150.0 && s_last_emu != 0)
++  if (gap_ms > 150.0 && s_last_emu != 0 && ps4_perf_log)
 +  {
 +    const double tsc_per_ms = (tsc - s_last_tsc) / gap_ms;
 +    const double emu_ms = (emu - s_last_emu) * 1000.0 /
@@ -15625,7 +16138,7 @@ index 41d05f3..26046bf 100644
 +  static u64 s_with_xfb = 0;
 +  if (m_xfb_entry)
 +    s_with_xfb++;
-+  if (m_present_count % 120 == 0)
++  if (m_present_count % 120 == 0 && ps4_perf_log)
 +  {
 +    char line[160];
 +    snprintf(line, sizeof(line), "present: %llu calls, %llu with an XFB, XFB rect %dx%d",
@@ -15638,7 +16151,7 @@ index 41d05f3..26046bf 100644
  
    if (g_gfx->IsHeadless() || (!m_onscreen_ui && !m_xfb_entry))
      return;
-@@ -934,7 +1174,18 @@ void Presenter::Present(PresentInfo* present_info)
+@@ -934,7 +1179,18 @@ void Presenter::Present(PresentInfo* present_info)
    UpdateDrawRectangle();
  
    g_gfx->BeginUtilityDrawing();
@@ -15657,7 +16170,7 @@ index 41d05f3..26046bf 100644
  
    // Render the XFB to the screen.
    if (backbuffer_bound && m_xfb_entry)
-@@ -945,7 +1196,52 @@ void Presenter::Present(PresentInfo* present_info)
+@@ -945,7 +1201,52 @@ void Presenter::Present(PresentInfo* present_info)
      AdjustRectanglesToFitBounds(&render_target_rc, &render_source_rc, m_backbuffer_width,
                                  m_backbuffer_height);
      RenderXFBToScreen(render_target_rc, m_xfb_entry->texture.get(), render_source_rc);

@@ -267,6 +267,8 @@ void dumpJitCode() {
     }
 }
 
+std::atomic<bool> g_sampler_on{false};
+
 void* samplerThread(void*) {
     const int fd = open("/data/DolphinPS4/samples.log", O_WRONLY | O_CREAT | O_TRUNC, 0666);
     if (fd < 0)
@@ -274,8 +276,14 @@ void* samplerThread(void*) {
     writeModuleList(fd);
     const double start = now();
     double window_start = start, last_dump = start;
-    const timespec period = {0, 1000000};
+    const timespec period = {0, 1000000}, paused = {0, 100000000};
     for (;;) {
+        // Profiler switched off in the menus: no signals, no new windows until it is back on.
+        if (!g_sampler_on.load(std::memory_order_relaxed)) {
+            nanosleep(&paused, nullptr);
+            window_start = now();
+            continue;
+        }
         nanosleep(&period, nullptr);
         const int threads = g_thread_count.load(std::memory_order_acquire);
         for (int i = 0; i < threads; i++)
@@ -535,6 +543,10 @@ extern "C" void ps4_sampler_register_thread(const char* name) {
 }
 
 extern "C" void ps4_sampler_start() {
+    static std::atomic<bool> s_started{false};
+    g_sampler_on.store(true);
+    if (s_started.exchange(true))
+        return;
     struct sigaction action;
     memset(&action, 0, sizeof(action));
     void (*handler)(int, siginfo_t*, void*) = profHandler;
@@ -546,4 +558,12 @@ extern "C" void ps4_sampler_start() {
     pthread_t thread;
     if (pthread_create(&thread, nullptr, samplerThread, nullptr) == 0)
         ps4_boot_trace("sampler: started, writing /data/DolphinPS4/samples.log every 10 s");
+}
+
+// The menus' Profiler switch: starts the sampler the first time, then pauses / resumes it.
+extern "C" void ps4_sampler_set_enabled(int on) {
+    if (on)
+        ps4_sampler_start();
+    else if (g_sampler_on.exchange(false))
+        ps4_boot_trace("sampler: paused");
 }

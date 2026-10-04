@@ -66,3 +66,35 @@ write("launch", mix(*[(i * 0.07, bell(f, 0.9, 0.3, 4.5)) for i, f in enumerate((
 write("error", mix((0, bell(220, 0.18, 0.5, 18, ((1, 1.0), (1.5, 0.3)))), (0.12, bell(196, 0.22, 0.5, 16, ((1, 1.0), (1.5, 0.3))))))
 # Open a menu (Triangle / in-game L3+R3): soft whoosh-like chord.
 write("menu", mix((0, bell(784.0, 0.35, 0.3, 9)), (0.02, bell(1174.7, 0.35, 0.25, 9)), (0.04, bell(1568.0, 0.35, 0.2, 9))))
+
+# App start (the dolphin intro, 2.4 s): an airy swell while the dolphin leaps in (filtered noise
+# rising), a soft splash and a warm chord as it lands (0.9 s), then a high sparkle for the title.
+def swell(dur, amp=0.25):
+    n = int(RATE * dur)
+    seed, low, out = 777, 0.0, []
+    for i in range(n):
+        seed = (seed * 1103515245 + 12345) & 0x7FFFFFFF
+        r = (seed / 0x7FFFFFFF) * 2 - 1
+        t = i / dur / RATE
+        k = 0.01 + 0.12 * t  # the filter opens as it rises
+        low += k * (r - low)
+        env = math.sin(math.pi * min(1.0, t * 1.05)) ** 2
+        out.append(amp * env * low * 3.0)
+    return out
+
+def splash(dur=0.35, amp=0.18):
+    n = int(RATE * dur)
+    seed, low, out = 4242, 0.0, []
+    for i in range(n):
+        seed = (seed * 1103515245 + 12345) & 0x7FFFFFFF
+        r = (seed / 0x7FFFFFFF) * 2 - 1
+        low += 0.35 * (r - low)
+        t = i / RATE
+        out.append(amp * min(1.0, t / 0.01) * math.exp(-t * 12) * (r - low))
+    return out
+
+write("intro", mix((0.0, swell(0.95)),
+                   (0.88, splash()),
+                   (0.90, bell(392.0, 1.5, 0.30, 2.2)), (0.93, bell(493.9, 1.4, 0.24, 2.4)),
+                   (0.96, bell(587.3, 1.3, 0.22, 2.6)), (0.99, bell(784.0, 1.2, 0.18, 2.8)),
+                   *[(1.15 + i * 0.06, bell(f, 0.6, 0.10, 6)) for i, f in enumerate((1568.0, 1975.5, 2349.3, 3136.0))]))
