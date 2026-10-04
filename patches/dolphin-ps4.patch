@@ -4146,10 +4146,10 @@ index 0000000..3771619
 +}  // namespace PS4Cheats
 diff --git a/Source/Core/DolphinNoGUI/PS4Controls.cpp b/Source/Core/DolphinNoGUI/PS4Controls.cpp
 new file mode 100755
-index 0000000..7dff165
+index 0000000..f5b7d92
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4Controls.cpp
-@@ -0,0 +1,379 @@
+@@ -0,0 +1,403 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -4157,6 +4157,7 @@ index 0000000..7dff165
 +
 +#include <cstdio>
 +#include <string>
++#include <tuple>
 +#include <sys/stat.h>
 +
 +#include <orbis/Pad.h>
@@ -4183,8 +4184,8 @@ index 0000000..7dff165
 +C-Stick/Down = `Right Y+`
 +C-Stick/Left = `Right X-`
 +C-Stick/Right = `Right X+`
-+Triggers/L = `L2 Click`
-+Triggers/R = `R2 Click`
++Triggers/L = L2
++Triggers/R = R2
 +Triggers/L-Analog = L2
 +Triggers/R-Analog = R2
 +D-Pad/Up = `Pad N`
@@ -4340,6 +4341,29 @@ index 0000000..7dff165
 +  mkdir((s_user_dir + "/Config").c_str(), 0777);
 +  WriteIfMissing(Path(Device::GameCube), GCPAD_DEFAULTS);
 +  WriteIfMissing(Path(Device::Wii), WIIMOTE_DEFAULTS);
++  // The GameCube L / R clicks came from the DualShock 4's digital L2 / R2, which switch on early
++  // in the pull; Dolphin then reports the analog trigger as fully pressed (MixedTriggers), so half
++  // a press was a full one. Driven by the analog triggers instead, they click at Dolphin's
++  // threshold (90%) and the analog value follows the trigger until then. Older files are
++  // updated where they still have the old default.
++  {
++    Common::IniFile ini;
++    ini.Load(Path(Device::GameCube));
++    Common::IniFile::Section* section = ini.GetOrCreateSection(Section(Device::GameCube));
++    bool changed = false;
++    for (const auto& [key, old_value, new_value] :
++         {std::tuple{"Triggers/L", "`L2 Click`", "L2"}, std::tuple{"Triggers/R", "`R2 Click`", "R2"}})
++    {
++      std::string value;
++      if (section->Get(key, &value) && value == old_value)
++      {
++        section->Set(key, std::string(new_value));
++        changed = true;
++      }
++    }
++    if (changed)
++      ini.Save(Path(Device::GameCube));
++  }
 +  SyncPlayers(Device::GameCube);
 +  SyncPlayers(Device::Wii);
 +}
@@ -6725,7 +6749,7 @@ index 0000000..41d2bb2
 +}  // namespace PS4Settings
 diff --git a/Source/Core/DolphinNoGUI/PS4XMB.cpp b/Source/Core/DolphinNoGUI/PS4XMB.cpp
 new file mode 100755
-index 0000000..2cd7e11
+index 0000000..e269b58
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4XMB.cpp
 @@ -0,0 +1,2102 @@
@@ -7847,7 +7871,7 @@ index 0000000..2cd7e11
 +  const auto device = static_cast<PS4Controls::Device>(m_controls_device);
 +  const std::string& key = m_panel.rows[m_capture_row].key;
 +  const auto& binding = PS4Controls::Bindings(device)[std::atoi(key.c_str() + 4)];
-+  const bool analog = std::string(binding.key).find("Analog") != std::string::npos;
++  const bool analog = std::string(binding.key).rfind("Triggers/", 0) == 0;
 +  const std::string expression = PS4Controls::Capture(data, analog);
 +  if (expression.empty())
 +    return;
