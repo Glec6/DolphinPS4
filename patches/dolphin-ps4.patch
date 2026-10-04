@@ -3862,10 +3862,10 @@ index 3bf40ea..951591f 100644
      fprintf(stderr, "Could not boot the specified file\n");
 diff --git a/Source/Core/DolphinNoGUI/PS4IngameMenu.cpp b/Source/Core/DolphinNoGUI/PS4IngameMenu.cpp
 new file mode 100755
-index 0000000..c974d63
+index 0000000..8d4ce5d
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4IngameMenu.cpp
-@@ -0,0 +1,367 @@
+@@ -0,0 +1,436 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -3940,6 +3940,7 @@ index 0000000..c974d63
 +bool s_open = false;
 +int s_selected = 0;
 +int s_slot = 1;
++int s_aspect = 0;  // index into ASPECT_MODES, kept by the host thread (no Config reads in Draw)
 +std::string s_title;
 +std::string s_toast;
 +Clock::time_point s_toast_until;
@@ -3998,38 +3999,51 @@ index 0000000..c974d63
 +  case ITEM_SLOT:
 +    return "< " + std::to_string(s_slot) + " >";
 +  case ITEM_ASPECT:
-+    return std::string("< ") + ASPECT_NAMES[AspectIndex()] + " >";
++    return std::string("< ") + ASPECT_NAMES[s_aspect] + " >";
 +  case ITEM_FPS:
 +    return ps4_show_fps ? "< On >" : "< Off >";
 +  }
 +  return {};
 +}
 +
++// Host thread, s_mutex not held.
 +void Toast(const std::string& text)
 +{
++  std::lock_guard lock(s_mutex);
 +  s_toast = text;
 +  s_toast_until = Clock::now() + std::chrono::milliseconds(1800);
 +}
 +
++// Host thread, s_mutex not held.
 +void Close(Core::System& system)
 +{
-+  s_open = false;
-+  Core::SetState(system, Core::State::Running);
++  {
++    std::lock_guard lock(s_mutex);
++    s_open = false;
++  }
 +  // The game keeps seeing a neutral pad until the menu's buttons are released.
 +  ps4_pad_block = 1;
++  Core::SetState(system, Core::State::Running);
 +}
 +
++// The functions below run on the host thread WITHOUT s_mutex held: Core calls (pause, resume,
++// states, stop) wait for the video thread, which takes s_mutex to draw the menu.
 +void Change(int item, int direction)
 +{
 +  switch (item)
 +  {
 +  case ITEM_SLOT:
++  {
++    std::lock_guard lock(s_mutex);
 +    s_slot = (s_slot - 1 + direction + 8) % 8 + 1;
 +    break;
++  }
 +  case ITEM_ASPECT:
 +  {
 +    const int index = (AspectIndex() + direction + 4) % 4;
 +    Config::SetBase(Config::GFX_ASPECT_RATIO, ASPECT_MODES[index]);
++    std::lock_guard lock(s_mutex);
++    s_aspect = index;
 +    break;
 +  }
 +  case ITEM_FPS:
@@ -4040,20 +4054,27 @@ index 0000000..c974d63
 +
 +void Activate(Core::System& system, int item)
 +{
++  int slot;
++  {
++    std::lock_guard lock(s_mutex);
++    slot = s_slot;
++  }
 +  switch (item)
 +  {
 +  case ITEM_RESUME:
 +    Close(system);
 +    break;
 +  case ITEM_SAVE:
-+    State::Save(system, static_cast<u32>(s_slot));
-+    Toast("Saved to slot " + std::to_string(s_slot));
-+    Log("saved state " + std::to_string(s_slot));
++    Log("saving state " + std::to_string(slot));
++    State::Save(system, static_cast<u32>(slot));
++    Toast("Saved to slot " + std::to_string(slot));
++    Log("saved state " + std::to_string(slot));
 +    break;
 +  case ITEM_LOAD:
-+    State::Load(system, static_cast<u32>(s_slot));
-+    Toast("Loaded slot " + std::to_string(s_slot));
-+    Log("loaded state " + std::to_string(s_slot));
++    Log("loading state " + std::to_string(slot));
++    State::Load(system, static_cast<u32>(slot));
++    Toast("Loaded slot " + std::to_string(slot));
++    Log("loaded state " + std::to_string(slot));
 +    Close(system);
 +    break;
 +  case ITEM_SLOT:
@@ -4066,7 +4087,10 @@ index 0000000..c974d63
 +    Log("quit to the XMB");
 +    s_quit = true;
 +    s_quit_time = Clock::now();
-+    s_open = false;
++    {
++      std::lock_guard lock(s_mutex);
++      s_open = false;
++    }
 +    Core::Stop(system);
 +    break;
 +  }
@@ -4177,56 +4201,101 @@ index 0000000..c974d63
 +    ps4_pad_block = 0;
 +
 +  constexpr uint32_t COMBO = ORBIS_PAD_BUTTON_L3 | ORBIS_PAD_BUTTON_R3;
-+  std::lock_guard lock(s_mutex);
-+  if (!s_open)
++  const bool combo = (held & COMBO) == COMBO && (pressed & COMBO);
++
++  // Decide under the lock; act (Core calls) after releasing it.
++  enum class Action
 +  {
-+    if ((held & COMBO) == COMBO && (pressed & COMBO) &&
-+        Core::GetState(system) == Core::State::Running)
++    None,
++    Open,
++    Close,
++    Activate,
++    Change,
++  };
++  Action action = Action::None;
++  int item = 0, direction = 0;
++  bool open;
++  {
++    std::lock_guard lock(s_mutex);
++    open = s_open;
++    if (open)
 +    {
-+      s_open = true;
-+      s_selected = ITEM_RESUME;
-+      s_title = SConfig::GetInstance().GetTitleName();
-+      if (s_title.empty())
-+        s_title = SConfig::GetInstance().GetGameID();
-+      ps4_pad_block = 1;
-+      Core::SetState(system, Core::State::Paused);
-+      Log("opened");
++      // Directions repeat while held.
++      uint32_t nav = pressed;
++      constexpr uint32_t DIRS = ORBIS_PAD_BUTTON_UP | ORBIS_PAD_BUTTON_DOWN |
++                                ORBIS_PAD_BUTTON_LEFT | ORBIS_PAD_BUTTON_RIGHT;
++      if (held & DIRS)
++      {
++        s_repeat -= 1.0f / 60.0f;
++        if (s_repeat <= 0.0f)
++        {
++          nav |= held & DIRS;
++          s_repeat = 0.08f;
++        }
++        if (pressed & DIRS)
++          s_repeat = 0.35f;
++      }
++      if ((nav & ORBIS_PAD_BUTTON_UP) && s_selected > 0)
++        s_selected--;
++      if ((nav & ORBIS_PAD_BUTTON_DOWN) && s_selected < ITEM_COUNT - 1)
++        s_selected++;
++      item = s_selected;
++      if (nav & ORBIS_PAD_BUTTON_LEFT)
++        action = Action::Change, direction = -1;
++      else if (nav & ORBIS_PAD_BUTTON_RIGHT)
++        action = Action::Change, direction = 1;
++      if (pressed & ORBIS_PAD_BUTTON_CROSS)
++        action = Action::Activate;
++      else if ((pressed & ORBIS_PAD_BUTTON_CIRCLE) || combo)
++        action = Action::Close;
++    }
++    else if (combo)
++    {
++      action = Action::Open;
 +    }
 +  }
-+  else
++
++  switch (action)
 +  {
-+    // Directions repeat while held.
-+    uint32_t nav = pressed;
-+    constexpr uint32_t DIRS = ORBIS_PAD_BUTTON_UP | ORBIS_PAD_BUTTON_DOWN |
-+                              ORBIS_PAD_BUTTON_LEFT | ORBIS_PAD_BUTTON_RIGHT;
-+    if (held & DIRS)
++  case Action::Open:
++    if (Core::GetState(system) != Core::State::Running)
++      break;
 +    {
-+      s_repeat -= 1.0f / 60.0f;
-+      if (s_repeat <= 0.0f)
-+      {
-+        nav |= held & DIRS;
-+        s_repeat = 0.08f;
-+      }
-+      if (pressed & DIRS)
-+        s_repeat = 0.35f;
++      std::string title = SConfig::GetInstance().GetTitleName();
++      if (title.empty())
++        title = SConfig::GetInstance().GetGameID();
++      const int aspect = AspectIndex();
++      std::lock_guard lock(s_mutex);
++      s_aspect = aspect;
++      s_open = true;
++      s_selected = ITEM_RESUME;
++      s_title = std::move(title);
 +    }
-+    if ((nav & ORBIS_PAD_BUTTON_UP) && s_selected > 0)
-+      s_selected--;
-+    if ((nav & ORBIS_PAD_BUTTON_DOWN) && s_selected < ITEM_COUNT - 1)
-+      s_selected++;
-+    if (nav & ORBIS_PAD_BUTTON_LEFT)
-+      Change(s_selected, -1);
-+    if (nav & ORBIS_PAD_BUTTON_RIGHT)
-+      Change(s_selected, 1);
-+    if (pressed & ORBIS_PAD_BUTTON_CROSS)
-+      Activate(system, s_selected);
-+    else if ((pressed & ORBIS_PAD_BUTTON_CIRCLE) ||
-+             ((held & COMBO) == COMBO && (pressed & COMBO)))
-+      Close(system);
++    ps4_pad_block = 1;
++    Core::SetState(system, Core::State::Paused);
++    Log("opened");
++    break;
++  case Action::Close:
++    Close(system);
++    Log("closed");
++    break;
++  case Action::Activate:
++    Activate(system, item);
++    break;
++  case Action::Change:
++    Change(item, direction);
++    break;
++  case Action::None:
++    break;
 +  }
 +
 +  // While the menu is open (or a toast is showing) the paused frame is redrawn with it.
-+  if (s_open || s_appear > 0.01f || Clock::now() < s_toast_until)
++  bool redraw;
++  {
++    std::lock_guard lock(s_mutex);
++    redraw = s_open || s_appear > 0.01f || Clock::now() < s_toast_until;
++  }
++  if (redraw)
 +  {
 +    ps4_overlay_repaint = 1;
 +    system.GetFifo().PS4WakeGpu();
