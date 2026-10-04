@@ -191,6 +191,8 @@ Measured on a launch-model PS4, average frames per second while playing:
 | Super Smash Bros. Melee | GameCube | 36–60 |
 | Crash Bandicoot: The Wrath of Cortex | GameCube | 20–60 |
 | FIFA Street 2 | GameCube | ~34 |
+| Spider-Man 2 | GameCube | 15–29 (its normal rate is 30) |
+| Call of Duty 2: Big Red One | GameCube | 15–20 (its normal rate is 30) |
 | Super Mario Galaxy | Wii | 40–57 |
 | Wii Sports | Wii | ~40 |
 | Wii Sports Resort | Wii | ~37 |
