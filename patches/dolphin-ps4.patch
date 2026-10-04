@@ -843,6 +843,103 @@ index 061f7d4..3985395 100644
      }
  
      u32 id = 0;
+diff --git a/Source/Core/Common/Logging/LogManager.cpp b/Source/Core/Common/Logging/LogManager.cpp
+index 89ae089..240f386 100644
+--- a/Source/Core/Common/Logging/LogManager.cpp
++++ b/Source/Core/Common/Logging/LogManager.cpp
+@@ -4,6 +4,7 @@
+ #include "Common/Logging/LogManager.h"
+ 
+ #include <algorithm>
++#include <array>
+ #include <atomic>
+ #include <chrono>
+ #include <cstring>
+@@ -220,12 +221,84 @@ std::string LogManager::GetTimestamp()
+   return fmt::format("{:%M:%S}:{:03}", now_s, (now_ms - now_s).count());
+ }
+ 
++#ifdef __ORBIS__
++namespace
++{
++// PS4 port: a message logged over and over costs the emulator real time (Metal Gear Solid: The
++// Twin Snakes logged ~450 identical warnings a second from the video thread). Each source line is
++// written at most 5 times a second; the line after a skipped stretch says how many were skipped.
++struct LogRate
++{
++  const char* file = nullptr;
++  int line = 0;
++  long long second = -1;
++  int count = 0;
++  int skipped = 0;
++};
++std::mutex s_log_rate_mutex;
++std::array<LogRate, 64> s_log_rates;
++constexpr int MAX_PER_SECOND = 5;
++
++// -1: drop this message; otherwise how many of its kind were skipped since it was last written.
++int CheckLogRate(const char* file, int line)
++{
++  const long long second = std::chrono::duration_cast<std::chrono::seconds>(
++                               std::chrono::steady_clock::now().time_since_epoch())
++                               .count();
++  std::lock_guard lock(s_log_rate_mutex);
++  LogRate* slot = nullptr;
++  LogRate* oldest = &s_log_rates[0];
++  for (LogRate& rate : s_log_rates)
++  {
++    if (rate.file == file && rate.line == line)
++    {
++      slot = &rate;
++      break;
++    }
++    if (rate.second < oldest->second)
++      oldest = &rate;
++  }
++  if (!slot)
++  {
++    *oldest = {file, line, second, 0, 0};
++    slot = oldest;
++  }
++  if (slot->second != second)
++  {
++    slot->second = second;
++    slot->count = 0;
++  }
++  if (++slot->count > MAX_PER_SECOND)
++  {
++    slot->skipped++;
++    return -1;
++  }
++  const int skipped = slot->skipped;
++  slot->skipped = 0;
++  return skipped;
++}
++}  // namespace
++#endif
++
+ void LogManager::LogWithFullPath(LogLevel level, LogType type, const char* file, int line,
+                                  const char* message)
+ {
++#ifdef __ORBIS__
++  const int skipped = CheckLogRate(file, line);
++  if (skipped < 0)
++    return;
++  const std::string msg =
++      skipped == 0 ?
++          fmt::format("{} {}:{} {}[{}]: {}\n", GetTimestamp(), file, line,
++                      LOG_LEVEL_TO_CHAR[static_cast<int>(level)], GetShortName(type), message) :
++          fmt::format("{} {}:{} {}[{}]: {} ({} more like this skipped)\n", GetTimestamp(), file,
++                      line, LOG_LEVEL_TO_CHAR[static_cast<int>(level)], GetShortName(type),
++                      message, skipped);
++#else
+   const std::string msg =
+       fmt::format("{} {}:{} {}[{}]: {}\n", GetTimestamp(), file, line,
+                   LOG_LEVEL_TO_CHAR[static_cast<int>(level)], GetShortName(type), message);
++#endif
+ 
+   for (const auto listener_id : m_listener_ids)
+   {
 diff --git a/Source/Core/Common/MemArena.h b/Source/Core/Common/MemArena.h
 index 1a3093c..24cbe83 100644
 --- a/Source/Core/Common/MemArena.h
