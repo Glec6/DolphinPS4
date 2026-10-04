@@ -22,6 +22,35 @@ index 5ea7f8e..874f376 100644
    dolphin_find_optional_system_library(HIDAPI Externals/hidapi)
  endif()
  
+diff --git a/Externals/curl/CMakeLists.txt b/Externals/curl/CMakeLists.txt
+index b0a7ea0..03cee2c 100644
+--- a/Externals/curl/CMakeLists.txt
++++ b/Externals/curl/CMakeLists.txt
+@@ -21,7 +21,14 @@ set(BROTLI_FOUND FALSE) # TODO: Same as above
+ set(USE_LIBIDN2 OFF)
+ set(USE_NGHTTP2 OFF)
+ 
+-if(UNIX)
++# PS4 (PacBrew toolchain: CMAKE_SYSTEM_NAME Generic, so not UNIX): mbedtls as well.
++if(PS4)
++  # OpenOrbis netinet/in.h has IP_BIND_ADDRESS_NO_PORT (as Linux) but no SOL_IP.
++  add_compile_definitions(SOL_IP=IPPROTO_IP)
++  # Its stropts.h declares ioctl() unlike its sys/ioctl.h; curl does not need it.
++  set(HAVE_STROPTS_H 0 CACHE INTERNAL "")
++endif()
++if(UNIX OR PS4)
+   # We use mbedtls on Unix(-like) systems and Android.
+   set(CURL_USE_OPENSSL OFF)
+ 
+@@ -50,7 +57,7 @@ endif()
+ 
+ add_subdirectory(curl)
+ 
+-if(UNIX AND NOT MBEDTLS_FOUND)
++if((UNIX OR PS4) AND NOT MBEDTLS_FOUND)
+   # HACK: Manually link with the mbedtls libraries.
+   target_link_libraries(libcurl_static PRIVATE
+     MbedTLS::mbedtls
 diff --git a/Externals/zstd/CMakeLists.txt b/Externals/zstd/CMakeLists.txt
 index d83ce4c..07b3a67 100644
 --- a/Externals/zstd/CMakeLists.txt
@@ -3513,10 +3542,10 @@ index 2dcd2ca..f6a75df 100644
      if (movie.IsMovieActive())
        movie.SaveRecording(dtmpath);
 diff --git a/Source/Core/DolphinNoGUI/CMakeLists.txt b/Source/Core/DolphinNoGUI/CMakeLists.txt
-index 51c3fff..224556f 100644
+index 51c3fff..9358eb8 100644
 --- a/Source/Core/DolphinNoGUI/CMakeLists.txt
 +++ b/Source/Core/DolphinNoGUI/CMakeLists.txt
-@@ -23,6 +23,29 @@ if(${CMAKE_SYSTEM_NAME} STREQUAL "Linux")
+@@ -23,6 +23,30 @@ if(${CMAKE_SYSTEM_NAME} STREQUAL "Linux")
    target_sources(dolphin-nogui PRIVATE PlatformFBDev.cpp)
  endif()
  
@@ -3526,7 +3555,7 @@ index 51c3fff..224556f 100644
 +  target_sources(dolphin-nogui PRIVATE PlatformPS4.cpp ${PS4_RUNTIME_SOURCES})
 +  # The XMB launcher: Dear ImGui drawn with Vulkan (PS4XMBDisplay.cpp) through Dolphin's loader.
 +  target_sources(dolphin-nogui PRIVATE PS4XMB.cpp PS4XMBDisplay.cpp PS4IngameMenu.cpp PS4Settings.cpp
-+    PS4Controls.cpp PS4Cheats.cpp PS4Covers.cpp PS4Glyphs.cpp
++    PS4Controls.cpp PS4Cheats.cpp PS4Covers.cpp PS4Glyphs.cpp PS4Net.cpp PS4Updater.cpp
 +    ${CMAKE_SOURCE_DIR}/Externals/imgui/imgui/backends/imgui_impl_vulkan.cpp)
 +  set_source_files_properties(
 +    ${CMAKE_SOURCE_DIR}/Externals/imgui/imgui/backends/imgui_impl_vulkan.cpp
@@ -3536,7 +3565,8 @@ index 51c3fff..224556f 100644
 +    ${CMAKE_SOURCE_DIR}/Externals/VulkanMemoryAllocator/include)
 +  target_link_libraries(dolphin-nogui PRIVATE imgui discio videovulkan CURL::libcurl)
 +  target_link_libraries(dolphin-nogui PRIVATE
-+    SceSysmodule SceSystemService SceUserService SceVideoOut SceAudioOut ScePad SceNet)
++    SceSysmodule SceSystemService SceUserService SceVideoOut SceAudioOut ScePad SceNet
++    SceBgft SceAppInstUtil)
 +  if(ENABLE_VULKAN)
 +    # The Vulkan backend runs on Mesa's RADV on GNM, linked in (no Vulkan loader on the PS4).
 +    ps4_link_mesa(dolphin-nogui)
@@ -3546,7 +3576,7 @@ index 51c3fff..224556f 100644
  if (WIN32)
    target_sources(dolphin-nogui PRIVATE DolphinNoGUI.exe.manifest DolphinNoGUI.rc)
  
-@@ -68,3 +91,7 @@ set(CPACK_PACKAGE_EXECUTABLES ${CPACK_PACKAGE_EXECUTABLES} dolphin-nogui)
+@@ -68,3 +92,7 @@ set(CPACK_PACKAGE_EXECUTABLES ${CPACK_PACKAGE_EXECUTABLES} dolphin-nogui)
  if (NOT WIN32)
    install(TARGETS dolphin-nogui RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
  endif()
@@ -6138,6 +6168,274 @@ index 0000000..4af50c8
 +// "Quit Game" was chosen: the app restarts into the XMB instead of closing.
 +bool ReturnToXMB();
 +}  // namespace PS4IngameMenu
+diff --git a/Source/Core/DolphinNoGUI/PS4Net.cpp b/Source/Core/DolphinNoGUI/PS4Net.cpp
+new file mode 100755
+index 0000000..de39a24
+--- /dev/null
++++ b/Source/Core/DolphinNoGUI/PS4Net.cpp
+@@ -0,0 +1,221 @@
++// Copyright 2026 Dolphin Emulator Project
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++#include "DolphinNoGUI/PS4Net.h"
++
++#include <cstdio>
++#include <cstdlib>
++#include <mutex>
++
++#include <curl/curl.h>
++#include <orbis/Net.h>
++#include <orbis/Sysmodule.h>
++
++extern "C" void ps4_boot_trace(const char* line);  // port/ps4_crashlog.cpp
++
++namespace PS4Net
++{
++namespace
++{
++std::mutex s_init_mutex;
++int s_pool = -1;
++
++void Log(const std::string& text)
++{
++  fprintf(stderr, "[net] %s\n", text.c_str());
++  ps4_boot_trace(("net: " + text).c_str());
++}
++
++// libSceNet and curl, once per process.
++bool Init(std::string* error)
++{
++  std::lock_guard lock(s_init_mutex);
++  if (s_pool >= 0)
++    return true;
++  sceSysmoduleLoadModuleInternal(ORBIS_SYSMODULE_INTERNAL_NET);
++  const int init = sceNetInit();
++  s_pool = sceNetPoolCreate("dolphin-net", 64 * 1024, 0);
++  char line[96];
++  snprintf(line, sizeof(line), "init %#x, pool %#x", static_cast<unsigned>(init),
++           static_cast<unsigned>(s_pool));
++  Log(line);
++  curl_global_init(CURL_GLOBAL_DEFAULT);
++  if (s_pool < 0)
++  {
++    *error = "the PS4 network is not available";
++    return false;
++  }
++  return true;
++}
++
++// "https://host[:port]/path" -> host, port.
++bool SplitUrl(const std::string& url, std::string* host, int* port)
++{
++  const size_t scheme = url.find("://");
++  if (scheme == std::string::npos)
++    return false;
++  const size_t start = scheme + 3;
++  const size_t end = url.find_first_of("/?#", start);
++  std::string authority = url.substr(start, end == std::string::npos ? std::string::npos :
++                                                                        end - start);
++  const size_t at = authority.rfind('@');
++  if (at != std::string::npos)
++    authority = authority.substr(at + 1);
++  *port = url.compare(0, 5, "https") == 0 ? 443 : 80;
++  const size_t colon = authority.rfind(':');
++  if (colon != std::string::npos)
++  {
++    *port = std::atoi(authority.c_str() + colon + 1);
++    authority = authority.substr(0, colon);
++  }
++  *host = authority;
++  return !host->empty() && *port > 0;
++}
++
++struct Transfer
++{
++  CURL* curl = nullptr;
++  const Sink* sink = nullptr;
++  const Progress* progress = nullptr;
++  bool stopped = false;
++};
++
++size_t Write(char* data, size_t size, size_t count, void* user)
++{
++  auto* transfer = static_cast<Transfer*>(user);
++  long status = 0;
++  curl_easy_getinfo(transfer->curl, CURLINFO_RESPONSE_CODE, &status);
++  if (status < 200 || status >= 300)
++    return size * count;  // a redirect's or an error page's body
++  if (!(*transfer->sink)(data, size * count))
++  {
++    transfer->stopped = true;
++    return 0;
++  }
++  return size * count;
++}
++
++int XferInfo(void* user, curl_off_t total, curl_off_t now, curl_off_t, curl_off_t)
++{
++  auto* transfer = static_cast<Transfer*>(user);
++  long status = 0;
++  curl_easy_getinfo(transfer->curl, CURLINFO_RESPONSE_CODE, &status);
++  if (status < 200 || status >= 300 || !*transfer->progress)
++    return 0;
++  if (!(*transfer->progress)(static_cast<uint64_t>(now), static_cast<uint64_t>(total)))
++  {
++    transfer->stopped = true;
++    return 1;
++  }
++  return 0;
++}
++}  // namespace
++
++std::string Resolve(const std::string& host, std::string* error)
++{
++  if (!Init(error))
++    return {};
++  const OrbisNetId resolver = sceNetResolverCreate("dolphin-net", s_pool, 0);
++  if (resolver < 0)
++  {
++    *error = "the PS4 network is not available";
++    return {};
++  }
++  OrbisNetInAddr address = {};
++  const int result =
++      sceNetResolverStartNtoa(resolver, host.c_str(), &address, 5 * 1000 * 1000, 2, 0);
++  sceNetResolverDestroy(resolver);
++  if (result < 0)
++  {
++    char line[160];
++    snprintf(line, sizeof(line), "could not look up %s (%#x): is the PS4 online?", host.c_str(),
++             static_cast<unsigned>(result));
++    *error = line;
++    return {};
++  }
++  const uint32_t a = address.s_addr;  // network byte order
++  char text[32];
++  snprintf(text, sizeof(text), "%u.%u.%u.%u", a & 0xFF, (a >> 8) & 0xFF, (a >> 16) & 0xFF,
++           (a >> 24) & 0xFF);
++  return text;
++}
++
++long Get(const Request& request, const Sink& sink, const Progress& progress, std::string* error)
++{
++  if (!Init(error))
++    return 0;
++  std::string url = request.url;
++  for (int hop = 0; hop < 6; hop++)
++  {
++    std::string host;
++    int port = 0;
++    if (!SplitUrl(url, &host, &port))
++    {
++      *error = "bad address: " + url;
++      return 0;
++    }
++    const std::string address = Resolve(host, error);
++    if (address.empty())
++      return 0;
++
++    CURL* curl = curl_easy_init();
++    Transfer transfer{curl, &sink, &progress};
++    const std::string resolve = host + ":" + std::to_string(port) + ":" + address;
++    curl_slist* resolves = curl_slist_append(nullptr, resolve.c_str());
++    curl_slist* headers = nullptr;
++    for (const std::string& header : request.headers)
++      headers = curl_slist_append(headers, header.c_str());
++    char detail[CURL_ERROR_SIZE] = {};
++    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
++    curl_easy_setopt(curl, CURLOPT_RESOLVE, resolves);
++    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
++    curl_easy_setopt(curl, CURLOPT_USERAGENT, "Dolphin-PS4");
++    curl_easy_setopt(curl, CURLOPT_CAINFO, request.ca_file.c_str());
++    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
++    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
++    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);  // each hop is looked up here
++    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 15L);
++    curl_easy_setopt(curl, CURLOPT_TIMEOUT, request.timeout_seconds);
++    // A stalled download (no data for a minute) ends instead of hanging.
++    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1L);
++    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 60L);
++    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
++    curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, detail);
++    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, Write);
++    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &transfer);
++    curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, XferInfo);
++    curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &transfer);
++    curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
++
++    const CURLcode code = curl_easy_perform(curl);
++    long status = 0;
++    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
++    char* location = nullptr;
++    curl_easy_getinfo(curl, CURLINFO_REDIRECT_URL, &location);
++    const std::string next = location ? location : "";
++    curl_slist_free_all(headers);
++    curl_slist_free_all(resolves);
++    curl_easy_cleanup(curl);
++
++    if (transfer.stopped)
++    {
++      *error = "cancelled";
++      return 0;
++    }
++    if (code != CURLE_OK)
++    {
++      *error = std::string(curl_easy_strerror(code)) + (detail[0] ? std::string(": ") + detail : "");
++      Log(host + ": " + *error);
++      return 0;
++    }
++    if (status >= 300 && status < 400 && !next.empty())
++    {
++      url = next;
++      continue;
++    }
++    return status;
++  }
++  *error = "too many redirects";
++  return 0;
++}
++}  // namespace PS4Net
+diff --git a/Source/Core/DolphinNoGUI/PS4Net.h b/Source/Core/DolphinNoGUI/PS4Net.h
+new file mode 100755
+index 0000000..c539699
+--- /dev/null
++++ b/Source/Core/DolphinNoGUI/PS4Net.h
+@@ -0,0 +1,35 @@
++// Copyright 2026 Dolphin Emulator Project
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++// HTTPS for the XMB (box art, updates): curl with the PS4's own host name lookup, since the C
++// library has no DNS configuration on the PS4. Every host, including those reached through
++// redirects, is looked up with libSceNet's resolver and handed to curl.
++
++#pragma once
++
++#include <cstdint>
++#include <functional>
++#include <string>
++#include <vector>
++
++namespace PS4Net
++{
++// The host's IPv4 address as text, or empty with *error set.
++std::string Resolve(const std::string& host, std::string* error);
++
++struct Request
++{
++  std::string url;
++  std::vector<std::string> headers;  // "Name: value"
++  std::string ca_file;               // certificate bundle; the check is always on
++  long timeout_seconds = 30;         // for the whole transfer (0: none)
++};
++
++// Receives the body of the final (2xx) answer; false stops the transfer.
++using Sink = std::function<bool(const char* data, size_t size)>;
++// Bytes received of the expected total (0 if unknown); false cancels.
++using Progress = std::function<bool(uint64_t done, uint64_t total)>;
++
++// GET with redirects followed (up to 5). Returns the final HTTP status, or 0 with *error set.
++long Get(const Request& request, const Sink& sink, const Progress& progress, std::string* error);
++}  // namespace PS4Net
 diff --git a/Source/Core/DolphinNoGUI/PS4Settings.cpp b/Source/Core/DolphinNoGUI/PS4Settings.cpp
 new file mode 100755
 index 0000000..3827c7d
@@ -6747,12 +7045,396 @@ index 0000000..41d2bb2
 +// A Diagnostics switch as applied (its own value and All Diagnostics), after ApplyLive.
 +bool DiagnosticOn(const std::string& key);
 +}  // namespace PS4Settings
+diff --git a/Source/Core/DolphinNoGUI/PS4Updater.cpp b/Source/Core/DolphinNoGUI/PS4Updater.cpp
+new file mode 100755
+index 0000000..645c6a5
+--- /dev/null
++++ b/Source/Core/DolphinNoGUI/PS4Updater.cpp
+@@ -0,0 +1,328 @@
++// Copyright 2026 Dolphin Emulator Project
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++#include "DolphinNoGUI/PS4Updater.h"
++
++#include <algorithm>
++#include <cctype>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <vector>
++
++#include <mbedtls/sha256.h>
++#include <orbis/AppInstUtil.h>
++#include <orbis/Bgft.h>
++#include <orbis/Sysmodule.h>
++#include <picojson.h>
++
++#include "DolphinNoGUI/PS4Net.h"
++
++extern "C" void ps4_boot_trace(const char* line);  // port/ps4_crashlog.cpp
++
++namespace PS4Updater
++{
++namespace
++{
++constexpr const char* LATEST_RELEASE =
++    "https://api.github.com/repos/iHaiDeeZ/DolphinPS4/releases/latest";
++
++void Log(const std::string& text)
++{
++  fprintf(stderr, "[update] %s\n", text.c_str());
++  ps4_boot_trace(("update: " + text).c_str());
++}
++
++std::string Hex(const unsigned char* data, size_t size)
++{
++  static const char digits[] = "0123456789abcdef";
++  std::string text;
++  for (size_t i = 0; i < size; i++)
++  {
++    text += digits[data[i] >> 4];
++    text += digits[data[i] & 15];
++  }
++  return text;
++}
++
++std::string Lower(std::string text)
++{
++  for (char& c : text)
++    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
++  return text;
++}
++
++bool EndsWith(const std::string& text, const std::string& end)
++{
++  return text.size() >= end.size() && text.compare(text.size() - end.size(), end.size(), end) == 0;
++}
++}  // namespace
++
++Release CheckLatest(const std::string& ca_file)
++{
++  Release release;
++  std::string body, error;
++  PS4Net::Request request;
++  request.url = LATEST_RELEASE;
++  request.headers = {"Accept: application/vnd.github+json", "X-GitHub-Api-Version: 2022-11-28"};
++  request.ca_file = ca_file;
++  request.timeout_seconds = 30;
++  const long status = PS4Net::Get(
++      request,
++      [&body](const char* data, size_t size) {
++        body.append(data, size);
++        return body.size() < 4 * 1024 * 1024;
++      },
++      {}, &error);
++  if (status != 200)
++  {
++    release.error = status == 0 ? error : "GitHub answered " + std::to_string(status);
++    Log("check failed: " + release.error);
++    return release;
++  }
++
++  picojson::value json;
++  const std::string parse_error = picojson::parse(json, body);
++  if (!parse_error.empty() || !json.is<picojson::object>())
++  {
++    release.error = "unexpected answer from GitHub";
++    Log("check failed: " + release.error + " " + parse_error);
++    return release;
++  }
++  const picojson::object& root = json.get<picojson::object>();
++  auto text = [](const picojson::object& object, const char* key) {
++    const auto it = object.find(key);
++    return it != object.end() && it->second.is<std::string>() ? it->second.get<std::string>() :
++                                                                 std::string();
++  };
++  std::string tag = text(root, "tag_name");
++  if (!tag.empty() && (tag[0] == 'v' || tag[0] == 'V'))
++    tag.erase(0, 1);
++  release.version = tag;
++  release.title = text(root, "name");
++
++  const auto assets = root.find("assets");
++  if (assets != root.end() && assets->second.is<picojson::array>())
++  {
++    for (const picojson::value& value : assets->second.get<picojson::array>())
++    {
++      if (!value.is<picojson::object>())
++        continue;
++      const picojson::object& asset = value.get<picojson::object>();
++      const std::string name = text(asset, "name");
++      if (!EndsWith(Lower(name), ".pkg"))
++        continue;
++      release.package = name;
++      release.url = text(asset, "browser_download_url");
++      const auto size = asset.find("size");
++      if (size != asset.end() && size->second.is<double>())
++        release.size = static_cast<uint64_t>(size->second.get<double>());
++      const std::string digest = text(asset, "digest");
++      if (digest.compare(0, 7, "sha256:") == 0)
++        release.sha256 = Lower(digest.substr(7));
++      break;
++    }
++  }
++  if (release.version.empty() || release.url.empty())
++  {
++    release.error = "the latest release has no package";
++  }
++  else if (release.sha256.size() != 64)
++  {
++    // Without GitHub's checksum the download couldn't be checked: don't offer it.
++    release.error = "the latest release has no checksum";
++  }
++  else
++  {
++    release.ok = true;
++  }
++  Log("latest release " + release.version + " (" + release.package + ", " +
++      std::to_string(release.size) + " bytes)" + (release.ok ? "" : ": " + release.error));
++  return release;
++}
++
++int CompareVersions(const std::string& a, const std::string& b)
++{
++  auto parts = [](const std::string& text) {
++    std::vector<long> numbers;
++    size_t i = 0;
++    while (i < text.size())
++    {
++      if (std::isdigit(static_cast<unsigned char>(text[i])))
++      {
++        char* end = nullptr;
++        numbers.push_back(std::strtol(text.c_str() + i, &end, 10));
++        i = static_cast<size_t>(end - text.c_str());
++      }
++      else
++      {
++        i++;
++      }
++    }
++    return numbers;
++  };
++  const std::vector<long> x = parts(a), y = parts(b);
++  for (size_t i = 0; i < std::max(x.size(), y.size()); i++)
++  {
++    const long p = i < x.size() ? x[i] : 0, q = i < y.size() ? y[i] : 0;
++    if (p != q)
++      return p < q ? -1 : 1;
++  }
++  return 0;
++}
++
++bool Download(const Release& release, const std::string& path, const std::string& ca_file,
++              const std::function<bool(uint64_t, uint64_t)>& progress, std::string* error)
++{
++  const std::string part = path + ".part";
++  FILE* file = fopen(part.c_str(), "wb");
++  if (!file)
++  {
++    *error = "can't write " + part;
++    return false;
++  }
++  mbedtls_sha256_context sha;
++  mbedtls_sha256_init(&sha);
++  mbedtls_sha256_starts_ret(&sha, 0);
++  uint64_t written = 0;
++  bool write_failed = false;
++
++  PS4Net::Request request;
++  request.url = release.url;
++  request.ca_file = ca_file;
++  request.timeout_seconds = 0;  // a large file on a slow line; stalls end it instead
++  const long status = PS4Net::Get(
++      request,
++      [&](const char* data, size_t size) {
++        if (fwrite(data, 1, size, file) != size)
++        {
++          write_failed = true;
++          return false;
++        }
++        mbedtls_sha256_update_ret(&sha, reinterpret_cast<const unsigned char*>(data), size);
++        written += size;
++        return true;
++      },
++      [&](uint64_t done, uint64_t total) {
++        return progress(done, total ? total : release.size);
++      },
++      error);
++  fclose(file);
++  unsigned char digest[32];
++  mbedtls_sha256_finish_ret(&sha, digest);
++  mbedtls_sha256_free(&sha);
++
++  if (write_failed)
++    *error = "couldn't write the package (is the PS4's storage full?)";
++  else if (status != 200 && error->empty())
++    *error = "GitHub answered " + std::to_string(status);
++  else if (status == 200 && written != release.size)
++    *error = "the download is incomplete";
++  else if (status == 200 && Hex(digest, sizeof(digest)) != release.sha256)
++    *error = "the download doesn't match GitHub's checksum";
++  if (status != 200 || write_failed || !error->empty())
++  {
++    std::remove(part.c_str());
++    Log("download failed: " + *error);
++    return false;
++  }
++  std::remove(path.c_str());
++  if (std::rename(part.c_str(), path.c_str()) != 0)
++  {
++    *error = "can't rename " + part;
++    std::remove(part.c_str());
++    return false;
++  }
++  Log("downloaded " + path + " (" + std::to_string(written) + " bytes, checksum OK)");
++  return true;
++}
++
++std::string Install(const std::string& path)
++{
++  if (path.compare(0, 6, "/data/") != 0)
++    return "the package must be under /data";
++
++  // The content ID from the package's header (offset 0x40, 36 characters).
++  char content_id[0x30] = {};
++  if (FILE* file = fopen(path.c_str(), "rb"))
++  {
++    unsigned char header[0x70] = {};
++    const size_t read = fread(header, 1, sizeof(header), file);
++    fclose(file);
++    if (read != sizeof(header) || header[0] != 0x7F || header[1] != 'C' || header[2] != 'N' ||
++        header[3] != 'T')
++    {
++      return "the file isn't a PS4 package";
++    }
++    memcpy(content_id, header + 0x40, 36);
++  }
++  else
++  {
++    return "can't read " + path;
++  }
++
++  sceSysmoduleLoadModuleInternal(ORBIS_SYSMODULE_INTERNAL_APP_INST_UTIL);
++  sceSysmoduleLoadModuleInternal(ORBIS_SYSMODULE_INTERNAL_BGFT);
++  static bool s_initialized = false;
++  static std::vector<unsigned char> s_heap;
++  if (!s_initialized)
++  {
++    const int app_inst = sceAppInstUtilInitialize();
++    s_heap.assign(1024 * 1024, 0);
++    OrbisBgftInitParams params = {};
++    params.heap = s_heap.data();
++    params.heapSize = s_heap.size();
++    const int bgft = sceBgftServiceIntInit(&params);
++    char line[96];
++    snprintf(line, sizeof(line), "installer init: app inst util %#x, bgft %#x",
++             static_cast<unsigned>(app_inst), static_cast<unsigned>(bgft));
++    Log(line);
++    if (bgft != 0)
++      return "the PS4's installer is not available";
++    s_initialized = true;
++  }
++
++  const std::string system_path = "/user" + path;  // the installer's view of /data
++  OrbisBgftDownloadParamEx download = {};
++  download.params.entitlementType = 5;
++  download.params.id = content_id;
++  download.params.contentUrl = system_path.c_str();
++  download.params.contentName = "Dolphin";
++  download.params.iconPath = "";
++  download.params.playgoScenarioId = "0";
++  download.params.option = ORBIS_BGFT_TASK_OPT_FORCE_UPDATE;
++  download.slot = 0;
++
++  OrbisBgftTaskId task = -1;
++  int result = sceBgftServiceIntDownloadRegisterTaskByStorageEx(&download, &task);
++  char line[160];
++  snprintf(line, sizeof(line), "register %s (%s): %#x, task %d", system_path.c_str(), content_id,
++           static_cast<unsigned>(result), task);
++  Log(line);
++  if (result == static_cast<int>(0x80990088) || result == static_cast<int>(0x80990015))
++  {
++    // "Already installed": let the package replace the installed app, then try again. (Tools
++    // that install other apps uninstall the old one first; this is the running app itself.)
++    const int overwrite = sceAppInstUtilAppPrepareOverwritePkg(path.c_str());
++    result = sceBgftServiceIntDownloadRegisterTaskByStorageEx(&download, &task);
++    snprintf(line, sizeof(line), "prepare overwrite %#x, register again %#x, task %d",
++             static_cast<unsigned>(overwrite), static_cast<unsigned>(result), task);
++    Log(line);
++  }
++  if (result != 0)
++  {
++    snprintf(line, sizeof(line), "the PS4's installer refused it (%#x)",
++             static_cast<unsigned>(result));
++    return line;
++  }
++  result = sceBgftServiceDownloadStartTask(task);
++  if (result != 0)
++  {
++    snprintf(line, sizeof(line), "the install didn't start (%#x)", static_cast<unsigned>(result));
++    Log(line);
++    return line;
++  }
++  Log("install started");
++  return {};
++}
++}  // namespace PS4Updater
+diff --git a/Source/Core/DolphinNoGUI/PS4Updater.h b/Source/Core/DolphinNoGUI/PS4Updater.h
+new file mode 100755
+index 0000000..dbf7077
+--- /dev/null
++++ b/Source/Core/DolphinNoGUI/PS4Updater.h
+@@ -0,0 +1,44 @@
++// Copyright 2026 Dolphin Emulator Project
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++// Updates from the project's GitHub releases: the latest release is compared with the running
++// version, its package is downloaded (the connection's certificate checked, the file checked
++// against the SHA-256 GitHub publishes for it) and handed to the PS4's own installer, which
++// installs it in the background.
++
++#pragma once
++
++#include <atomic>
++#include <cstdint>
++#include <functional>
++#include <string>
++
++namespace PS4Updater
++{
++struct Release
++{
++  bool ok = false;
++  std::string error;
++  std::string version;    // "02.99" (the tag without its "v")
++  std::string title;      // the release's name
++  std::string package;    // file name of the .pkg asset
++  std::string url;        // its download address
++  uint64_t size = 0;
++  std::string sha256;     // lower-case hex
++};
++
++// The latest release on GitHub.
++Release CheckLatest(const std::string& ca_file);
++
++// <0 if a is older than b, 0 if equal, >0 if newer ("02.99" < "03.00" < "03.10").
++int CompareVersions(const std::string& a, const std::string& b);
++
++// Downloads the release's package to path (through path + ".part"), checking its size and
++// SHA-256. progress(done, total) may return false to cancel. Returns false with *error set.
++bool Download(const Release& release, const std::string& path, const std::string& ca_file,
++              const std::function<bool(uint64_t, uint64_t)>& progress, std::string* error);
++
++// Hands the package (under /data) to the PS4's installer. Returns empty when the install has
++// started, else what went wrong.
++std::string Install(const std::string& path);
++}  // namespace PS4Updater
 diff --git a/Source/Core/DolphinNoGUI/PS4XMB.cpp b/Source/Core/DolphinNoGUI/PS4XMB.cpp
 new file mode 100755
-index 0000000..e269b58
+index 0000000..b90eb72
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4XMB.cpp
-@@ -0,0 +1,2102 @@
+@@ -0,0 +1,2422 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -6773,6 +7455,8 @@ index 0000000..e269b58
 +#include <span>
 +#include <thread>
 +
++#include <sys/stat.h>
++
 +#include <imgui.h>
 +#include <imgui_internal.h>
 +#include <orbis/AudioOut.h>
@@ -6791,6 +7475,7 @@ index 0000000..e269b58
 +#include "DolphinNoGUI/PS4Covers.h"
 +#include "DolphinNoGUI/PS4Glyphs.h"
 +#include "DolphinNoGUI/PS4Settings.h"
++#include "DolphinNoGUI/PS4Updater.h"
 +#include "DolphinNoGUI/PS4XMBDisplay.h"
 +
 +extern "C" void ps4_boot_trace(const char* line);  // port/ps4_crashlog.cpp
@@ -7128,6 +7813,7 @@ index 0000000..e269b58
 +  bool sounds = true;
 +  int volume = 80;
 +  bool clock = true;
++  bool auto_update = true;  // look for a new version on GitHub when the app opens
 +  std::string last_game;
 +
 +  void Load(const std::string& path)
@@ -7152,6 +7838,8 @@ index 0000000..e269b58
 +        volume = std::clamp(std::atoi(value.c_str()), 0, 100);
 +      else if (key == "clock")
 +        clock = value == "on";
++      else if (key == "auto_update")
++        auto_update = value == "on";
 +      else if (key == "last_game")
 +        last_game = value;
 +    }
@@ -7162,7 +7850,7 @@ index 0000000..e269b58
 +    file << "# Dolphin XMB preferences (edited by the menu)\n";
 +    file << "theme=" << theme << "\nwallpaper=" << wallpaper << "\nsounds="
 +         << (sounds ? "on" : "off") << "\nvolume=" << volume << "\nclock="
-+         << (clock ? "on" : "off")
++         << (clock ? "on" : "off") << "\nauto_update=" << (auto_update ? "on" : "off")
 +         << "\nlast_game=" << last_game << "\n";
 +  }
 +};
@@ -7211,6 +7899,9 @@ index 0000000..e269b58
 +  SET_RESET_ALL,
 +  SET_CONTROLS,
 +  SET_COVERS,
++  SET_UPDATE_CHECK,  // Check for Updates
++  SET_AUTO_UPDATE,   // Automatic Updates on/off
++  SET_UPDATE,        // the update panel: prompt, progress, result
 +  SET_GROUP = 100,  // + index into PS4Settings::Categories(): an emulation settings list
 +};
 +
@@ -7274,6 +7965,11 @@ index 0000000..e269b58
 +  void BuildCheatRows();
 +  void StartCoverDownload();
 +  void UpdateCoverDownload();
++  void StartUpdateCheck(bool manual);
++  void StartUpdateDownload();
++  void UpdateUpdater(float dt);
++  void ShowUpdatePanel();
++  void RemoveOldUpdates();
 +  void UpdateCapture(float dt);
 +  void LoadCovers();
 +  void BuildSettingRows();
@@ -7330,6 +8026,29 @@ index 0000000..e269b58
 +  std::mutex m_cover_mutex;
 +  std::string m_cover_status;
 +  PS4Covers::Result m_cover_result;
++  // Updates from GitHub (PS4Updater): checked in the background when the app opens.
++  enum class UpdateState
++  {
++    Idle,
++    Checking,
++    UpToDate,
++    Available,
++    Downloading,
++    Installing,
++    Finished,
++    Failed,
++  };
++  std::thread m_update_thread;
++  std::atomic<UpdateState> m_update_state{UpdateState::Idle};
++  std::atomic<bool> m_update_cancel{false};
++  std::atomic<uint64_t> m_update_done{0}, m_update_total{0};
++  std::mutex m_update_mutex;
++  PS4Updater::Release m_update_release;
++  std::string m_update_error;
++  bool m_update_manual = false;    // started from Settings: report "up to date" and errors too
++  bool m_update_prompted = false;  // the "update available" prompt was shown
++  bool m_update_exit = false;      // close the app once the menu loop ends
++  float m_update_close_in = -1.0f;
 +  float m_time = 0.0f;
 +  float m_fade = 1.0f;  // black overlay: fades in at start, out at launch
 +  // Start-up animation (app start and back from a game): the dolphin leaps in, lands with a
@@ -7542,6 +8261,9 @@ index 0000000..e269b58
 +  settings.push_back({"Controls", "Remap the GameCube and Wii buttons", -1, -1, SET_CONTROLS});
 +  settings.push_back({"Download Covers", "Box art from GameTDB for your games", -1, -1,
 +                      SET_COVERS});
++  settings.push_back({"Check for Updates", "Installed: v" + m_version, -1, -1, SET_UPDATE_CHECK});
++  settings.push_back({"Automatic Updates", m_prefs.auto_update ? "On" : "Off", -1, -1,
++                      SET_AUTO_UPDATE});
 +  settings.push_back({"Reset All Settings", "Every setting back to the defaults", -1, -1,
 +                      SET_RESET_ALL});
 +  settings.push_back({"About", "", -1, -1, SET_ABOUT});
@@ -7603,6 +8325,18 @@ index 0000000..e269b58
 +  case SET_COVERS:
 +    m_panel.title = "Download Covers";
 +    StartCoverDownload();
++    break;
++  case SET_UPDATE_CHECK:
++    m_panel.setting = SET_UPDATE;
++    StartUpdateCheck(true);
++    ShowUpdatePanel();
++    break;
++  case SET_AUTO_UPDATE:
++    m_panel.title = "Automatic Updates";
++    m_panel.options = {"On", "Off"};
++    m_panel.selected = m_prefs.auto_update ? 0 : 1;
++    m_panel.lines = {"", "Looks for a new version on GitHub", "when the app opens, and asks",
++                     "before installing it."};
 +    break;
 +  case SET_RESET_ALL:
 +    m_panel.title = "Reset All Settings";
@@ -7984,6 +8718,9 @@ index 0000000..e269b58
 +  case SET_CLOCK:
 +    m_prefs.clock = option == 0;
 +    break;
++  case SET_AUTO_UPDATE:
++    m_prefs.auto_update = option == 0;
++    break;
 +  case SET_RESET_ALL:
 +    if (option == 1)
 +      PS4Settings::ResetAll();
@@ -8009,6 +8746,10 @@ index 0000000..e269b58
 +  {
 +    if (pressed & BTN_CIRCLE)
 +    {
++      if (m_panel.setting == SET_UPDATE && m_update_state == UpdateState::Downloading)
++        m_update_cancel = true;
++      if (m_panel.setting == SET_UPDATE && m_update_state == UpdateState::Finished)
++        return;  // the app is closing for the install
 +      m_controls_device = -1;
 +      m_panel.open = false;
 +      Play("back");
@@ -8053,6 +8794,31 @@ index 0000000..e269b58
 +    {
 +      m_panel.selected++;
 +      Play("move");
++    }
++    if ((pressed & BTN_CROSS) && m_panel.setting == SET_UPDATE)
++    {
++      const std::string& choice = m_panel.options[m_panel.selected];
++      if (choice == "Yes")
++      {
++        StartUpdateDownload();
++        Play("confirm");
++      }
++      else if (choice == "Cancel")
++      {
++        m_update_cancel = true;
++        Play("back");
++      }
++      else if (choice == "OK" && m_update_state == UpdateState::Finished)
++      {
++        m_update_close_in = 0.0f;
++        Play("confirm");
++      }
++      else
++      {
++        m_panel.open = false;
++        Play("back");
++      }
++      return;
 +    }
 +    if (pressed & BTN_CROSS)
 +    {
@@ -8753,6 +9519,233 @@ index 0000000..e269b58
 +  }
 +}
 +
++// ---------------------------------------------------------------------------------------------
++// Updates.
++
++void Menu::StartUpdateCheck(bool manual)
++{
++  m_update_manual = m_update_manual || manual;
++  const UpdateState state = m_update_state;
++  if (m_update_thread.joinable() || state == UpdateState::Downloading ||
++      state == UpdateState::Installing || state == UpdateState::Finished)
++  {
++    return;
++  }
++  m_update_state = UpdateState::Checking;
++  m_update_thread = std::thread([this] {
++    const PS4Updater::Release release =
++        PS4Updater::CheckLatest(m_assets_dir + "/xmb/cacert.pem");
++    std::lock_guard lock(m_update_mutex);
++    m_update_release = release;
++    m_update_error = release.error;
++    if (!release.ok)
++      m_update_state = UpdateState::Failed;
++    else if (PS4Updater::CompareVersions(release.version, m_version) > 0)
++      m_update_state = UpdateState::Available;
++    else
++      m_update_state = UpdateState::UpToDate;
++  });
++}
++
++void Menu::StartUpdateDownload()
++{
++  if (m_update_thread.joinable())
++    m_update_thread.join();
++  m_update_cancel = false;
++  m_update_done = 0;
++  m_update_total = m_update_release.size;
++  m_update_state = UpdateState::Downloading;
++  m_update_thread = std::thread([this] {
++    PS4Updater::Release release;
++    {
++      std::lock_guard lock(m_update_mutex);
++      release = m_update_release;
++    }
++    const std::string dir = m_data_dir + "/update";
++    mkdir(dir.c_str(), 0777);
++    const std::string path = dir + "/DolphinPS4-v" + release.version + ".pkg";
++    std::string error;
++    const bool downloaded = PS4Updater::Download(
++        release, path, m_assets_dir + "/xmb/cacert.pem",
++        [this](uint64_t done, uint64_t total) {
++          m_update_done = done;
++          if (total)
++            m_update_total = total;
++          return !m_update_cancel;
++        },
++        &error);
++    if (!downloaded)
++    {
++      std::lock_guard lock(m_update_mutex);
++      m_update_error = m_update_cancel ? "" : error;
++      m_update_state = m_update_cancel ? UpdateState::Available : UpdateState::Failed;
++      return;
++    }
++    m_update_state = UpdateState::Installing;
++    const std::string install_error = PS4Updater::Install(path);
++    std::lock_guard lock(m_update_mutex);
++    if (install_error.empty())
++    {
++      m_update_state = UpdateState::Finished;
++      return;
++    }
++    // The installer said no: keep the checked package where package installers look.
++    const std::string kept = "/data/pkg/DolphinPS4-v" + release.version + ".pkg";
++    mkdir("/data/pkg", 0777);
++    m_update_error = install_error;
++    if (std::rename(path.c_str(), kept.c_str()) == 0)
++      m_update_error += "\nThe package is saved as " + kept + ": install it with your package installer.";
++    m_update_state = UpdateState::Failed;
++  });
++}
++
++// The update panel shows the state: checking, the prompt, the download, the result.
++void Menu::ShowUpdatePanel()
++{
++  PS4Updater::Release release;
++  std::string error;
++  {
++    std::lock_guard lock(m_update_mutex);
++    release = m_update_release;
++    error = m_update_error;
++  }
++  const std::string latest = "Dolphin v" + release.version;
++  std::vector<std::string> lines, options;
++  std::string title = "Updates";
++  switch (m_update_state.load())
++  {
++  case UpdateState::Idle:
++  case UpdateState::Checking:
++    lines = {"", "Looking for a new version on GitHub..."};
++    break;
++  case UpdateState::UpToDate:
++    lines = {"", "You have the latest version.", "", "Installed: v" + m_version};
++    break;
++  case UpdateState::Available:
++  {
++    title = "Update Available";
++    char size[32];
++    snprintf(size, sizeof(size), "%.0f MB", release.size / (1024.0 * 1024.0));
++    lines = {"", latest + " is available.", "You have v" + m_version + ".", "",
++             "Download it (" + std::string(size) + ") and install it?"};
++    options = {"Yes", "No"};
++    break;
++  }
++  case UpdateState::Downloading:
++  {
++    title = "Downloading Update";
++    const uint64_t done = m_update_done, total = std::max<uint64_t>(m_update_total, 1);
++    char line[96];
++    snprintf(line, sizeof(line), "%d%%   %.0f of %.0f MB", static_cast<int>(done * 100 / total),
++             done / (1024.0 * 1024.0), total / (1024.0 * 1024.0));
++    lines = {"", latest, line, "", "Keep the app open until it's done."};
++    options = {"Cancel"};
++    break;
++  }
++  case UpdateState::Installing:
++    title = "Installing Update";
++    lines = {"", latest + " downloaded and checked.", "", "Starting the install..."};
++    break;
++  case UpdateState::Finished:
++    title = "Installing Update";
++    lines = {"", "The PS4 is installing " + latest, "in the background.", "",
++             "Dolphin closes now. Open it again from", "the home screen once the install is done."};
++    options = {"OK"};
++    break;
++  case UpdateState::Failed:
++  {
++    title = "Update";
++    lines = {"", m_update_prompted ? "The update didn't work:" : "Couldn't check for updates:"};
++    size_t start = 0;
++    while (start <= error.size())
++    {
++      const size_t end = error.find('\n', start);
++      lines.push_back(error.substr(start, end == std::string::npos ? std::string::npos :
++                                                                      end - start));
++      if (end == std::string::npos)
++        break;
++      start = end + 1;
++    }
++    options = {"OK"};
++    break;
++  }
++  }
++  const bool same_options = m_panel.options == options;
++  m_panel.open = true;
++  m_panel.setting = SET_UPDATE;
++  m_panel.title = title;
++  m_panel.lines = lines;
++  m_panel.rows.clear();
++  if (!same_options)
++  {
++    m_panel.options = options;
++    m_panel.selected = 0;
++  }
++}
++
++void Menu::UpdateUpdater(float dt)
++{
++  const UpdateState state = m_update_state;
++  const bool settled = state == UpdateState::UpToDate || state == UpdateState::Available ||
++                       state == UpdateState::Failed || state == UpdateState::Finished;
++  if (settled && m_update_thread.joinable())
++    m_update_thread.join();
++
++  // A new version found in the background: ask once, when nothing else is on screen.
++  if (state == UpdateState::Available && !m_update_prompted && !m_intro && m_launch < 0 &&
++      (!m_panel.open || m_panel.setting == SET_UPDATE))
++  {
++    m_update_prompted = true;
++    ShowUpdatePanel();
++    Play("menu");
++    return;
++  }
++  if (!m_panel.open || m_panel.setting != SET_UPDATE)
++  {
++    // Background results nobody asked to see stay quiet (they're in the log).
++    if (state == UpdateState::Finished)
++      ShowUpdatePanel();
++    return;
++  }
++  if (state == UpdateState::Available)
++    m_update_prompted = true;
++  ShowUpdatePanel();
++  if (state == UpdateState::Finished)
++  {
++    if (m_update_close_in < 0.0f)
++    {
++      m_update_close_in = 8.0f;
++      Play("confirm");
++    }
++    m_update_close_in -= dt;
++    if (m_update_close_in <= 0.0f)
++    {
++      m_update_exit = true;
++      m_quit = true;
++    }
++  }
++}
++
++// Update packages from earlier runs: once that version (or a newer one) is running, they're no
++// longer needed. A package for a newer version is kept, as its install may still be going on.
++void Menu::RemoveOldUpdates()
++{
++  std::error_code ec;
++  const std::string dir = m_data_dir + "/update";
++  for (const auto& entry : std::filesystem::directory_iterator(dir, ec))
++  {
++    const std::string name = entry.path().filename().string();
++    const bool partial = name.size() > 5 && name.compare(name.size() - 5, 5, ".part") == 0;
++    const size_t v = name.find("-v");
++    const std::string version = v == std::string::npos ? "" : name.substr(v + 2);
++    if (partial || version.empty() || PS4Updater::CompareVersions(version, m_version) <= 0)
++    {
++      std::filesystem::remove(entry.path(), ec);
++      Log("update: removed " + name);
++    }
++  }
++}
++
 +std::string Menu::Run()
 +{
 +  s_log = fopen((m_data_dir + "/xmb.log").c_str(), "w");
@@ -8789,6 +9782,9 @@ index 0000000..e269b58
 +      m_item_pos[static_cast<int>(Category::Games)] = static_cast<float>(i);
 +    }
 +  }
++  RemoveOldUpdates();
++  if (m_prefs.auto_update)
++    StartUpdateCheck(false);
 +  // Covers missing for any game are fetched in the background every time the app opens.
 +  for (const Game& game : m_games)
 +  {
@@ -8824,6 +9820,7 @@ index 0000000..e269b58
 +      HandleInput(m_input.Poll(dt));
 +    }
 +    UpdateCoverDownload();
++    UpdateUpdater(dt);
 +
 +    m_display.BeginFrame();
 +    ImGui::NewFrame();
@@ -8841,6 +9838,11 @@ index 0000000..e269b58
 +  m_cover_cancel = true;
 +  if (m_cover_thread.joinable())
 +    m_cover_thread.join();
++  m_update_cancel = true;
++  if (m_update_thread.joinable())
++    m_update_thread.join();
++  if (m_update_exit)
++    result = EXIT_APP;
 +  m_audio.Stop();
 +  m_display.Shutdown();
 +  ImGui::DestroyContext();
@@ -8857,10 +9859,10 @@ index 0000000..e269b58
 +}  // namespace PS4XMB
 diff --git a/Source/Core/DolphinNoGUI/PS4XMB.h b/Source/Core/DolphinNoGUI/PS4XMB.h
 new file mode 100755
-index 0000000..87be3f8
+index 0000000..a97fb9b
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4XMB.h
-@@ -0,0 +1,30 @@
+@@ -0,0 +1,33 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -8885,6 +9887,9 @@ index 0000000..87be3f8
 +  int disc = 0;  // 0 = Disc 1
 +  std::string title;
 +};
++
++// Returned by Run when the app should close (an update is being installed).
++inline constexpr const char* EXIT_APP = "\x01exit";
 +
 +// Shows the XMB until a game is picked (returns its first disc) or the user quits (empty).
 +// data_dir: /data/DolphinPS4 (xmb.ini, themes/); assets_dir: /app0 (xmb/, Sys/).
@@ -9539,10 +10544,10 @@ index f4dc8a9..121376e 100644
  
 diff --git a/Source/Core/DolphinNoGUI/PlatformPS4.cpp b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
 new file mode 100644
-index 0000000..c503d71
+index 0000000..041399f
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
-@@ -0,0 +1,1173 @@
+@@ -0,0 +1,1182 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -10635,6 +11640,15 @@ index 0000000..c503d71
 +    for (const LibraryEntry& entry : GameLibrary())
 +      library.push_back({entry.path, entry.game_id, entry.revision, entry.disc, entry.title});
 +    game = PS4XMB::Run(library, PS4_DATA_DIR_PATH, "/app0", AppVersion());
++    if (game == PS4XMB::EXIT_APP)
++    {
++      // An update is installing in the background: the app closes so it can be replaced.
++      BootTrace("xmb: closing the app for an update");
++      fflush(stderr);
++      sceSystemServiceLoadExec("exit", nullptr);
++      for (;;)
++        sceKernelUsleep(100000);
++    }
 +    if (game.empty())
 +    {
 +      // The menu couldn't start: the old automatic start, so the app stays usable.

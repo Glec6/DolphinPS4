@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Configure Dolphin for PS4 with the modern love-ps4-style toolchain: the NoGUI frontend with the
 # PS4 platform, linked like love-ps4 (ps4-love-style.cmake is included into the top-level project).
+# USE_SYSTEM_CURL=OFF: Dolphin's bundled curl, built for its own mbedtls 2.28. PacBrew's libcurl
+# was compiled against mbedtls 2.16 headers but ended up linked with Dolphin's 2.28 library (mismatched
+# structures: certificate checks failed, and 2.28 code could write past curl's smaller structs).
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 source "$HERE/ps4-env.sh"
@@ -15,5 +18,6 @@ ps4_cmake -S "$SRC" -B "$BUILD" -G Ninja \
     -DENABLE_EVDEV=OFF -DENABLE_HWDB=OFF -DENABLE_AUTOUPDATE=OFF -DENABLE_ANALYTICS=OFF \
     -DUSE_DISCORD_PRESENCE=OFF -DUSE_MGBA=OFF -DUSE_RETRO_ACHIEVEMENTS=OFF -DUSE_UPNP=OFF \
     -DENCODE_FRAMEDUMPS=OFF -DENABLE_LTO=OFF -DENABLE_GENERIC=OFF \
+    -DUSE_SYSTEM_CURL=OFF \
     -DPS4_PAID="${PS4_PAID:-0x3800000000000035}" \
     "$@"
