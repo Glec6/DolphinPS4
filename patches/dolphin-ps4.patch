@@ -10874,10 +10874,10 @@ index f4dc8a9..121376e 100644
  
 diff --git a/Source/Core/DolphinNoGUI/PlatformPS4.cpp b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
 new file mode 100644
-index 0000000..96d7e82
+index 0000000..c9a33a1
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
-@@ -0,0 +1,1189 @@
+@@ -0,0 +1,1218 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -11357,6 +11357,11 @@ index 0000000..96d7e82
 +      // 0.3) means a 30 FPS game; a game dropping frames wanders around it.
 +      static int s_normal_fps = 0, s_steady_30 = 0;
 +      static int s_lag_floor = 0, s_lag_floor_checks = 0;
++      // Each raise for dropped frames is checked at the next look: no more frames (Call of Duty 2:
++      // Big Red One kept losing speed while the clock climbed 50 -> 90%) -> back down, and no such
++      // raise for about a minute.
++      static int s_raised_from = -1, s_lag_block_checks = 0;
++      static double s_fps_before_raise = 0.0;
 +      const double fps = perf.GetFPS();
 +      if (s_lag_floor_checks > 0 && --s_lag_floor_checks == 0)
 +        s_lag_floor = 0;
@@ -11368,12 +11373,36 @@ index 0000000..96d7e82
 +        else if (s_steady_30 >= 2)
 +          s_normal_fps = 30;
 +      }
++      if (s_lag_block_checks > 0)
++        s_lag_block_checks--;
++      const bool running = Core::GetState(system) == Core::State::Running && speed > 0.1;
++      bool reverted = false;
++      if (running && s_raised_from >= 0 && s_since_change >= 2)
++      {
++        if (fps < s_fps_before_raise + 1.0 || speed < 0.95)
++        {
++          char line[160];
++          snprintf(line, sizeof(line),
++                   "auto clock: raising to %d%% didn't help (%.0f FPS, speed %.0f%%) -> %d%%",
++                   clock, fps, speed * 100.0, s_raised_from);
++          BootTrace(line);
++          clock = s_raised_from;
++          s_lag_floor = 0;
++          s_lag_floor_checks = 0;
++          s_lag_block_checks = 60;
++          reverted = true;
++        }
++        s_raised_from = -1;
++      }
 +      const int floor = std::max(ps4_auto_clock_min, s_lag_floor);
-+      if (Core::GetState(system) == Core::State::Running && speed > 0.1)
++      if (running && !reverted)
 +      {
 +        if (s_normal_fps > 0 && speed >= 0.97 && fps > 5.0 && fps < s_normal_fps * 0.85 &&
-+            cpu_busy >= 0.90 && s_since_change >= 2 && clock < ps4_auto_clock_max)
++            cpu_busy >= 0.90 && s_since_change >= 2 && clock < ps4_auto_clock_max &&
++            s_lag_block_checks == 0)
 +        {
++          s_raised_from = clock;
++          s_fps_before_raise = fps;
 +          clock = std::min(ps4_auto_clock_max, clock + 5);
 +          s_lag_floor = clock;
 +          s_lag_floor_checks = 30;
