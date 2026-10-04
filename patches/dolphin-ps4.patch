@@ -2201,6 +2201,24 @@ index 054596e..939e27c 100644
  }
  
  bool MemoryManager::TryAddLargePageTableMapping(u32 logical_address, u32 translated_address,
+diff --git a/Source/Core/Core/IOS/Network/KD/NetKDRequest.cpp b/Source/Core/Core/IOS/Network/KD/NetKDRequest.cpp
+index ed320f5..e6f93a5 100644
+--- a/Source/Core/Core/IOS/Network/KD/NetKDRequest.cpp
++++ b/Source/Core/Core/IOS/Network/KD/NetKDRequest.cpp
+@@ -170,7 +170,13 @@ NetKDRequestDevice::NetKDRequestDevice(EmulationKernel& ios, const std::string&
+   m_handle_mail = !ios.GetIOSC().IsUsingDefaultId() && !m_send_list.IsDisabled();
+   m_scheduler_work_queue.Reset("WiiConnect24 Scheduler Worker");
+ 
++#ifdef __ORBIS__
++  // PS4: no WiiConnect24 background tasks. Its downloads (Nintendo's servers are gone) killed
++  // the app: Wii Sports Resort died ~2 minutes in, when its scheduled download started.
++  (void)&NetKDRequestDevice::SchedulerTimer;
++#else
+   m_scheduler_timer_thread = std::thread([this] { SchedulerTimer(); });
++#endif
+ }
+ 
+ NetKDRequestDevice::~NetKDRequestDevice()
 diff --git a/Source/Core/Core/MemTools.cpp b/Source/Core/Core/MemTools.cpp
 index a7919fb..8de7f4d 100644
 --- a/Source/Core/Core/MemTools.cpp
