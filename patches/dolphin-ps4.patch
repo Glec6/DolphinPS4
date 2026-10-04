@@ -9420,10 +9420,10 @@ index f4dc8a9..4e5ff67 100644
  
 diff --git a/Source/Core/DolphinNoGUI/PlatformPS4.cpp b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
 new file mode 100644
-index 0000000..03e899d
+index 0000000..de58c2e
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
-@@ -0,0 +1,1077 @@
+@@ -0,0 +1,1083 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -9839,8 +9839,13 @@ index 0000000..03e899d
 +    }
 +    PS4IngameMenu::Poll(Core::System::GetInstance());
 +    std::this_thread::sleep_for(std::chrono::milliseconds(16));
-+    // Keeps the FPS average fresh for the on-screen counter (VideoCommon/Present.cpp).
-+    if (frame % 30 == 29)
++    // Keeps the FPS average fresh for the on-screen counter (VideoCommon/Present.cpp) - only
++    // with OpenGL. On Vulkan, Dolphin's on-screen layer updates it on the video thread every
++    // frame (OnScreenUI::Finalize -> DrawImGuiStats), and the counters take one updating thread
++    // (a single-consumer queue and a deque): updating from here as well corrupted the heap and
++    // crashed games at random (Super Smash Bros. Melee, after closing the in-game menu).
++    static const bool s_update_stats_here = Config::Get(Config::MAIN_GFX_BACKEND) == "OGL";
++    if (s_update_stats_here && frame % 30 == 29)
 +      Core::System::GetInstance().GetPerfMetrics().UpdateStats();
 +    // cpu_clock=auto: the emulated CPU clock follows what the PS4 can run at full speed. A game
 +    // gets as much of the GameCube's CPU as possible (up to cpu_clock_max, normally the real
@@ -9899,7 +9904,8 @@ index 0000000..03e899d
 +      using AvailableFlexibleFn = int32_t (*)(size_t*);
 +      reinterpret_cast<AvailableFlexibleFn>(&sceKernelAvailableFlexibleMemorySize)(&flexible);
 +      auto& perf = Core::System::GetInstance().GetPerfMetrics();
-+      perf.UpdateStats();
++      if (s_update_stats_here)
++        perf.UpdateStats();
 +      const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(
 +                               std::chrono::steady_clock::now() - start)
 +                               .count();
@@ -15901,7 +15907,7 @@ index 92f7c1f..3378a49 100644
      m_default_pixel_shader = g_gfx->CreateShaderFromSource(
          ShaderStage::Pixel, GetHeader(false) + default_pixel_shader_code + GetFooter(), nullptr,
 diff --git a/Source/Core/VideoCommon/Present.cpp b/Source/Core/VideoCommon/Present.cpp
-index 41d05f3..17d066b 100644
+index 41d05f3..54b5154 100644
 --- a/Source/Core/VideoCommon/Present.cpp
 +++ b/Source/Core/VideoCommon/Present.cpp
 @@ -3,6 +3,11 @@
@@ -16282,7 +16288,7 @@ index 41d05f3..17d066b 100644
 +
 +  if (backbuffer_bound && ps4_show_fps)
 +  {
-+    // Refreshed by the DolphinNoGUI monitor (PerformanceMetrics::UpdateStats) every 2 s.
++    // Refreshed every frame by the on-screen layer (OnScreenUI::Finalize -> DrawImGuiStats).
 +    const auto& perf = Core::System::GetInstance().GetPerfMetrics();
 +    const float fps = static_cast<float>(perf.GetFPS());
 +    const float speed = static_cast<float>(perf.GetSpeed() * 100.0);
