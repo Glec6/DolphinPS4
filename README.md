@@ -4,300 +4,245 @@
 
 <p align="center">
   <a href="https://github.com/iHaiDeeZ/DolphinPS4/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/iHaiDeeZ/DolphinPS4?label=release&color=5bb8ff"></a>
-  <img alt="Platform: PS4 homebrew" src="https://img.shields.io/badge/platform-PS4%20homebrew-1f5fd6">
-  <img alt="Powered by Dolphin" src="https://img.shields.io/badge/emulation-Dolphin-5cd3ff">
-  <a href="LICENSE"><img alt="License: GPL-2.0-or-later" src="https://img.shields.io/badge/license-GPL--2.0--or--later-ff9ccf"></a>
+  <img alt="PS4 homebrew" src="https://img.shields.io/badge/PS4-homebrew-1f5fd6">
+  <img alt="GameCube and Wii" src="https://img.shields.io/badge/GameCube%20%2B%20Wii-Dolphin-5cd3ff">
+  <a href="LICENSE"><img alt="GPL-2.0-or-later" src="https://img.shields.io/badge/license-GPL--2.0--or--later-ff9ccf"></a>
 </p>
 
-<p align="center">
-  <b>Dolphin for PS4</b> is a GameCube and Wii emulator for jailbroken PS4, built on
-  <a href="https://dolphin-emu.org">Dolphin</a>, with a PSP-style menu for the TV and the DualShock 4.
-</p>
+<h3 align="center">Your GameCube and Wii library, on the PS4.</h3>
 
 <p align="center">
-  <a href="https://github.com/iHaiDeeZ/DolphinPS4/releases/latest"><b>Download v02.95</b></a> ·
-  <a href="#install">Install</a> ·
+  <a href="https://github.com/iHaiDeeZ/DolphinPS4/releases/latest"><b>⬇ Get v02.95</b></a> ·
+  <a href="#getting-started">Getting started</a> ·
   <a href="#controls">Controls</a> ·
-  <a href="BUILDING.md">Build from source</a> ·
+  <a href="#faq">FAQ</a> ·
   <a href="CREDITS.md">Credits</a>
 </p>
 
 ---
 
-## What it is
+## Overview
 
-Dolphin for PS4 is a homebrew app (title ID `DLPH00010`) that runs the Dolphin emulator on a
-jailbroken PS4. It has a game menu in the style of the PSP's XMB, settings for every game or for
-one game, and an in-game menu, all driven with a DualShock 4. Dolphin's x86-64 JIT runs on the
-console's CPU, and graphics go through Vulkan on Mesa's RADV driver, talking straight to the PS4
-GPU.
+Dolphin for PS4 brings the [Dolphin](https://dolphin-emu.org) emulator to jailbroken PS4 consoles
+as an app you launch from the home screen like any other. You browse your games in a menu
+inspired by the PSP's XMB, press **Cross**, and play with a DualShock 4. Pressing **L3 + R3**
+during a game pauses it and opens a menu for save states, settings and cheats.
 
-It plays your own GameCube and Wii disc backups. It doesn't include any games or BIOS files.
+Under the hood, Dolphin's JIT recompiler runs on the PS4's CPU, and rendering goes through
+Vulkan: Mesa's RADV driver, adapted to submit work directly to the PS4's AMD GPU.
 
-## Features
+You bring your own game backups. Nothing copyrighted is bundled: no games, BIOS or keys.
 
-### The menu
-- An XMB in three categories, **Settings**, **Games** and **Themes**: left and right move
-  between them, up and down through the items.
-- Each game is tagged by system: purple for **GameCube**, white for **Wii**.
-- The menu opens on the game you played last.
-- A start-up animation plays when the app opens and when you quit a game back to the menu. Any
-  button skips it.
-- Formats: `.rvz`, `.iso`, `.nkit.iso`, `.gcm`, `.gcz`, `.ciso`, `.wia` and `.wbfs`. Games on
-  more than one disc are found by their `(Disc 1)`, `(Disc 2)` names.
+## Highlights
 
-### Box art
-- Covers download from [GameTDB](https://www.gametdb.com) in the background every time the app
-  opens, for any game that doesn't have one yet, GameCube and Wii alike.
-- **Settings → Download Covers** fetches them by hand and shows the progress.
-- To use your own art, put a PNG named after the game's disc ID in the covers folder.
-- GameCube games without a cover show the banner from their disc.
+**A launcher made for the couch**
+- Three columns, Settings, Games and Themes, navigated with the D-pad or left stick.
+- Purple badges mark GameCube games and white badges mark Wii games.
+- Box art is fetched from GameTDB on its own each time the app starts, only for the games that
+  are still missing a cover. GameCube discs without art show their built-in banner.
+- It remembers the last game you played and starts there. A short animated intro plays at
+  launch and when you come back from a game.
 
-### The game panel
-- **Triangle** on a game opens its panel: **Start**, **Game Settings**, **Cheats** and
-  **Information**.
-- **Game Settings** gives the game its own copy of every setting. Turn it back to *All Games* and
-  it follows the global settings again.
-- **Cheats** lists the game's Action Replay and Gecko codes; each one turns on or off.
+**Every game tuned the way you like**
+- Each setting can be global or saved for a single game. Switch a game to *This Game* and it
+  keeps its own copy; switch it back and it follows the global values again.
+- Settings changed in the middle of a game stick.
+- The app ships with settings tested on a base PS4, plus ready-made fixes for some games, such as
+  Wii Sports without a Nunchuk and sideways Wii Remote games.
+- Cheat codes (Action Replay and Gecko) can be switched on per game, from the launcher or the
+  pause menu.
 
-### Settings
-Settings are split into sections:
+**A pause menu on L3 + R3**
+- Eight save state slots, with a message while a state is being written.
+- All settings, applied immediately.
+- For Wii games, plug the Nunchuk in or out, or turn the Wii Remote sideways, without leaving
+  the game.
+- Quit straight back to the launcher.
 
-| Section | What's inside |
-|---|---|
-| **Video** | Aspect ratio, letterbox zoom, widescreen hack, crop to aspect ratio, internal resolution (1x to 3x), frame rate limit (Unlimited, Auto 60/30, 60, 45, 30), V-Sync, FPS counter |
-| **Graphics** | Texture filtering, anisotropic filtering, anti-aliasing, disable fog, copy filter, EFB copies, CPU access to EFB, manual texture sampling, shader compilation (asynchronous, hybrid ubershaders, synchronous) |
-| **Performance** | Emulated CPU clock (Auto, or 50% to 150%), speed features (Fast or Compatible), dual core, Vulkan thread, fast disc speed, performance graphs |
-| **System** | Game volume, Wii extension (Nunchuk or none), sideways Wii Remote, audio buffer |
-| **Diagnostics** | All diagnostics, performance log, freeze reports, emulator log, profiler |
-| **Controls** | Remap the GameCube controller and the Wii Remote |
-| **Menu** | Sound effects and their volume, clock, reset all settings, about |
+**Make it yours**
+- Twelve colour themes, from *Dolphin Blue* and *GameCube Indigo* to *Wii White* and
+  *Midnight*.
+- Drop PNG images in a folder to use them as wallpapers, or WAV files to replace the menu sounds.
+- Remap the GameCube controller and the Wii Remote, with the DualShock 4 buttons shown as
+  icons.
 
-- **Per-game settings.** Any game can have its own Video, Graphics, Performance, System and
-  Diagnostics settings, from the menu or from inside the game.
-- **Tuned defaults.** The defaults are the settings tested on a base PS4, and some games come with
-  fixes of their own: Wii Sports and Wii Play run without a Nunchuk, sideways games (New Super
-  Mario Bros. Wii, Mario Kart Wii, Kirby's Return to Dream Land, Super Smash Bros. Brawl) hold
-  the Wii Remote sideways, and a few games get fixes of their own (FIFA Street 2's videos, for
-  example, use exact texture sampling).
-- **Reset All Settings** puts everything back the way it ships. Your games and saves are kept.
+**Built for the PS4's hardware**
+- Shaders are compiled in the background on spare CPU cores, and the cache is kept for next
+  time.
+- An automatic CPU clock that slows the emulated GameCube CPU down in heavy scenes, so games keep
+  their normal speed instead of dragging.
+- An *Auto (60/30)* frame limit that switches to a steady 30 FPS when a game can't hold 60.
+- Logs, freeze reports and a profiler you can switch on when something needs investigating.
 
-### In-game menu
-Press **L3 + R3** together while playing. The game pauses and the menu opens:
+## Getting started
 
-- **Resume**
-- **Save State** and **Load State**: eight slots, left and right pick one. A message shows while
-  the state is written and when it's done.
-- **Wii Extension** and **Sideways Wii Remote** (Wii games only): plug the Nunchuk in or out and
-  turn the Wii Remote, as on a Wii.
-- **Settings**: every setting, applied while you play. The top row, **Apply To**, chooses *This
-  Game* or *All Games*.
-- **Cheats**
-- **Quit Game**: back to the menu.
+**You need:** a jailbroken PS4 that runs homebrew packages (developed on a launch-model "fat"
+PS4), an FTP connection to it, and backups of games you own.
 
-Button hints are drawn as DualShock 4 icons. Changes are saved, and when you resume the game
-ignores the buttons until you let go.
+1. Grab **`DolphinPS4-v02.95.pkg`** from the [releases page](https://github.com/iHaiDeeZ/DolphinPS4/releases/latest)
+   and install it with your package installer.
+2. Put your games in **`/data/DolphinPS4/games/`**. Accepted formats are `.rvz`, `.iso`,
+   `.nkit.iso`, `.gcm`, `.gcz`, `.ciso`, `.wia` and `.wbfs`. Multi-disc games just need
+   `(Disc 1)` / `(Disc 2)` in their names.
+3. Launch **Dolphin** from the home screen.
 
-### Themes
-- Twelve colour themes: *Dolphin Blue*, *GameCube Indigo*, *Wii White*, *Ocean*, *Emerald*,
-  *Lime*, *Gold*, *Sunset*, *Crimson*, *Rose*, *Graphite* and *Midnight*.
-- **Your own wallpapers:** PNG images in `/data/DolphinPS4/themes/` show up in the Themes list by
-  their file name.
-- **Your own sounds:** a WAV in `/data/DolphinPS4/themes/sounds/` with the same name as a menu
-  sound (`move`, `category`, `confirm`, `back`, `launch`, `error`, `menu`, `intro`) replaces it.
+> **Tip:** RVZ is the best format to store games in. It's much smaller than ISO and loads just
+> as fast. Dolphin on a PC can convert your games (right-click → *Convert File*).
 
-### Performance
-- Dolphin's x86-64 JIT with fastmem and dual core, and Vulkan through RADV on the PS4 GPU, with
-  frames flipped by the GPU itself.
-- Shaders compile on background threads on cores of their own, with asynchronous compilation or
-  hybrid ubershaders, so games stutter less the first time they draw something new. The shader
-  cache is kept between runs.
-- **Auto CPU clock:** the emulated GameCube CPU clock follows what the PS4 can run at full speed.
-  Light scenes get as much of the GameCube's CPU as possible; heavy scenes get a lower clock
-  instead of running in slow motion.
-- **Frame rate limit, Auto (60/30):** when a game can't hold 60, it shows a steady 30 instead of
-  an uneven 45 to 55.
-
-## Requirements
-
-- A jailbroken PS4 with homebrew enabled and a package installer. Developed and tested on a base
-  ("fat") PS4.
-- A way to copy files to the console, such as FTP.
-- **Your own games**, as backups you made from discs you own.
-- Optional: an internet connection on the console, for box art.
-
-## Install
-
-1. Download **`DolphinPS4-v02.95.pkg`** from the
-   [latest release](https://github.com/iHaiDeeZ/DolphinPS4/releases/latest).
-2. Copy it to the PS4 and install it with your package installer.
-3. Copy your game backups into **`/data/DolphinPS4/games/`** over FTP. `.rvz` is recommended:
-   the smallest files, at no cost in speed (Dolphin on PC converts games: right-click a game →
-   *Convert File*).
-4. Open **Dolphin** from the home screen. **Settings → About** shows the version.
-
-Box art downloads automatically while the console is online.
-
-### Updating
-Install the new package over the old one. Your games, saves, covers and settings live in
-`/data/DolphinPS4/` and are kept. Check **Settings → About** to confirm the version.
+**Updating:** install the newer package on top of the old one. Everything you've set up lives in
+`/data/DolphinPS4/` and survives updates. **Settings → About** shows which version you're on.
 
 ## Controls
 
-### Menu
+### In the launcher
 
-| Button | Action |
+| Press | To |
 |---|---|
-| D-pad / left stick | Move between categories and items |
-| **L1 / R1** | Jump five items |
-| **Cross** | Start the game, choose |
-| **Circle** | Back |
-| **Triangle** | The game's panel: Start, Game Settings, Cheats, Information |
+| D-pad / left stick | Move around |
+| L1 / R1 | Scroll five entries at a time |
+| Cross | Play the game / confirm |
+| Circle | Go back |
+| Triangle | Open a game's options (start, game settings, cheats, information) |
 
-### In a game
+### While playing
 
-| Button | Action |
+| Press | To |
 |---|---|
-| **L3 + R3** | Pause and open the in-game menu |
-| **Circle** (in the menu) | Back, or resume from the first page |
-| **Left / Right** (in the menu) | Change a value, or pick a save state slot |
+| L3 + R3 | Pause and open the menu |
+| Left / Right in the menu | Change a value, or choose a save slot |
+| Circle in the menu | Go back, or resume the game |
 
-GameCube controller:
+### Default button layout
 
-| GameCube | DualShock 4 |
+| | GameCube | Wii Remote + Nunchuk |
+|---|---|---|
+| Cross | A | A |
+| Square | B | 1 |
+| Circle | X | – |
+| Triangle | Y | 2 |
+| R1 | Z | – |
+| L1 | – | − and Nunchuk C |
+| L2 | L (analog) | Nunchuk Z |
+| R2 | R (analog) | B |
+| Options | Start | + |
+| Touch pad click | – | Home |
+| Left stick | Control stick | Nunchuk stick |
+| Right stick | C-stick | Pointer |
+| R3 | – | Shake |
+| D-pad | D-pad | D-pad |
+
+Any of these can be changed under **Settings → Controls**: highlight an input, press Cross, then
+press the button you'd like to use.
+
+## Settings at a glance
+
+| Group | Highlights |
 |---|---|
-| A / B / X / Y | Cross / Square / Circle / Triangle |
-| Z | R1 |
-| L / R (analog) | L2 / R2 |
-| Start | Options |
-| Control stick / C-stick | Left stick / right stick |
-| D-pad | D-pad |
+| Video | Internal resolution up to 3x, aspect ratio, widescreen hack, letterbox zoom, frame-rate limit, V-Sync, FPS counter |
+| Graphics | Texture filtering, anisotropic filtering, anti-aliasing, fog, EFB options, shader compilation mode |
+| Performance | Emulated CPU clock (Auto or fixed), Fast / Compatible speed features, dual core, Vulkan thread, fast disc |
+| System | Game volume, Wii Nunchuk, sideways Wii Remote, audio buffer |
+| Diagnostics | One switch for everything, or performance log, freeze reports, emulator log and profiler separately |
 
-Wii Remote and Nunchuk:
+The launcher also has switches for its sounds and clock, a cover downloader, the controls editor,
+**Reset All Settings** and **About**.
 
-| Wii | DualShock 4 |
-|---|---|
-| A / B | Cross / R2 |
-| 1 / 2 | Square / Triangle |
-| − / + | L1 / Options |
-| Home | Touch pad click |
-| Pointer | Right stick |
-| Shake | R3 |
-| D-pad | D-pad |
-| Nunchuk stick / C / Z | Left stick / L1 / L2 |
+## Your files
 
-To set any button yourself, go to **Settings → Controls**, choose GameCube or Wii, press
-**Cross** on a row and then the DualShock 4 button you want. Sticks are picked with left and
-right. **Reset to Default** brings back the layout above.
+Everything the app creates sits in **`/data/DolphinPS4/`**:
 
-## Where things are kept
+- `games/`: your game backups
+- `covers/`: box art, one `<disc ID>.png` per game. Swap in your own art if you like.
+- `themes/`: custom wallpapers (PNG) and menu sounds (`themes/sounds/*.wav`)
+- `User/`: Dolphin's own data: GameCube memory cards, the Wii's saves, save states, shader cache
+  and controller layouts
+- `settings.ini`: your settings, global and per game
+- `xmb.ini`: launcher preferences (theme, wallpaper, sounds, last game)
+- `ps4.ini`: optional advanced switches, layered on top of the built-in defaults
+- `*.log` and `*-stacks*.txt`: logs and freeze reports for bug reports
 
-| Path | What |
-|---|---|
-| `/data/DolphinPS4/games/` | Your game files |
-| `/data/DolphinPS4/covers/` | Box art (`<disc ID>.png`); replace any with your own |
-| `/data/DolphinPS4/User/` | Dolphin's data: GameCube saves (`GC/`), the Wii's system memory and saves (`Wii/`), save states (`StateSaves/`), shader cache, controller mappings |
-| `/data/DolphinPS4/settings.ini` | Your settings, global and per game |
-| `/data/DolphinPS4/xmb.ini` | Menu preferences: theme, wallpaper, sounds, last game |
-| `/data/DolphinPS4/themes/` | Your own wallpapers and menu sounds |
-| `/data/DolphinPS4/ps4.ini` | Optional advanced options, on top of the built-in defaults |
-| `/data/DolphinPS4/*.log`, `*-stacks*.txt` | Logs and reports (see below) |
+## Game compatibility
 
-## Troubleshooting
+Measured on a launch-model PS4, average frames per second while playing:
 
-- **A game runs slowly?** Most slowdowns on a PS4 come from its CPU, not the GPU. Keep the
-  **Emulated CPU Clock** on *Auto*. If the frame rate sits between 45 and 55 and feels uneven,
-  set **Frame Rate Limit** to *Auto (60/30)*. Keep the **Profiler** off; it costs about 15% speed.
-- **A game glitches or freezes?** Set **Speed Features** to *Compatible* in its Game Settings.
-- **Short hitches the first time something appears?** Those are shaders being compiled. The cache
-  makes the next time smooth; *Hybrid Ubershaders* hides them at some GPU cost.
-- **A Wii game asks you to remove the Nunchuk?** Open the in-game menu (L3 + R3) and set **Wii
-  Extension** to *None*. The game keeps that setting.
-- **No covers?** The console needs to be online when the app opens. A few discs have no art on
-  GameTDB; you can add your own.
-- **Something went wrong?** Turn on **Settings → Diagnostics → All Diagnostics** (with
-  *Performance Log* and *Freeze Reports*), play until it happens, then send these files from
-  `/data/DolphinPS4/`:
-  - `boot-trace.log` and `dolphin.log`
-  - `crash.log`, if the app crashed
-  - any `stall-stacks-*.txt`, `boot-stacks-*.txt` or `hang-stacks.txt`
+| Game | System | FPS |
+|---|---|---|
+| Super Mario Sunshine | GameCube | 30 (its normal rate) |
+| Resident Evil 4 | GameCube | 30 (its normal rate) |
+| The Legend of Zelda: Twilight Princess | GameCube | 30 (its normal rate) |
+| Mortal Kombat: Deadly Alliance | GameCube | 60 |
+| Crash Nitro Kart | GameCube | 60 |
+| Crash Tag Team Racing | GameCube | 60 |
+| Sonic Adventure DX | GameCube | 60 |
+| Shadow the Hedgehog | GameCube | 30–60 |
+| Worms 3D | GameCube | ~55 |
+| Super Smash Bros. Melee | GameCube | 36–60 |
+| Crash Bandicoot: The Wrath of Cortex | GameCube | 20–60 |
+| FIFA Street 2 | GameCube | ~34 |
+| Super Mario Galaxy | Wii | 40–57 |
+| Wii Sports | Wii | ~40 |
+| Wii Sports Resort | Wii | ~37 |
 
-Please [open an issue](https://github.com/iHaiDeeZ/DolphinPS4/issues) with the game, its region,
-the version from **Settings → About**, what you did, and those files.
+A range means the frame rate depends on what's on screen. Tested a game that isn't listed? Let
+us know how it runs in an [issue](https://github.com/iHaiDeeZ/DolphinPS4/issues).
 
-## Tested games
+## FAQ
 
-On a base PS4, average frames per second in gameplay:
+**Why does a game slow down in busy scenes?**
+The PS4's CPU is usually the bottleneck, not its GPU. Leave the emulated CPU clock on *Auto*. If
+the frame rate wanders between 45 and 55 and feels choppy, *Frame Rate Limit → Auto (60/30)*
+gives a smoother, steady 30.
 
-| Game | FPS |
-|---|---|
-| Super Mario Sunshine | 30 (the game's own rate) |
-| Resident Evil 4 | 30 (the game's own rate) |
-| The Legend of Zelda: Twilight Princess | 30 (the game's own rate) |
-| Mortal Kombat: Deadly Alliance | 60 |
-| Crash Nitro Kart | 60 |
-| Crash Tag Team Racing | 60 |
-| Sonic Adventure DX | 60 |
-| Shadow the Hedgehog | 30–60 |
-| Worms 3D | ~55 |
-| Super Smash Bros. Melee | 36–60 |
-| Crash Bandicoot: The Wrath of Cortex | 20–60 |
-| Super Mario Galaxy | 40–57 |
-| Wii Sports | ~40 |
-| Wii Sports Resort | ~37 |
-| FIFA Street 2 | ~34 |
+**The game hitches the first time an effect appears. Why?**
+Its shader is being compiled. It's saved to the cache, so it won't happen there again. The
+*Hybrid Ubershaders* mode avoids even the first hitch, at some GPU cost.
 
-Where there's a range, light scenes reach the high number and heavy scenes drop to the low one.
+**A game shows glitches or locks up.**
+Open its Game Settings and set *Speed Features* to *Compatible*. If it still happens, please
+report it.
 
-## Known limitations
+**A Wii game tells me to disconnect the Nunchuk.**
+Press L3 + R3 and set *Wii Extension* to *None*. The game remembers it.
 
-- **One player for now.** Only the first DualShock 4 plays; support for up to four players is
-  coming in the next version.
-- Games that need the Wii Remote's pointer or motion are hard to play on a DualShock 4: the
-  pointer is on the right stick and shaking on R3.
-- CPU-heavy games can't reach full speed in their busiest scenes on a base PS4. A PS4 Pro hasn't
-  been tested.
-- Save states are tied to the version that made them; a future update may not load older ones.
-  Your in-game saves always carry over.
-- Netplay, achievements and texture packs aren't part of the PS4 version.
+**Some covers are missing.**
+The console has to be online when the app starts. GameTDB doesn't have art for every disc, so
+you can put your own PNG in `covers/`.
 
-## Build from source
+**How do I report a bug?**
+Turn on *Settings → Diagnostics → All Diagnostics*, play until the problem shows up, then
+[open an issue](https://github.com/iHaiDeeZ/DolphinPS4/issues). Attach `boot-trace.log` and
+`dolphin.log` from `/data/DolphinPS4/`, plus `crash.log` or any `*-stacks*.txt` file if there is
+one, and mention the game, its region and the app version.
 
-Dolphin for PS4 builds in WSL or Linux with clang 21, the OpenOrbis toolchain and Mesa's RADV
-driver for the PS4 GPU. See **[BUILDING.md](BUILDING.md)**.
+## What's next
 
-## Credits
+- **Local multiplayer** for up to four DualShock 4 controllers, including players joining in the
+  middle of a game. Today only the first controller plays.
+- A smarter automatic CPU clock that also watches the game's own frame rate.
 
-Dolphin for PS4 was ported by **ShiroKlein**.
+Also worth knowing:
+- Games built around Wii Remote pointing or motion are hard to play on a DualShock 4.
+- Save states belong to the version that made them, so an update may not load older ones.
+  In-game saves are never affected.
+- Netplay, achievements and texture packs aren't supported on the PS4.
+- Only the original PS4 has been tested so far. PS4 Pro reports are welcome.
 
-It stands on the work of many people. The full list, with licences, is in
-**[CREDITS.md](CREDITS.md)**:
+## Thanks
 
-- **[Dolphin](https://dolphin-emu.org)** by the Dolphin Emulator Project: the emulator itself,
-  started by **F|RES** and **ector** and built by hundreds of contributors, all listed in the
-  credits.
-- **[Mesa](https://mesa3d.org)** and its **RADV** Vulkan driver, which draws every frame on the PS4
-  GPU.
-- **[OpenOrbis](https://github.com/OpenOrbis)**, **[PacBrew](https://github.com/PacBrew)** and
-  **[LLVM](https://llvm.org)**: the PS4 toolchain.
-- **[love-ps4](https://github.com/Mari0/love-ps4)**, whose working PS4 setup this port follows.
-- **[GameTDB](https://www.gametdb.com)** and its contributors, for the box art.
-- **[Dear ImGui](https://github.com/ocornut/imgui)**, and the **Nunito**, **Questrial** and
-  **Michroma** fonts (SIL OFL).
+Ported to the PS4 by **ShiroKlein**.
 
-## Legal
+This port exists thanks to the **[Dolphin](https://dolphin-emu.org)** team, from its creators
+**F|RES** and **ector** to the hundreds of people who have contributed since. Thanks also to
+**[Mesa](https://mesa3d.org)** (RADV), the **[OpenOrbis](https://github.com/OpenOrbis)** and
+**[PacBrew](https://github.com/PacBrew)** PS4 toolchains, **[love-ps4](https://github.com/Mari0/love-ps4)**
+and **[GameTDB](https://www.gametdb.com)**. Everyone involved, with licences, is listed in
+**[CREDITS.md](CREDITS.md)**.
 
-> [!IMPORTANT]
-> **Dolphin for PS4 does not condone piracy.** It contains no games, no console BIOS or IPL
-> files, and no decryption keys, and none will ever be provided or linked to. Play only games you
-> own, as backups you made from your own discs.
+## License and disclaimer
 
-Dolphin for PS4 is an independent, free and open-source project. It is **not affiliated with,
-endorsed by or sponsored by Nintendo, Sony Interactive Entertainment or the Dolphin Emulator
-Project**. *Nintendo*, *GameCube* and *Wii* are trademarks of Nintendo. *PlayStation* and *PS4*
-are trademarks of Sony Interactive Entertainment Inc. These names are used only to describe
-compatibility.
+Released under **GPL-2.0-or-later**, the same licence as Dolphin. See [LICENSE](LICENSE).
 
-Emulation is provided by Dolphin (GPL-2.0-or-later), and this port is released under the same
-licence ([LICENSE](LICENSE)). Box art is downloaded on your console from GameTDB and is not
-distributed with the app.
+This is a fan-made project with no ties to Nintendo, Sony Interactive Entertainment or the
+Dolphin Emulator Project. GameCube and Wii are trademarks of Nintendo; PlayStation and PS4 are
+trademarks of Sony Interactive Entertainment. Please only play games you own. This project won't
+help you find or share game files.
