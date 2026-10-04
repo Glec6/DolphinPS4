@@ -4099,10 +4099,10 @@ index 0000000..1ec7543
 +}  // namespace PS4Cheats
 diff --git a/Source/Core/DolphinNoGUI/PS4Controls.cpp b/Source/Core/DolphinNoGUI/PS4Controls.cpp
 new file mode 100755
-index 0000000..a8fdc34
+index 0000000..0f40012
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4Controls.cpp
-@@ -0,0 +1,342 @@
+@@ -0,0 +1,352 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -4393,6 +4393,16 @@ index 0000000..a8fdc34
 +  }
 +}
 +
++void SetWiiAttachment(const std::string& extension, bool sideways)
++{
++  Common::IniFile ini;
++  ini.Load(Path(Device::Wii));
++  Common::IniFile::Section* section = ini.GetOrCreateSection(Section(Device::Wii));
++  section->Set("Extension", std::string(extension == "none" ? "None" : "Nunchuk"));
++  section->Set("Options/Sideways Wiimote", std::string(sideways ? "True" : "False"));
++  ini.Save(Path(Device::Wii));
++}
++
 +bool IsAtRest(const OrbisPadData& now)
 +{
 +  auto centred = [](uint8_t v) { return v > 78 && v < 178; };
@@ -4447,10 +4457,10 @@ index 0000000..a8fdc34
 +}  // namespace PS4Controls
 diff --git a/Source/Core/DolphinNoGUI/PS4Controls.h b/Source/Core/DolphinNoGUI/PS4Controls.h
 new file mode 100755
-index 0000000..482492f
+index 0000000..301c25a
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4Controls.h
-@@ -0,0 +1,54 @@
+@@ -0,0 +1,56 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -4498,6 +4508,8 @@ index 0000000..482492f
 +// Stick groups: "Left Stick", "Right Stick" or "D-Pad".
 +std::vector<std::string> StickChoices();
 +void ResetToDefault(Device device);
++// The Wii Remote's extension ("nunchuk" or "none") and sideways orientation.
++void SetWiiAttachment(const std::string& extension, bool sideways);
 +
 +// Capture: the expression for the first input that differs from the resting state (a button
 +// pressed, a trigger pulled or a stick pushed), or empty if nothing is pressed yet.
@@ -5560,10 +5572,10 @@ index 0000000..4af50c8
 +}  // namespace PS4IngameMenu
 diff --git a/Source/Core/DolphinNoGUI/PS4Settings.cpp b/Source/Core/DolphinNoGUI/PS4Settings.cpp
 new file mode 100755
-index 0000000..08f7a6f
+index 0000000..ee536f4
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4Settings.cpp
-@@ -0,0 +1,423 @@
+@@ -0,0 +1,441 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -5659,6 +5671,11 @@ index 0000000..08f7a6f
 +     {{"100", "100"}, {"90", "90"}, {"80", "80"}, {"70", "70"}, {"60", "60"}, {"50", "50"},
 +      {"40", "40"}, {"30", "30"}, {"20", "20"}, {"10", "10"}, {"0", "0"}},
 +     "100", true, "Volume of the games' sound."},
++    {"wii_extension", "Wii Extension", "System", {{"nunchuk", "Nunchuk"}, {"none", "None"}},
++     "nunchuk", false,
++     "What is plugged into the Wii Remote. Wii Sports and similar games need None."},
++    {"wii_sideways", "Sideways Wii Remote", "System", {{"off", "Off"}, {"on", "On"}}, "off",
++     false, "For games played with the Wii Remote held sideways (NSMB Wii, Mario Kart Wii)."},
 +    {"audio_buffer", "Audio Buffer", "System",
 +     {{"100", "100 ms"}, {"150", "150 ms"}, {"200", "200 ms"}}, "150", false,
 +     "Larger is smoother when a game runs below full speed; smaller has less delay."},
@@ -5670,6 +5687,7 @@ index 0000000..08f7a6f
 +std::string s_path;
 +std::map<std::string, std::map<std::string, std::string>> s_sections;  // "global", game IDs
 +std::function<std::string(const std::string&)> s_base;
++std::function<std::string(const std::string&, const std::string&)> s_game_base;
 +
 +std::string Trim(std::string text)
 +{
@@ -5701,6 +5719,12 @@ index 0000000..08f7a6f
 +      auto value = game->second.find(key);
 +      if (value != game->second.end())
 +        return value->second;
++    }
++    if (s_game_base)
++    {
++      const std::string base = s_game_base(game_id, key);
++      if (!base.empty())
++        return base;
 +    }
 +  }
 +  auto global = s_sections.find("global");
@@ -5783,6 +5807,12 @@ index 0000000..08f7a6f
 +{
 +  std::lock_guard lock(s_mutex);
 +  s_base = std::move(lookup);
++}
++
++void SetGameBaseLookup(std::function<std::string(const std::string&, const std::string&)> lookup)
++{
++  std::lock_guard lock(s_mutex);
++  s_game_base = std::move(lookup);
 +}
 +
 +std::string Get(const std::string& key, const std::string& game_id)
@@ -5989,10 +6019,10 @@ index 0000000..08f7a6f
 +}  // namespace PS4Settings
 diff --git a/Source/Core/DolphinNoGUI/PS4Settings.h b/Source/Core/DolphinNoGUI/PS4Settings.h
 new file mode 100755
-index 0000000..42ebba7
+index 0000000..c9edda0
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4Settings.h
-@@ -0,0 +1,72 @@
+@@ -0,0 +1,76 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -6039,6 +6069,10 @@ index 0000000..42ebba7
 +
 +// ps4.ini lookup for unset settings (PlatformPS4: its global options).
 +void SetBaseLookup(std::function<std::string(const std::string& key)> lookup);
++// A game's built-in / ps4.ini per-game value (compatibility fixes), or empty. Ranks above the
++// user's global settings, below the game's own custom values.
++void SetGameBaseLookup(
++    std::function<std::string(const std::string& game_id, const std::string& key)> lookup);
 +
 +// Effective value: the game's own (custom games), else global, else ps4.ini, else fallback.
 +std::string Get(const std::string& key, const std::string& game_id = {});
@@ -8697,10 +8731,10 @@ index f4dc8a9..4e5ff67 100644
  
 diff --git a/Source/Core/DolphinNoGUI/PlatformPS4.cpp b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
 new file mode 100644
-index 0000000..7056d5c
+index 0000000..dd489ed
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
-@@ -0,0 +1,982 @@
+@@ -0,0 +1,1013 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -8827,9 +8861,10 @@ index 0000000..7056d5c
 +  return "?";
 +}
 +
-+void LoadOptions()
++// Reads one options file into s_options / s_game_options (later files override earlier ones).
++void LoadOptionsFile(const std::string& path)
 +{
-+  FILE* file = fopen((std::string(PS4_DATA_DIR_PATH) + "/ps4.ini").c_str(), "r");
++  FILE* file = fopen(path.c_str(), "r");
 +  if (!file)
 +    return;
 +  char line[256];
@@ -8853,6 +8888,30 @@ index 0000000..7056d5c
 +      s_game_options[section][text.substr(0, equals)] = text.substr(equals + 1);
 +  }
 +  fclose(file);
++}
++
++// The built-in defaults shipped with the app (tuned values, per-game fixes), then the user's
++// /data/DolphinPS4/ps4.ini on top.
++void LoadOptions()
++{
++  LoadOptionsFile("/app0/xmb/ps4-defaults.ini");
++  LoadOptionsFile(std::string(PS4_DATA_DIR_PATH) + "/ps4.ini");
++}
++
++// A game's per-game value of an option (3-character section, then the full ID), or empty.
++std::string GameOption(const std::string& game_id, const std::string& key)
++{
++  std::string value;
++  for (const std::string& id : {game_id.substr(0, 3), game_id})
++  {
++    const auto section = s_game_options.find(id);
++    if (section == s_game_options.end())
++      continue;
++    const auto it = section->second.find(key);
++    if (it != section->second.end())
++      value = it->second;
++  }
++  return value;
 +}
 +
 +class PlatformPS4 final : public Platform
@@ -9573,6 +9632,8 @@ index 0000000..7056d5c
 +    const auto it = s_ps4_global.find(key);
 +    return it == s_ps4_global.end() ? std::string() : it->second;
 +  });
++  PS4Settings::SetGameBaseLookup(
++      [](const std::string& game_id, const std::string& key) { return GameOption(game_id, key); });
 +  for (const auto& [key, value] : PS4Settings::GlobalValues())
 +    s_options[key] = value;
 +  for (const auto& [key, value] : s_options)
@@ -9673,6 +9734,10 @@ index 0000000..7056d5c
 +      break;
 +    }
 +  }
++  // The Wii Remote's attachment and orientation for this game (WiimoteNew.ini, read by Dolphin
++  // when it starts).
++  PS4Controls::SetWiiAttachment(GetPS4Option("wii_extension", "nunchuk"),
++                                GetPS4Option("wii_sideways", "off") == "on");
 +  // Speed Features: Compatible turns off the command-stream shortcuts (freezes and missing menu
 +  // items in Crash Tag Team Racing and FIFA Street 2 came from them).
 +  if (GetPS4Option("speed_mode", "fast") == "compatible")
