@@ -5311,10 +5311,10 @@ index 0000000..5157e21
 +}  // namespace PS4Glyphs
 diff --git a/Source/Core/DolphinNoGUI/PS4IngameMenu.cpp b/Source/Core/DolphinNoGUI/PS4IngameMenu.cpp
 new file mode 100755
-index 0000000..a19c7ea
+index 0000000..5cccd7d
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4IngameMenu.cpp
-@@ -0,0 +1,926 @@
+@@ -0,0 +1,937 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -5884,14 +5884,25 @@ index 0000000..a19c7ea
 +  }
 +  case Glyph::L3R3:
 +  {
-+    // Two stick tops.
++    // Two round buttons, "L3" and "R3" written in them, with a "+" between.
++    ImFont* font = ps4_overlay_font ? ps4_overlay_font : ImGui::GetFont();
++    const float button_r = r * 0.95f, offset = r * 1.45f;
 +    for (int i = 0; i < 2; i++)
 +    {
-+      const ImVec2 p(c.x + (i == 0 ? -r * 0.95f : r * 0.95f), c.y);
-+      dl->AddCircleFilled(p, r * 0.85f, ring, 24);
-+      dl->AddCircle(p, r * 0.85f, colour(255, 255, 255), 24, r * 0.12f);
-+      dl->AddCircleFilled(p, r * 0.3f, colour(255, 255, 255), 16);
++      const ImVec2 p(c.x + (i == 0 ? -offset : offset), c.y);
++      dl->AddCircleFilled(p, button_r, IM_COL32(20, 24, 34, static_cast<int>(230 * a)), 28);
++      dl->AddCircle(p, button_r, colour(255, 255, 255), 28, r * 0.1f);
++      const char* label = i == 0 ? "L3" : "R3";
++      const float fs = r * 0.95f;
++      const ImVec2 ts = font->CalcTextSizeA(fs, FLT_MAX, 0, label);
++      dl->AddText(font, fs, ImVec2(p.x - ts.x * 0.5f, p.y - ts.y * 0.5f), colour(255, 255, 255),
++                  label);
 +    }
++    const float plus = r * 0.22f;
++    dl->AddLine(ImVec2(c.x - plus, c.y), ImVec2(c.x + plus, c.y), colour(255, 255, 255),
++                r * 0.1f);
++    dl->AddLine(ImVec2(c.x, c.y - plus), ImVec2(c.x, c.y + plus), colour(255, 255, 255),
++                r * 0.1f);
 +    break;
 +  }
 +  }
@@ -6009,7 +6020,7 @@ index 0000000..a19c7ea
 +    for (const auto& [glyph, text] : s_hints)
 +    {
 +      const float r = 18 * s;
-+      const float w = glyph == Glyph::L3R3 ? r * 2.0f : r;
++      const float w = glyph == Glyph::L3R3 ? r * 2.4f : r;
 +      DrawGlyph(dl, glyph, ImVec2(hx + w, hy), r, a);
 +      hx += w * 2 + 14 * s;
 +      dl->AddText(regular, 28 * s, ImVec2(hx, hy - 17 * s), dim, text.c_str());
@@ -6027,11 +6038,11 @@ index 0000000..a19c7ea
 +  if (hint_alpha > 0.0f && s_appear < 0.5f && !toast)
 +  {
 +    // "L3 + R3 for the menu", with the two stick icons, in the bottom-right corner.
-+    const char* label = "Press L3 + R3 for the menu";
-+    const float ts = 28 * s, r = 17 * s;
-+    const float tw = regular->CalcTextSizeA(ts, FLT_MAX, 0, label).x;
-+    const float icon_w = r * 3.8f, pad = 24 * s, gap = 14 * s;
-+    const float right = size.x - 60 * s, bottom = size.y - 60 * s, height = 62 * s;
++    const char* label = "Menu";
++    const float ts = 30 * s, r = 20 * s;
++    const float tw = bold->CalcTextSizeA(ts, FLT_MAX, 0, label).x;
++    const float icon_w = r * 4.9f, pad = 22 * s, gap = 16 * s;
++    const float right = size.x - 60 * s, bottom = size.y - 60 * s, height = 70 * s;
 +    const float left = right - pad - tw - gap - icon_w - pad;
 +    const auto alpha = [hint_alpha](int a) { return static_cast<int>(a * hint_alpha); };
 +    dl->AddRectFilled(ImVec2(left, bottom - height), ImVec2(right, bottom),
@@ -6040,7 +6051,7 @@ index 0000000..a19c7ea
 +                IM_COL32(120, 196, 255, alpha(90)), 16 * s, 0, 1.5f * s);
 +    DrawGlyph(dl, Glyph::L3R3, ImVec2(left + pad + icon_w * 0.5f, bottom - height * 0.5f), r,
 +              hint_alpha);
-+    dl->AddText(regular, ts, ImVec2(left + pad + icon_w + gap, bottom - height * 0.5f - ts * 0.55f),
++    dl->AddText(bold, ts, ImVec2(left + pad + icon_w + gap, bottom - height * 0.5f - ts * 0.55f),
 +                IM_COL32(255, 255, 255, alpha(255)), label);
 +  }
 +}
