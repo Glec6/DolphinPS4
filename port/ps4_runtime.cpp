@@ -240,6 +240,31 @@ constexpr size_t ARENA_SIZE = 8 * MB;
 constexpr int MAX_ARENAS = 12;
 __attribute__((tls_model("initial-exec"))) thread_local mspace t_arena = nullptr;
 std::atomic<int> g_arenaCount{0};
+// Arenas of threads that have exited, for the next busy thread (the audio thread is recreated
+// every time the in-game menu closes, the shader compilers when their count changes): without
+// reuse each restart took a fresh 8 MiB until MAX_ARENAS ran out.
+mspace g_freeArenas[MAX_ARENAS];
+int g_freeArenaCount = 0;
+std::atomic_flag g_freeArenaLock = ATOMIC_FLAG_INIT;
+pthread_key_t g_arenaKey;
+std::atomic<bool> g_arenaKeyReady{false};
+
+void lockFreeArenas() {
+    while (g_freeArenaLock.test_and_set(std::memory_order_acquire))
+        sched_yield();
+}
+void unlockFreeArenas() { g_freeArenaLock.clear(std::memory_order_release); }
+
+// Thread exit (pthread key destructor): its arena goes back on the free list. Chunks other
+// threads still hold stay valid - FOOTERS returns them to this arena when freed.
+void releaseArena(void* arena) {
+    if (!arena)
+        return;
+    lockFreeArenas();
+    if (g_freeArenaCount < MAX_ARENAS)
+        g_freeArenas[g_freeArenaCount++] = static_cast<mspace>(arena);
+    unlockFreeArenas();
+}
 
 // Checks the heap's control block before every operation; the first time it is found
 // overwritten, logs when (operation number, current and previous caller) and what it now holds.
@@ -402,12 +427,35 @@ void ps4_heap_private_arena(const char* name) {
     bool wanted = false;
     for (const char* b : busy)
         wanted |= strcmp(name, b) == 0;
-    if (!wanted || g_arenaCount.fetch_add(1) >= MAX_ARENAS)
+    if (!wanted)
+        return;
+    if (!g_arenaKeyReady.load(std::memory_order_acquire)) {
+        static std::atomic_flag s_creating = ATOMIC_FLAG_INIT;
+        if (!s_creating.test_and_set()) {
+            pthread_key_create(&g_arenaKey, releaseArena);
+            g_arenaKeyReady.store(true, std::memory_order_release);
+        }
+        while (!g_arenaKeyReady.load(std::memory_order_acquire))
+            sched_yield();
+    }
+    // An exited thread's arena first.
+    lockFreeArenas();
+    if (g_freeArenaCount > 0)
+        t_arena = g_freeArenas[--g_freeArenaCount];
+    unlockFreeArenas();
+    if (t_arena) {
+        pthread_setspecific(g_arenaKey, t_arena);
+        heapLog("[dolphin] heap: reused arena for '%s'\n", name);
+        return;
+    }
+    if (g_arenaCount.fetch_add(1) >= MAX_ARENAS)
         return;
     void* block = mspace_malloc(getHeap(), ARENA_SIZE);
     if (!block)
         return;
     t_arena = create_mspace_with_base(block, ARENA_SIZE, 1);
+    if (t_arena)
+        pthread_setspecific(g_arenaKey, t_arena);
     heapLog("[dolphin] heap: private %zu MiB arena for '%s'%s\n", ARENA_SIZE / MB, name,
             t_arena ? "" : " FAILED");
 }

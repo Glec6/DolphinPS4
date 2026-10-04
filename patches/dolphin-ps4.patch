@@ -1083,7 +1083,7 @@ index 0000000..49ed2ff
 +
 +}  // namespace Common
 diff --git a/Source/Core/Common/Thread.cpp b/Source/Core/Common/Thread.cpp
-index d9a40fc..3d6de2b 100644
+index d9a40fc..fa256fc 100644
 --- a/Source/Core/Common/Thread.cpp
 +++ b/Source/Core/Common/Thread.cpp
 @@ -124,7 +124,7 @@ void SetThreadAffinity(std::thread::native_handle_type thread, u32 mask)
@@ -1095,7 +1095,7 @@ index d9a40fc..3d6de2b 100644
  #ifndef __NetBSD__
  #ifdef __FreeBSD__
    cpuset_t cpu_set;
-@@ -156,6 +156,22 @@ void SetCurrentThreadAffinity(u32 mask)
+@@ -156,6 +156,27 @@ void SetCurrentThreadAffinity(u32 mask)
    SetThreadAffinity(pthread_self(), mask);
  }
  
@@ -1113,12 +1113,17 @@ index d9a40fc..3d6de2b 100644
 +  const int priority_result = priority > 0 ? scePthreadSetprio(self, priority) : 0;
 +  return {affinity_result, priority_result};
 +}
++
++int PS4SetCurrentThreadCoreMask(unsigned long long mask)
++{
++  return scePthreadSetaffinity(scePthreadSelf(), mask);
++}
 +#endif
 +
  void SleepCurrentThread(int ms)
  {
    usleep(1000 * ms);
-@@ -166,8 +182,16 @@ void SwitchCurrentThread()
+@@ -166,8 +187,16 @@ void SwitchCurrentThread()
    usleep(1000 * 1);
  }
  
@@ -1136,7 +1141,7 @@ index d9a40fc..3d6de2b 100644
    pthread_setname_np(name);
  #elif defined __FreeBSD__ || defined __OpenBSD__
 diff --git a/Source/Core/Common/Thread.h b/Source/Core/Common/Thread.h
-index fbba27a..905cf17 100644
+index fbba27a..ce7a57b 100644
 --- a/Source/Core/Common/Thread.h
 +++ b/Source/Core/Common/Thread.h
 @@ -3,6 +3,8 @@
@@ -1148,7 +1153,7 @@ index fbba27a..905cf17 100644
  #include <thread>
  
  #ifndef _WIN32
-@@ -25,6 +27,11 @@ int CurrentThreadId();
+@@ -25,6 +27,13 @@ int CurrentThreadId();
  
  void SetThreadAffinity(std::thread::native_handle_type thread, u32 mask);
  void SetCurrentThreadAffinity(u32 mask);
@@ -1156,6 +1161,8 @@ index fbba27a..905cf17 100644
 +// PS4: pins the calling thread to one core (-1: leave it) and sets its scheduling priority
 +// (256 highest .. 767 lowest, 700 default; 0: leave it). Returns the system's result codes.
 +std::pair<int, int> PS4SetCurrentThreadCoreAndPriority(int core, int priority);
++// PS4: lets the calling thread run on the given cores (bit n = core n). Returns the result code.
++int PS4SetCurrentThreadCoreMask(unsigned long long mask);
 +#endif
  
  void SleepCurrentThread(int ms);
@@ -15021,6 +15028,71 @@ index a761a81..22dd606 100644
    return !required_functions_missing;
  }
  
+diff --git a/Source/Core/VideoCommon/AsyncShaderCompiler.cpp b/Source/Core/VideoCommon/AsyncShaderCompiler.cpp
+index 83eaa2e..db577b2 100644
+--- a/Source/Core/VideoCommon/AsyncShaderCompiler.cpp
++++ b/Source/Core/VideoCommon/AsyncShaderCompiler.cpp
+@@ -3,6 +3,8 @@
+ 
+ #include "VideoCommon/AsyncShaderCompiler.h"
+ 
++#include <atomic>
++#include <cstdio>
+ #include <thread>
+ 
+ #include "Common/Assert.h"
+@@ -12,6 +14,41 @@
+ #include "Core/Core.h"
+ #include "Core/System.h"
+ 
++#ifdef __ORBIS__
++extern "C" int ps4_cpu_thread_core, ps4_gpu_thread_core;  // Core/Core.cpp
++extern "C" int ps4_vk_thread_core;     // VideoBackends/Vulkan/PS4CommandRecorder.cpp
++extern "C" int ps4_audio_thread_core;  // AudioCommon/PS4AudioStream.cpp
++extern "C" void ps4_boot_trace(const char* line);
++
++// PS4: a new thread runs on the cores of the thread that created it - for these workers the
++// video thread's single core. Shader compiles then competed with the video thread for it
++// (hitches while new effects appeared) and, with the system's scheduler letting a busy thread
++// keep its core, starved other threads the video thread started: Super Smash Bros. Melee
++// waited 16 s at boot while 619 cached pipelines compiled. The workers run on the cores that
++// the CPU, video, Vulkan and audio threads don't use (0 and 1 by default).
++static void PS4MoveToSpareCores()
++{
++  unsigned long long mask = 0x3F;  // the game cores, 0-5
++  for (const int core :
++       {ps4_cpu_thread_core, ps4_gpu_thread_core, ps4_vk_thread_core, ps4_audio_thread_core})
++  {
++    if (core >= 0 && core < 6)
++      mask &= ~(1ULL << core);
++  }
++  if (mask == 0)
++    mask = 0x3F;
++  const int result = Common::PS4SetCurrentThreadCoreMask(mask);
++  static std::atomic<bool> s_logged{false};
++  if (!s_logged.exchange(true))
++  {
++    char line[96];
++    snprintf(line, sizeof(line), "shader compiler workers: cores mask 0x%llx (result 0x%x)", mask,
++             result);
++    ps4_boot_trace(line);
++  }
++}
++#endif
++
+ namespace VideoCommon
+ {
+ AsyncShaderCompiler::AsyncShaderCompiler()
+@@ -206,6 +243,9 @@ void AsyncShaderCompiler::WorkerThreadExit(void* param)
+ void AsyncShaderCompiler::WorkerThreadEntryPoint(void* param)
+ {
+   Common::SetCurrentThreadName("AsyncShaderCompiler Worker");
++#ifdef __ORBIS__
++  PS4MoveToSpareCores();
++#endif
+ 
+   // Initialize worker thread with backend-specific method.
+   if (!WorkerThreadInitWorkerThread(param))
 diff --git a/Source/Core/VideoCommon/CommandProcessor.cpp b/Source/Core/VideoCommon/CommandProcessor.cpp
 index 1dbf466..b66cbac 100644
 --- a/Source/Core/VideoCommon/CommandProcessor.cpp
