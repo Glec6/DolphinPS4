@@ -8916,10 +8916,10 @@ index f4dc8a9..4e5ff67 100644
  
 diff --git a/Source/Core/DolphinNoGUI/PlatformPS4.cpp b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
 new file mode 100644
-index 0000000..cc6ec5a
+index 0000000..51a2b4d
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
-@@ -0,0 +1,1042 @@
+@@ -0,0 +1,1051 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -9319,7 +9319,7 @@ index 0000000..cc6ec5a
 +    // gets as much of the GameCube's CPU as possible (up to cpu_clock_max, normally the real
 +    // 100%), so light scenes reach the frame rates of real hardware, while heavy scenes get a lower
 +    // clock (fewer frames) instead of running in slow motion. Checked every ~1 s: below 97%
-+    // speed and the CPU thread at least 90% busy (it is the limit) -> 5 points lower; enough spare time for 5 points
++    // speed and the CPU thread at least 90% busy (it is the limit) -> down to what it sustains; enough spare time for 5 points
 +    // more (the CPU thread's work grows with the clock) -> 5 points higher, at most every ~2 s.
 +    if (ps4_auto_clock > 0 && frame % 60 == 59)
 +    {
@@ -9343,10 +9343,19 @@ index 0000000..cc6ec5a
 +      if (Core::GetState(system) == Core::State::Running && speed > 0.1)
 +      {
 +        if (speed < 0.97 && max_speed < 1.0 && cpu_busy >= 0.90 && clock > ps4_auto_clock_min)
-+          clock = std::max(ps4_auto_clock_min, clock - 5);
-+        else if (s_since_change >= 2 && max_speed * clock / (clock + 5.0) > 1.06 &&
-+                 clock < ps4_auto_clock_max)
++        {
++          // Straight to what the CPU thread sustains (its speed scales with the clock), not 5
++          // points per second: a match starting at a clock raised during a menu stuttered for
++          // ~15 s in Super Smash Bros. Melee while the clock came down.
++          const int target = static_cast<int>(clock * max_speed * 0.98) / 5 * 5;
++          clock = std::max(ps4_auto_clock_min, std::min(clock - 5, target));
++        }
++        else if (s_since_change >= 3 && perf.GetFPS() > 5.0 &&
++                 max_speed * clock / (clock + 5.0) > 1.06 && clock < ps4_auto_clock_max)
++        {
++          // Up only while frames are being drawn (not during loading, when the CPU idles).
 +          clock = std::min(ps4_auto_clock_max, clock + 5);
++        }
 +      }
 +      if (clock != ps4_auto_clock)
 +      {
