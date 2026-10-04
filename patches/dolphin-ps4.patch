@@ -3733,7 +3733,7 @@ index 51c3fff..9358eb8 100644
 +  ps4_add_eboot(dolphin-nogui)
 +endif()
 diff --git a/Source/Core/DolphinNoGUI/MainNoGUI.cpp b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
-index 3bf40ea..d7e2dad 100644
+index 3bf40ea..7994e4f 100644
 --- a/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 +++ b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 @@ -2,10 +2,17 @@
@@ -3858,7 +3858,7 @@ index 3bf40ea..d7e2dad 100644
  #endif
        });
  
-@@ -270,7 +335,294 @@ int main(const int argc, char* argv[])
+@@ -270,7 +335,295 @@ int main(const int argc, char* argv[])
  
    UICommon::SetUserDirectory(user_directory);
    UICommon::Init();
@@ -3965,13 +3965,14 @@ index 3bf40ea..d7e2dad 100644
 +    // game keeps running (objects appear a few frames late) instead of stalling the frame, and
 +    // the shader cache from earlier sessions is precompiled in the background at boot.
 +    // shader_compile=sync waits for each shader (OpenGL: Piglet can't compile off-thread).
-+    // compile_threads=<n> sets the background compiler threads (default 2).
++    // compile_threads=<n> sets the background compiler threads (default 3: one per spare core,
++    // 0, 1 and the seventh core; VideoCommon/AsyncShaderCompiler.cpp).
 +    // shader_compile=hybrid: Dolphin's hybrid ubershaders - an ubershader draws until the
 +    // specialized shader is compiled (no stutter, nothing missing; costs GPU time).
 +    const std::string shader_compile = Platform::GetPS4Option("shader_compile", "async");
 +    if (video != "opengl" && (shader_compile == "async" || shader_compile == "hybrid"))
 +    {
-+      const int threads = std::clamp(atoi(Platform::GetPS4Option("compile_threads", "2").c_str()), 1, 4);
++      const int threads = std::clamp(atoi(Platform::GetPS4Option("compile_threads", "3").c_str()), 1, 4);
 +      Config::SetBase(Config::GFX_SHADER_COMPILATION_MODE,
 +                      shader_compile == "hybrid" ? ShaderCompilationMode::AsynchronousUberShaders :
 +                                                   ShaderCompilationMode::AsynchronousSkipRendering);
@@ -4153,7 +4154,7 @@ index 3bf40ea..d7e2dad 100644
  
    Common::ScopeGuard ui_common_guard([] {
      UICommon::ShutdownControllers();
-@@ -284,6 +636,12 @@ int main(const int argc, char* argv[])
+@@ -284,6 +637,12 @@ int main(const int argc, char* argv[])
    }
  
    auto core_state_changed_hook = Core::AddOnStateChangedCallback([](const Core::State state) {
@@ -4166,7 +4167,7 @@ index 3bf40ea..d7e2dad 100644
      if (state == Core::State::Uninitialized)
        s_platform->Stop();
    });
-@@ -303,6 +661,9 @@ int main(const int argc, char* argv[])
+@@ -303,6 +662,9 @@ int main(const int argc, char* argv[])
  
    DolphinAnalytics::Instance().ReportDolphinStart("nogui");
  
@@ -16766,7 +16767,7 @@ index a761a81..22dd606 100644
  }
  
 diff --git a/Source/Core/VideoCommon/AsyncShaderCompiler.cpp b/Source/Core/VideoCommon/AsyncShaderCompiler.cpp
-index 83eaa2e..929127d 100644
+index 83eaa2e..a3988e0 100644
 --- a/Source/Core/VideoCommon/AsyncShaderCompiler.cpp
 +++ b/Source/Core/VideoCommon/AsyncShaderCompiler.cpp
 @@ -3,6 +3,8 @@
@@ -16778,7 +16779,7 @@ index 83eaa2e..929127d 100644
  #include <thread>
  
  #include "Common/Assert.h"
-@@ -12,6 +14,45 @@
+@@ -12,6 +14,64 @@
  #include "Core/Core.h"
  #include "Core/System.h"
  
@@ -16805,7 +16806,26 @@ index 83eaa2e..929127d 100644
 +  }
 +  if (mask == 0)
 +    mask = 0x3F;
-+  const int result = Common::PS4SetCurrentThreadCoreMask(mask);
++  // The seventh core (6), which the system partly lends to games, as well: one worker per
++  // spare core. If the system won't give it to this app, the game cores alone.
++  int result = Common::PS4SetCurrentThreadCoreMask(mask | (1ULL << 6));
++  if (result == 0)
++  {
++    mask |= 1ULL << 6;
++  }
++  else
++  {
++    const int with_core_6 = result;
++    result = Common::PS4SetCurrentThreadCoreMask(mask);
++    static std::atomic<bool> s_logged_refusal{false};
++    if (!s_logged_refusal.exchange(true))
++    {
++      char line[96];
++      snprintf(line, sizeof(line), "shader compiler workers: core 6 refused (0x%x)",
++               with_core_6);
++      ps4_boot_trace(line);
++    }
++  }
 +  // Below the default priority (700): the system lets a busy thread keep its core against
 +  // threads of the same priority, so two compiling workers held cores 0 and 1 until the whole
 +  // shader cache was compiled and anything else waiting there (Melee's start: 5 s) waited too.
@@ -16824,7 +16844,7 @@ index 83eaa2e..929127d 100644
  namespace VideoCommon
  {
  AsyncShaderCompiler::AsyncShaderCompiler()
-@@ -206,6 +247,9 @@ void AsyncShaderCompiler::WorkerThreadExit(void* param)
+@@ -206,6 +266,9 @@ void AsyncShaderCompiler::WorkerThreadExit(void* param)
  void AsyncShaderCompiler::WorkerThreadEntryPoint(void* param)
  {
    Common::SetCurrentThreadName("AsyncShaderCompiler Worker");
