@@ -9515,10 +9515,10 @@ index f4dc8a9..121376e 100644
  
 diff --git a/Source/Core/DolphinNoGUI/PlatformPS4.cpp b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
 new file mode 100644
-index 0000000..27de5df
+index 0000000..c503d71
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
-@@ -0,0 +1,1169 @@
+@@ -0,0 +1,1173 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -9992,17 +9992,21 @@ index 0000000..27de5df
 +      // itself drops frames, because its own code no longer fits in a frame's worth of the
 +      // emulated CPU (Super Smash Bros. Melee: ~25 FPS at 30%, ~46 at 35%, 60 from 40%). Then the
 +      // clock goes up again and stays at least there for ~30 s. The game's usual frame rate (60
-+      // or 30) is learnt from what it shows at full speed.
-+      static int s_normal_fps = 0;
++      // or 30) is learnt from what it shows at full speed with time to spare, and follows the
++      // game: Bully runs its menus at 60 and plays at 30, and taking 30 for dropped frames
++      // pushed its clock up and the game into slow motion. A steady 30 (twice in a row, within
++      // 0.3) means a 30 FPS game; a game dropping frames wanders around it.
++      static int s_normal_fps = 0, s_steady_30 = 0;
 +      static int s_lag_floor = 0, s_lag_floor_checks = 0;
 +      const double fps = perf.GetFPS();
 +      if (s_lag_floor_checks > 0 && --s_lag_floor_checks == 0)
 +        s_lag_floor = 0;
-+      if (Core::GetState(system) == Core::State::Running && speed >= 0.97)
++      if (Core::GetState(system) == Core::State::Running && speed >= 0.97 && max_speed > 1.05)
 +      {
++        s_steady_30 = (fps >= 29.7 && fps <= 30.3) ? s_steady_30 + 1 : 0;
 +        if (fps >= 57.0)
 +          s_normal_fps = 60;
-+        else if (fps >= 28.5 && s_normal_fps == 0)
++        else if (s_steady_30 >= 2)
 +          s_normal_fps = 30;
 +      }
 +      const int floor = std::max(ps4_auto_clock_min, s_lag_floor);
