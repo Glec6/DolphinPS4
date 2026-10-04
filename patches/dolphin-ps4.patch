@@ -3488,10 +3488,10 @@ index 2dcd2ca..f6a75df 100644
      if (movie.IsMovieActive())
        movie.SaveRecording(dtmpath);
 diff --git a/Source/Core/DolphinNoGUI/CMakeLists.txt b/Source/Core/DolphinNoGUI/CMakeLists.txt
-index 51c3fff..c9f6895 100644
+index 51c3fff..7da3e74 100644
 --- a/Source/Core/DolphinNoGUI/CMakeLists.txt
 +++ b/Source/Core/DolphinNoGUI/CMakeLists.txt
-@@ -23,6 +23,28 @@ if(${CMAKE_SYSTEM_NAME} STREQUAL "Linux")
+@@ -23,6 +23,29 @@ if(${CMAKE_SYSTEM_NAME} STREQUAL "Linux")
    target_sources(dolphin-nogui PRIVATE PlatformFBDev.cpp)
  endif()
  
@@ -3501,6 +3501,7 @@ index 51c3fff..c9f6895 100644
 +  target_sources(dolphin-nogui PRIVATE PlatformPS4.cpp ${PS4_RUNTIME_SOURCES})
 +  # The XMB launcher: Dear ImGui drawn with Vulkan (PS4XMBDisplay.cpp) through Dolphin's loader.
 +  target_sources(dolphin-nogui PRIVATE PS4XMB.cpp PS4XMBDisplay.cpp PS4IngameMenu.cpp PS4Settings.cpp
++    PS4Controls.cpp PS4Cheats.cpp PS4Covers.cpp
 +    ${CMAKE_SOURCE_DIR}/Externals/imgui/imgui/backends/imgui_impl_vulkan.cpp)
 +  set_source_files_properties(
 +    ${CMAKE_SOURCE_DIR}/Externals/imgui/imgui/backends/imgui_impl_vulkan.cpp
@@ -3508,7 +3509,7 @@ index 51c3fff..c9f6895 100644
 +  target_include_directories(dolphin-nogui PRIVATE
 +    ${CMAKE_SOURCE_DIR}/Externals/Vulkan-Headers/include
 +    ${CMAKE_SOURCE_DIR}/Externals/VulkanMemoryAllocator/include)
-+  target_link_libraries(dolphin-nogui PRIVATE imgui discio videovulkan)
++  target_link_libraries(dolphin-nogui PRIVATE imgui discio videovulkan CURL::libcurl)
 +  target_link_libraries(dolphin-nogui PRIVATE
 +    SceSysmodule SceSystemService SceUserService SceVideoOut SceAudioOut ScePad SceNet)
 +  if(ENABLE_VULKAN)
@@ -3520,7 +3521,7 @@ index 51c3fff..c9f6895 100644
  if (WIN32)
    target_sources(dolphin-nogui PRIVATE DolphinNoGUI.exe.manifest DolphinNoGUI.rc)
  
-@@ -68,3 +90,7 @@ set(CPACK_PACKAGE_EXECUTABLES ${CPACK_PACKAGE_EXECUTABLES} dolphin-nogui)
+@@ -68,3 +91,7 @@ set(CPACK_PACKAGE_EXECUTABLES ${CPACK_PACKAGE_EXECUTABLES} dolphin-nogui)
  if (NOT WIN32)
    install(TARGETS dolphin-nogui RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
  endif()
@@ -3529,7 +3530,7 @@ index 51c3fff..c9f6895 100644
 +  ps4_add_eboot(dolphin-nogui)
 +endif()
 diff --git a/Source/Core/DolphinNoGUI/MainNoGUI.cpp b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
-index 3bf40ea..4c32cd5 100644
+index 3bf40ea..62bf6cd 100644
 --- a/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 +++ b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 @@ -2,10 +2,17 @@
@@ -3654,7 +3655,7 @@ index 3bf40ea..4c32cd5 100644
  #endif
        });
  
-@@ -270,7 +335,289 @@ int main(const int argc, char* argv[])
+@@ -270,7 +335,291 @@ int main(const int argc, char* argv[])
  
    UICommon::SetUserDirectory(user_directory);
    UICommon::Init();
@@ -3683,6 +3684,8 @@ index 3bf40ea..4c32cd5 100644
 +  // State to ...") are shown: the Vulkan backend has its on-screen layer (the in-game menu).
 +  Config::SetBase(Config::MAIN_SKIP_IPL, true);
 +  Config::SetBase(Config::MAIN_OSD_MESSAGES, true);
++  // Cheats chosen in the XMB / in-game menu (only enabled codes run; PS4Cheats.cpp).
++  Config::SetBase(Config::MAIN_ENABLE_CHEATS, true);
 +  Config::SetBase(Config::MAIN_SHOW_ACTIVE_TITLE, false);
 +  Config::SetBase(Config::GFX_SHOW_FPS, false);
 +  Config::SetBase(Config::GFX_SHADER_COMPILER_THREADS, 0);
@@ -3944,7 +3947,7 @@ index 3bf40ea..4c32cd5 100644
  
    Common::ScopeGuard ui_common_guard([] {
      UICommon::ShutdownControllers();
-@@ -284,6 +631,12 @@ int main(const int argc, char* argv[])
+@@ -284,6 +633,12 @@ int main(const int argc, char* argv[])
    }
  
    auto core_state_changed_hook = Core::AddOnStateChangedCallback([](const Core::State state) {
@@ -3957,7 +3960,7 @@ index 3bf40ea..4c32cd5 100644
      if (state == Core::State::Uninitialized)
        s_platform->Stop();
    });
-@@ -303,6 +656,9 @@ int main(const int argc, char* argv[])
+@@ -303,6 +658,9 @@ int main(const int argc, char* argv[])
  
    DolphinAnalytics::Instance().ReportDolphinStart("nogui");
  
@@ -3967,12 +3970,811 @@ index 3bf40ea..4c32cd5 100644
    if (!BootManager::BootCore(Core::System::GetInstance(), std::move(boot), wsi))
    {
      fprintf(stderr, "Could not boot the specified file\n");
+diff --git a/Source/Core/DolphinNoGUI/PS4Cheats.cpp b/Source/Core/DolphinNoGUI/PS4Cheats.cpp
+new file mode 100755
+index 0000000..9f71d51
+--- /dev/null
++++ b/Source/Core/DolphinNoGUI/PS4Cheats.cpp
+@@ -0,0 +1,70 @@
++// Copyright 2026 Dolphin Emulator Project
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++#include "DolphinNoGUI/PS4Cheats.h"
++
++#include "Common/FileUtil.h"
++#include "Common/IniFile.h"
++#include "Core/ActionReplay.h"
++#include "Core/ConfigManager.h"
++#include "Core/GeckoCode.h"
++#include "Core/GeckoCodeConfig.h"
++
++namespace PS4Cheats
++{
++struct List::Codes
++{
++  std::vector<ActionReplay::ARCode> ar;
++  std::vector<Gecko::GeckoCode> gecko;
++};
++
++List::List() : m_codes(new Codes)
++{
++}
++
++List::~List()
++{
++  delete m_codes;
++}
++
++void List::Load(const std::string& game_id, uint16_t revision)
++{
++  m_game_id = game_id;
++  m_revision = revision;
++  const Common::IniFile global = SConfig::LoadDefaultGameIni(game_id, revision);
++  const Common::IniFile local = SConfig::LoadLocalGameIni(game_id, revision);
++  m_codes->ar = ActionReplay::LoadCodes(global, local);
++  m_codes->gecko = Gecko::LoadCodes(global, local);
++}
++
++std::vector<Entry> List::Entries() const
++{
++  std::vector<Entry> entries;
++  for (const ActionReplay::ARCode& code : m_codes->ar)
++    entries.push_back({code.name, code.enabled, false});
++  for (const Gecko::GeckoCode& code : m_codes->gecko)
++    entries.push_back({code.name, code.enabled, true});
++  return entries;
++}
++
++void List::Toggle(size_t i)
++{
++  if (i < m_codes->ar.size())
++    m_codes->ar[i].enabled = !m_codes->ar[i].enabled;
++  else if (i - m_codes->ar.size() < m_codes->gecko.size())
++    m_codes->gecko[i - m_codes->ar.size()].enabled = !m_codes->gecko[i - m_codes->ar.size()].enabled;
++  else
++    return;
++  Common::IniFile local = SConfig::LoadLocalGameIni(m_game_id, m_revision);
++  ActionReplay::SaveCodes(&local, m_codes->ar);
++  Gecko::SaveCodes(local, m_codes->gecko);
++  File::CreateFullPath(File::GetUserPath(D_GAMESETTINGS_IDX));
++  local.Save(File::GetUserPath(D_GAMESETTINGS_IDX) + m_game_id + ".ini");
++}
++
++void List::ApplyToRunningGame() const
++{
++  ActionReplay::ApplyCodes(m_codes->ar, m_game_id, m_revision);
++  Gecko::SetActiveCodes(m_codes->gecko, m_game_id, m_revision);
++}
++}  // namespace PS4Cheats
+diff --git a/Source/Core/DolphinNoGUI/PS4Cheats.h b/Source/Core/DolphinNoGUI/PS4Cheats.h
+new file mode 100755
+index 0000000..1ec7543
+--- /dev/null
++++ b/Source/Core/DolphinNoGUI/PS4Cheats.h
+@@ -0,0 +1,45 @@
++// Copyright 2026 Dolphin Emulator Project
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++// PS4 cheats: the Action Replay and Gecko codes Dolphin ships for each game (Sys/GameSettings)
++// plus the user's own, switched on and off from the XMB or the in-game menu. The choices are
++// saved in the user's game settings (User/GameSettings/<ID>.ini), as Dolphin's cheat manager
++// does.
++
++#pragma once
++
++#include <cstdint>
++#include <string>
++#include <vector>
++
++namespace PS4Cheats
++{
++struct Entry
++{
++  std::string name;
++  bool enabled;
++  bool gecko;  // Gecko code (else Action Replay)
++};
++
++class List
++{
++public:
++  List();
++  ~List();
++  List(const List&) = delete;
++  List& operator=(const List&) = delete;
++
++  void Load(const std::string& game_id, uint16_t revision);
++  std::vector<Entry> Entries() const;
++  // Switches entry i on/off and saves the choice.
++  void Toggle(size_t i);
++  // Game process: makes the current choices active in the running game.
++  void ApplyToRunningGame() const;
++
++private:
++  struct Codes;
++  Codes* m_codes;
++  std::string m_game_id;
++  uint16_t m_revision = 0;
++};
++}  // namespace PS4Cheats
+diff --git a/Source/Core/DolphinNoGUI/PS4Controls.cpp b/Source/Core/DolphinNoGUI/PS4Controls.cpp
+new file mode 100755
+index 0000000..a8fdc34
+--- /dev/null
++++ b/Source/Core/DolphinNoGUI/PS4Controls.cpp
+@@ -0,0 +1,342 @@
++// Copyright 2026 Dolphin Emulator Project
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++#include "DolphinNoGUI/PS4Controls.h"
++
++#include <cstdio>
++#include <sys/stat.h>
++
++#include <orbis/Pad.h>
++
++#include "Common/IniFile.h"
++
++namespace PS4Controls
++{
++namespace
++{
++constexpr char GCPAD_DEFAULTS[] = R"([GCPad1]
++Device = PS4/0/DualShock 4
++Buttons/A = Cross
++Buttons/B = Square
++Buttons/X = Circle
++Buttons/Y = Triangle
++Buttons/Z = R1
++Buttons/Start = Options
++Main Stick/Up = `Left Y-`
++Main Stick/Down = `Left Y+`
++Main Stick/Left = `Left X-`
++Main Stick/Right = `Left X+`
++C-Stick/Up = `Right Y-`
++C-Stick/Down = `Right Y+`
++C-Stick/Left = `Right X-`
++C-Stick/Right = `Right X+`
++Triggers/L = `L2 Click`
++Triggers/R = `R2 Click`
++Triggers/L-Analog = L2
++Triggers/R-Analog = R2
++D-Pad/Up = `Pad N`
++D-Pad/Down = `Pad S`
++D-Pad/Left = `Pad W`
++D-Pad/Right = `Pad E`
++Rumble/Motor = `Motor L`
++)";
++
++constexpr char WIIMOTE_DEFAULTS[] = R"([Wiimote1]
++Device = PS4/0/DualShock 4
++Buttons/A = Cross
++Buttons/B = R2
++Buttons/1 = Square
++Buttons/2 = Triangle
++Buttons/- = L1
++Buttons/+ = Options
++Buttons/Home = Touchpad
++D-Pad/Up = `Pad N`
++D-Pad/Down = `Pad S`
++D-Pad/Left = `Pad W`
++D-Pad/Right = `Pad E`
++IR/Up = `Right Y-`
++IR/Down = `Right Y+`
++IR/Left = `Right X-`
++IR/Right = `Right X+`
++Shake/X = R3
++Shake/Y = R3
++Shake/Z = R3
++Rumble/Motor = `Motor L`
++Extension = Nunchuk
++Nunchuk/Buttons/C = L1
++Nunchuk/Buttons/Z = L2
++Nunchuk/Stick/Up = `Left Y-`
++Nunchuk/Stick/Down = `Left Y+`
++Nunchuk/Stick/Left = `Left X-`
++Nunchuk/Stick/Right = `Left X+`
++)";
++
++const std::vector<Binding> GC_BINDINGS = {
++    {"Buttons/A", "A", false},
++    {"Buttons/B", "B", false},
++    {"Buttons/X", "X", false},
++    {"Buttons/Y", "Y", false},
++    {"Buttons/Z", "Z", false},
++    {"Buttons/Start", "Start", false},
++    {"Triggers/L", "L (click)", false},
++    {"Triggers/R", "R (click)", false},
++    {"Triggers/L-Analog", "L (analog)", false},
++    {"Triggers/R-Analog", "R (analog)", false},
++    {"Main Stick", "Control Stick", true},
++    {"C-Stick", "C-Stick", true},
++    {"D-Pad/Up", "D-Pad Up", false},
++    {"D-Pad/Down", "D-Pad Down", false},
++    {"D-Pad/Left", "D-Pad Left", false},
++    {"D-Pad/Right", "D-Pad Right", false},
++};
++
++const std::vector<Binding> WII_BINDINGS = {
++    {"Buttons/A", "A", false},
++    {"Buttons/B", "B", false},
++    {"Buttons/1", "1", false},
++    {"Buttons/2", "2", false},
++    {"Buttons/-", "- (Minus)", false},
++    {"Buttons/+", "+ (Plus)", false},
++    {"Buttons/Home", "Home", false},
++    {"Shake", "Shake (spin)", false},
++    {"IR", "Pointer", true},
++    {"D-Pad/Up", "D-Pad Up", false},
++    {"D-Pad/Down", "D-Pad Down", false},
++    {"D-Pad/Left", "D-Pad Left", false},
++    {"D-Pad/Right", "D-Pad Right", false},
++    {"Nunchuk/Buttons/C", "Nunchuk C", false},
++    {"Nunchuk/Buttons/Z", "Nunchuk Z", false},
++    {"Nunchuk/Stick", "Nunchuk Stick", true},
++};
++
++std::string s_user_dir = "/data/DolphinPS4/User";
++
++std::string Path(Device device)
++{
++  return s_user_dir + (device == Device::GameCube ? "/Config/GCPadNew.ini" :
++                                                    "/Config/WiimoteNew.ini");
++}
++
++const char* Section(Device device)
++{
++  return device == Device::GameCube ? "GCPad1" : "Wiimote1";
++}
++
++// The four directions of a stick group, for each choice.
++struct StickChoice
++{
++  const char* name;
++  const char* up;
++  const char* down;
++  const char* left;
++  const char* right;
++};
++constexpr StickChoice STICKS[] = {
++    {"Left Stick", "`Left Y-`", "`Left Y+`", "`Left X-`", "`Left X+`"},
++    {"Right Stick", "`Right Y-`", "`Right Y+`", "`Right X-`", "`Right X+`"},
++    {"D-Pad", "`Pad N`", "`Pad S`", "`Pad W`", "`Pad E`"},
++};
++
++void WriteIfMissing(const std::string& path, const char* contents)
++{
++  struct stat st;
++  if (stat(path.c_str(), &st) == 0)
++    return;
++  if (FILE* file = fopen(path.c_str(), "w"))
++  {
++    fputs(contents, file);
++    fclose(file);
++  }
++}
++
++std::string Strip(std::string text)
++{
++  std::string out;
++  for (char c : text)
++  {
++    if (c != '`')
++      out += c;
++  }
++  return out;
++}
++}  // namespace
++
++const std::vector<Binding>& Bindings(Device device)
++{
++  return device == Device::GameCube ? GC_BINDINGS : WII_BINDINGS;
++}
++
++const char* DefaultsText(Device device)
++{
++  return device == Device::GameCube ? GCPAD_DEFAULTS : WIIMOTE_DEFAULTS;
++}
++
++const char* DeviceName(Device device)
++{
++  return device == Device::GameCube ? "GameCube Controller" : "Wii Remote + Nunchuk";
++}
++
++void SetUserDirectory(const std::string& user_dir)
++{
++  s_user_dir = user_dir;
++}
++
++void WriteDefaultsIfMissing()
++{
++  mkdir(s_user_dir.c_str(), 0777);
++  mkdir((s_user_dir + "/Config").c_str(), 0777);
++  WriteIfMissing(Path(Device::GameCube), GCPAD_DEFAULTS);
++  WriteIfMissing(Path(Device::Wii), WIIMOTE_DEFAULTS);
++}
++
++std::string Get(Device device, const Binding& binding)
++{
++  Common::IniFile ini;
++  ini.Load(Path(device));
++  Common::IniFile::Section* section = ini.GetOrCreateSection(Section(device));
++  std::string value;
++  if (binding.stick_group)
++  {
++    std::string up, left;
++    section->Get(std::string(binding.key) + "/Up", &up);
++    section->Get(std::string(binding.key) + "/Left", &left);
++    for (const StickChoice& choice : STICKS)
++    {
++      if (up == choice.up && left == choice.left)
++        return choice.name;
++    }
++    return "Custom";
++  }
++  const std::string key = std::string(binding.key) == "Shake" ? "Shake/X" : binding.key;
++  section->Get(key, &value);
++  return value;
++}
++
++std::string Describe(const std::string& expression)
++{
++  const std::string name = Strip(expression);
++  if (name.empty())
++    return "None";
++  struct Name
++  {
++    const char* raw;
++    const char* shown;
++  };
++  constexpr Name NAMES[] = {
++      {"Pad N", "D-Pad Up"},           {"Pad S", "D-Pad Down"},
++      {"Pad W", "D-Pad Left"},         {"Pad E", "D-Pad Right"},
++      {"Left Y-", "Left Stick Up"},    {"Left Y+", "Left Stick Down"},
++      {"Left X-", "Left Stick Left"},  {"Left X+", "Left Stick Right"},
++      {"Right Y-", "Right Stick Up"},  {"Right Y+", "Right Stick Down"},
++      {"Right X-", "Right Stick Left"}, {"Right X+", "Right Stick Right"},
++      {"L2 Click", "L2"},              {"R2 Click", "R2"},
++      {"L2", "L2 (analog)"},           {"R2", "R2 (analog)"},
++  };
++  for (const Name& n : NAMES)
++  {
++    if (name == n.raw)
++      return n.shown;
++  }
++  return name;
++}
++
++void Set(Device device, const Binding& binding, const std::string& expression)
++{
++  Common::IniFile ini;
++  ini.Load(Path(device));
++  Common::IniFile::Section* section = ini.GetOrCreateSection(Section(device));
++  if (binding.stick_group)
++  {
++    for (const StickChoice& choice : STICKS)
++    {
++      if (expression != choice.name)
++        continue;
++      const std::string prefix = binding.key;
++      section->Set(prefix + "/Up", std::string(choice.up));
++      section->Set(prefix + "/Down", std::string(choice.down));
++      section->Set(prefix + "/Left", std::string(choice.left));
++      section->Set(prefix + "/Right", std::string(choice.right));
++    }
++  }
++  else if (std::string(binding.key) == "Shake")
++  {
++    section->Set("Shake/X", expression);
++    section->Set("Shake/Y", expression);
++    section->Set("Shake/Z", expression);
++  }
++  else
++  {
++    section->Set(binding.key, expression);
++  }
++  ini.Save(Path(device));
++}
++
++std::vector<std::string> StickChoices()
++{
++  std::vector<std::string> choices;
++  for (const StickChoice& choice : STICKS)
++    choices.push_back(choice.name);
++  return choices;
++}
++
++void ResetToDefault(Device device)
++{
++  if (FILE* file = fopen(Path(device).c_str(), "w"))
++  {
++    fputs(DefaultsText(device), file);
++    fclose(file);
++  }
++}
++
++bool IsAtRest(const OrbisPadData& now)
++{
++  auto centred = [](uint8_t v) { return v > 78 && v < 178; };
++  return now.buttons == 0 && now.analogButtons.l2 < 40 && now.analogButtons.r2 < 40 &&
++         centred(now.leftStick.x) && centred(now.leftStick.y) && centred(now.rightStick.x) &&
++         centred(now.rightStick.y);
++}
++
++std::string Capture(const OrbisPadData& now, bool for_analog_trigger)
++{
++  struct ButtonName
++  {
++    uint32_t bit;
++    const char* name;
++  };
++  constexpr ButtonName BUTTONS[] = {
++      {ORBIS_PAD_BUTTON_CROSS, "Cross"},       {ORBIS_PAD_BUTTON_CIRCLE, "Circle"},
++      {ORBIS_PAD_BUTTON_SQUARE, "Square"},     {ORBIS_PAD_BUTTON_TRIANGLE, "Triangle"},
++      {ORBIS_PAD_BUTTON_L1, "L1"},             {ORBIS_PAD_BUTTON_R1, "R1"},
++      {ORBIS_PAD_BUTTON_L3, "L3"},             {ORBIS_PAD_BUTTON_R3, "R3"},
++      {ORBIS_PAD_BUTTON_OPTIONS, "Options"},   {ORBIS_PAD_BUTTON_TOUCH_PAD, "Touchpad"},
++      {ORBIS_PAD_BUTTON_UP, "`Pad N`"},        {ORBIS_PAD_BUTTON_DOWN, "`Pad S`"},
++      {ORBIS_PAD_BUTTON_LEFT, "`Pad W`"},      {ORBIS_PAD_BUTTON_RIGHT, "`Pad E`"},
++  };
++  if ((now.buttons & ORBIS_PAD_BUTTON_L2) || now.analogButtons.l2 > 180)
++    return for_analog_trigger ? "L2" : "`L2 Click`";
++  if ((now.buttons & ORBIS_PAD_BUTTON_R2) || now.analogButtons.r2 > 180)
++    return for_analog_trigger ? "R2" : "`R2 Click`";
++  for (const ButtonName& button : BUTTONS)
++  {
++    if (now.buttons & button.bit)
++      return button.name;
++  }
++  if (now.leftStick.x < 40)
++    return "`Left X-`";
++  if (now.leftStick.x > 215)
++    return "`Left X+`";
++  if (now.leftStick.y < 40)
++    return "`Left Y-`";
++  if (now.leftStick.y > 215)
++    return "`Left Y+`";
++  if (now.rightStick.x < 40)
++    return "`Right X-`";
++  if (now.rightStick.x > 215)
++    return "`Right X+`";
++  if (now.rightStick.y < 40)
++    return "`Right Y-`";
++  if (now.rightStick.y > 215)
++    return "`Right Y+`";
++  return {};
++}
++}  // namespace PS4Controls
+diff --git a/Source/Core/DolphinNoGUI/PS4Controls.h b/Source/Core/DolphinNoGUI/PS4Controls.h
+new file mode 100755
+index 0000000..482492f
+--- /dev/null
++++ b/Source/Core/DolphinNoGUI/PS4Controls.h
+@@ -0,0 +1,54 @@
++// Copyright 2026 Dolphin Emulator Project
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++// PS4 controller mappings: the DualShock 4 as a GameCube controller (User/Config/GCPadNew.ini)
++// and as a Wii Remote with a Nunchuk (User/Config/WiimoteNew.ini), in Dolphin's own format.
++// The XMB remaps them; the defaults are the port's tuned layout.
++
++#pragma once
++
++#include <string>
++#include <vector>
++
++struct OrbisPadData;
++
++namespace PS4Controls
++{
++enum class Device
++{
++  GameCube,
++  Wii,
++};
++
++// One mappable input. A stick group ("Main Stick") maps all four directions to one DualShock 4
++// stick or the D-pad at once; the others take a single button, trigger or stick direction.
++struct Binding
++{
++  const char* key;    // Dolphin's key ("Buttons/A"); for a stick group the key prefix
++  const char* label;  // shown in the menus
++  bool stick_group;
++};
++
++const std::vector<Binding>& Bindings(Device device);
++const char* DefaultsText(Device device);  // the default INI file contents
++const char* DeviceName(Device device);
++
++// user_dir: /data/DolphinPS4/User
++void SetUserDirectory(const std::string& user_dir);
++// Writes the default files if they don't exist yet.
++void WriteDefaultsIfMissing();
++
++// The binding's expression ("Cross", "`Left X-`") and how it's shown ("Cross", "Left Stick Left").
++std::string Get(Device device, const Binding& binding);
++std::string Describe(const std::string& expression);
++void Set(Device device, const Binding& binding, const std::string& expression);
++// Stick groups: "Left Stick", "Right Stick" or "D-Pad".
++std::vector<std::string> StickChoices();
++void ResetToDefault(Device device);
++
++// Capture: the expression for the first input that differs from the resting state (a button
++// pressed, a trigger pulled or a stick pushed), or empty if nothing is pressed yet.
++std::string Capture(const OrbisPadData& now, bool for_analog_trigger);
++// True when nothing on the pad is pressed (to wait before a capture).
++bool IsAtRest(const OrbisPadData& now);
++}  // namespace PS4Controls
+diff --git a/Source/Core/DolphinNoGUI/PS4Covers.cpp b/Source/Core/DolphinNoGUI/PS4Covers.cpp
+new file mode 100755
+index 0000000..9e91f4f
+--- /dev/null
++++ b/Source/Core/DolphinNoGUI/PS4Covers.cpp
+@@ -0,0 +1,221 @@
++// Copyright 2026 Dolphin Emulator Project
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++#include "DolphinNoGUI/PS4Covers.h"
++
++#include <cstdio>
++#include <cstring>
++#include <sys/stat.h>
++
++#include <curl/curl.h>
++#include <orbis/Net.h>
++#include <orbis/Sysmodule.h>
++
++extern "C" void ps4_boot_trace(const char* line);  // port/ps4_crashlog.cpp
++
++namespace PS4Covers
++{
++namespace
++{
++constexpr const char* HOST = "art.gametdb.com";
++
++void Log(const std::string& text)
++{
++  fprintf(stderr, "[covers] %s\n", text.c_str());
++  ps4_boot_trace(("covers: " + text).c_str());
++}
++
++bool Exists(const std::string& path)
++{
++  struct stat st;
++  return stat(path.c_str(), &st) == 0 && st.st_size > 0;
++}
++
++// The PS4's network: libSceNet and its resolver (the C library's getaddrinfo has no DNS
++// configuration on the PS4). Returns GameTDB's address as text, or empty.
++std::string ResolveHost(std::string* error)
++{
++  static bool s_net = false;
++  static int s_pool = -1;
++  if (!s_net)
++  {
++    sceSysmoduleLoadModuleInternal(ORBIS_SYSMODULE_INTERNAL_NET);
++    const int init = sceNetInit();
++    s_pool = sceNetPoolCreate("dolphin-covers", 64 * 1024, 0);
++    char line[96];
++    snprintf(line, sizeof(line), "network: init %#x, pool %#x", static_cast<unsigned>(init),
++             static_cast<unsigned>(s_pool));
++    Log(line);
++    s_net = true;
++  }
++  const OrbisNetId resolver = sceNetResolverCreate("dolphin-covers", s_pool, 0);
++  if (resolver < 0)
++  {
++    *error = "the PS4 network is not available";
++    return {};
++  }
++  OrbisNetInAddr address = {};
++  const int result = sceNetResolverStartNtoa(resolver, HOST, &address, 5 * 1000 * 1000, 2, 0);
++  sceNetResolverDestroy(resolver);
++  if (result < 0)
++  {
++    char line[96];
++    snprintf(line, sizeof(line), "could not look up %s (%#x): is the PS4 online?", HOST,
++             static_cast<unsigned>(result));
++    *error = line;
++    return {};
++  }
++  const uint32_t a = address.s_addr;  // network byte order
++  char text[32];
++  snprintf(text, sizeof(text), "%u.%u.%u.%u", a & 0xFF, (a >> 8) & 0xFF, (a >> 16) & 0xFF,
++           (a >> 24) & 0xFF);
++  return text;
++}
++
++size_t Append(char* data, size_t size, size_t count, void* user)
++{
++  static_cast<std::string*>(user)->append(data, size * count);
++  return size * count;
++}
++
++// GET url into body; returns the HTTP status (0: no answer).
++long Fetch(CURL* curl, const std::string& url, std::string* body, std::string* error)
++{
++  body->clear();
++  curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
++  curl_easy_setopt(curl, CURLOPT_WRITEDATA, body);
++  const CURLcode code = curl_easy_perform(curl);
++  if (code != CURLE_OK)
++  {
++    *error = curl_easy_strerror(code);
++    return 0;
++  }
++  long status = 0;
++  curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
++  return status;
++}
++
++// GameTDB's regions for a game ID's region letter (4th character), most likely first.
++std::vector<const char*> Regions(const std::string& id)
++{
++  const char region = id.size() >= 4 ? id[3] : 'E';
++  switch (region)
++  {
++  case 'E':
++  case 'N':
++    return {"US", "EN"};
++  case 'J':
++    return {"JA", "US"};
++  case 'K':
++  case 'Q':
++  case 'T':
++    return {"KO", "US"};
++  case 'D':
++    return {"DE", "EN", "US"};
++  case 'F':
++    return {"FR", "EN", "US"};
++  case 'S':
++    return {"ES", "EN", "US"};
++  case 'I':
++    return {"IT", "EN", "US"};
++  case 'H':
++    return {"NL", "EN", "US"};
++  case 'R':
++    return {"RU", "EN", "US"};
++  default:  // P, X, Y, ...: PAL
++    return {"EN", "US"};
++  }
++}
++}  // namespace
++
++Result Download(const std::vector<std::string>& game_ids, const std::string& covers_dir,
++                const std::string& ca_file,
++                const std::function<void(int, int, const std::string&)>& progress,
++                const std::atomic<bool>& cancel)
++{
++  Result result;
++  mkdir(covers_dir.c_str(), 0777);
++
++  std::vector<std::string> missing;
++  for (const std::string& id : game_ids)
++  {
++    if (id.empty())
++      continue;
++    if (Exists(covers_dir + "/" + id + ".png"))
++      result.already++;
++    else
++      missing.push_back(id);
++  }
++  if (missing.empty())
++    return result;
++
++  const std::string address = ResolveHost(&result.error);
++  if (address.empty())
++  {
++    result.failed = static_cast<int>(missing.size());
++    Log(result.error);
++    return result;
++  }
++  Log(std::string(HOST) + " is " + address);
++
++  curl_global_init(CURL_GLOBAL_DEFAULT);
++  CURL* curl = curl_easy_init();
++  const std::string resolve = std::string(HOST) + ":443:" + address;
++  curl_slist* resolves = curl_slist_append(nullptr, resolve.c_str());
++  curl_easy_setopt(curl, CURLOPT_RESOLVE, resolves);
++  curl_easy_setopt(curl, CURLOPT_CAINFO, ca_file.c_str());
++  curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
++  curl_easy_setopt(curl, CURLOPT_TIMEOUT, 20L);
++  curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
++  curl_easy_setopt(curl, CURLOPT_USERAGENT, "Dolphin-PS4");
++  curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, Append);
++  curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
++
++  for (size_t i = 0; i < missing.size() && !cancel; i++)
++  {
++    const std::string& id = missing[i];
++    progress(static_cast<int>(i), static_cast<int>(missing.size()), id);
++    bool saved = false, answered = false;
++    std::string body, error;
++    for (const char* region : Regions(id))
++    {
++      const std::string url = "https://" + std::string(HOST) + "/wii/cover/" + region + "/" + id +
++                              ".png";
++      const long status = Fetch(curl, url, &body, &error);
++      if (status == 0)
++        break;  // network trouble: don't try the other regions
++      answered = true;
++      if (status == 200 && body.size() > 8 && body.compare(1, 3, "PNG") == 0)
++      {
++        const std::string path = covers_dir + "/" + id + ".png";
++        if (FILE* file = fopen(path.c_str(), "wb"))
++        {
++          fwrite(body.data(), 1, body.size(), file);
++          fclose(file);
++          saved = true;
++        }
++        break;
++      }
++    }
++    if (saved)
++    {
++      result.downloaded++;
++    }
++    else if (answered)
++    {
++      result.not_found++;
++      Log("no cover for " + id);
++    }
++    else
++    {
++      result.failed++;
++      result.error = error;
++      Log("download failed for " + id + ": " + error);
++    }
++  }
++  progress(static_cast<int>(missing.size()), static_cast<int>(missing.size()), {});
++  curl_slist_free_all(resolves);
++  curl_easy_cleanup(curl);
++  return result;
++}
++}  // namespace PS4Covers
+diff --git a/Source/Core/DolphinNoGUI/PS4Covers.h b/Source/Core/DolphinNoGUI/PS4Covers.h
+new file mode 100755
+index 0000000..d02913e
+--- /dev/null
++++ b/Source/Core/DolphinNoGUI/PS4Covers.h
+@@ -0,0 +1,31 @@
++// Copyright 2026 Dolphin Emulator Project
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++// Box art for the XMB, downloaded on demand from GameTDB (as Dolphin's own game list does) for
++// the games the user has, into /data/DolphinPS4/covers/<GAMEID>.png. A PNG the user puts there
++// is used as is.
++
++#pragma once
++
++#include <atomic>
++#include <functional>
++#include <string>
++#include <vector>
++
++namespace PS4Covers
++{
++struct Result
++{
++  int downloaded = 0;
++  int already = 0;   // a cover was there already
++  int not_found = 0;  // GameTDB has none for the ID
++  int failed = 0;
++  std::string error;  // why the last download failed (network, ...)
++};
++
++// Downloads the missing covers. progress(done, total, game_id) is called before each game.
++Result Download(const std::vector<std::string>& game_ids, const std::string& covers_dir,
++                const std::string& ca_file,
++                const std::function<void(int, int, const std::string&)>& progress,
++                const std::atomic<bool>& cancel);
++}  // namespace PS4Covers
 diff --git a/Source/Core/DolphinNoGUI/PS4IngameMenu.cpp b/Source/Core/DolphinNoGUI/PS4IngameMenu.cpp
 new file mode 100755
-index 0000000..65d2a4e
+index 0000000..937f114
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4IngameMenu.cpp
-@@ -0,0 +1,699 @@
+@@ -0,0 +1,753 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -3997,6 +4799,7 @@ index 0000000..65d2a4e
 +#include "Core/Core.h"
 +#include "Core/State.h"
 +#include "Core/System.h"
++#include "DolphinNoGUI/PS4Cheats.h"
 +#include "DolphinNoGUI/PS4Settings.h"
 +#include "VideoCommon/Fifo.h"
 +
@@ -4032,6 +4835,7 @@ index 0000000..65d2a4e
 +  MAIN_SAVE,
 +  MAIN_LOAD,
 +  MAIN_SETTINGS,
++  MAIN_CHEATS,
 +  MAIN_QUIT,
 +  MAIN_COUNT,
 +};
@@ -4040,6 +4844,7 @@ index 0000000..65d2a4e
 +{
 +  Main,
 +  Settings,
++  Cheats,
 +};
 +
 +// One line of the menu as drawn (prepared by the host thread, drawn by the video thread).
@@ -4082,6 +4887,7 @@ index 0000000..65d2a4e
 +int s_slot = 1;
 +std::string s_game_id;
 +std::vector<std::string> s_row_keys;  // settings page: setting key per row ("" = header/scope)
++PS4Cheats::List s_cheats;              // cheats page
 +uint32_t s_held = 0;
 +float s_repeat = 0.0f;
 +bool s_quit = false;
@@ -4117,7 +4923,7 @@ index 0000000..65d2a4e
 +  {
 +    const std::string slot = "< Slot " + std::to_string(s_slot) + " >";
 +    rows = {{"Resume Game"}, {"Save State", slot}, {"Load State", slot}, {"Settings", ">"},
-+            {"Quit Game"}};
++            {"Cheats", ">"},     {"Quit Game"}};
 +    selected = s_main_selected;
 +    subtitle = "PAUSED";
 +    hints = {{Glyph::Cross, "Select"}};
@@ -4125,6 +4931,30 @@ index 0000000..65d2a4e
 +      hints.push_back({Glyph::LeftRight, "Slot"});
 +    hints.push_back({Glyph::Circle, "Resume"});
 +    hints.push_back({Glyph::L3R3, "Resume"});
++  }
++  else if (s_page == Page::Cheats)
++  {
++    const auto entries = s_cheats.Entries();
++    bool last_gecko = false;
++    for (size_t i = 0; i < entries.size(); i++)
++    {
++      if (i == 0 || entries[i].gecko != last_gecko)
++      {
++        rows.push_back({entries[i].gecko ? "Gecko Codes" : "Action Replay Codes", "", true});
++        keys.push_back("");
++      }
++      last_gecko = entries[i].gecko;
++      rows.push_back({entries[i].name, entries[i].enabled ? "< On >" : "< Off >"});
++      keys.push_back("cheat:" + std::to_string(i));
++    }
++    if (entries.empty())
++    {
++      rows.push_back({"No cheats for this game", "", true});
++      keys.push_back("");
++    }
++    selected = s_settings_selected;
++    subtitle = "CHEATS";
++    hints = {{Glyph::Cross, "On/Off"}, {Glyph::UpDown, "Move"}, {Glyph::Circle, "Back"}};
 +  }
 +  else
 +  {
@@ -4206,6 +5036,22 @@ index 0000000..65d2a4e
 +{
 +  if (row < 0 || row >= static_cast<int>(s_row_keys.size()))
 +    return;
++  if (s_page == Page::Cheats)
++  {
++    const std::string& key = s_row_keys[row];
++    if (key.rfind("cheat:", 0) != 0)
++      return;
++    const size_t index = static_cast<size_t>(std::atoi(key.c_str() + 6));
++    s_cheats.Toggle(index);
++    s_cheats.ApplyToRunningGame();
++    const auto entries = s_cheats.Entries();
++    if (index < entries.size())
++    {
++      Toast(entries[index].name + (entries[index].enabled ? ": on" : ": off"));
++      Log("cheat " + entries[index].name + (entries[index].enabled ? " on" : " off"));
++    }
++    return;
++  }
 +  if (row == 0)
 +  {
 +    // Apply To: this game (its own copy of the settings) or all games (global).
@@ -4274,13 +5120,13 @@ index 0000000..65d2a4e
 +  // Skip category headers (row 0, "Apply To", is selectable).
 +  while (row > 0 && row < count && s_row_keys[row].empty())
 +    row += direction;
-+  if (row >= 0 && row < count)
++  if (row >= 0 && row < count && (row > 0 || s_page == Page::Settings))
 +    s_settings_selected = row;
 +}
 +
 +void Activate(Core::System& system)
 +{
-+  if (s_page == Page::Settings)
++  if (s_page != Page::Main)
 +  {
 +    ChangeSetting(s_settings_selected, 1);
 +    return;
@@ -4315,6 +5161,16 @@ index 0000000..65d2a4e
 +  case MAIN_SETTINGS:
 +    s_page = Page::Settings;
 +    s_settings_selected = 0;
++    break;
++  case MAIN_CHEATS:
++    s_page = Page::Cheats;
++    s_cheats.Load(s_game_id, SConfig::GetInstance().GetRevision());
++    s_settings_selected = 0;
++    BuildRows();
++    // First selectable row (row 0 is the first header).
++    SelectableMove(1);
++    if (!s_row_keys.empty() && s_row_keys[s_settings_selected].empty())
++      s_settings_selected = 0;
 +    break;
 +  case MAIN_QUIT:
 +    // A clean stop writes the memory cards; the app then restarts into the XMB (PlatformPS4).
@@ -4645,7 +5501,7 @@ index 0000000..65d2a4e
 +    }
 +    else if (pressed & ORBIS_PAD_BUTTON_CIRCLE)
 +    {
-+      if (s_page == Page::Settings)
++      if (s_page != Page::Main)
 +      {
 +        s_page = Page::Main;
 +        rebuild = true;
@@ -5211,10 +6067,10 @@ index 0000000..42ebba7
 +}  // namespace PS4Settings
 diff --git a/Source/Core/DolphinNoGUI/PS4XMB.cpp b/Source/Core/DolphinNoGUI/PS4XMB.cpp
 new file mode 100755
-index 0000000..21b6adf
+index 0000000..6475cea
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4XMB.cpp
-@@ -0,0 +1,1613 @@
+@@ -0,0 +1,1944 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -5247,6 +6103,10 @@ index 0000000..21b6adf
 +#include "DiscIO/Enums.h"
 +#include "DiscIO/Volume.h"
 +#include "DiscIO/VolumeDisc.h"
++#include "Common/FileUtil.h"
++#include "DolphinNoGUI/PS4Cheats.h"
++#include "DolphinNoGUI/PS4Controls.h"
++#include "DolphinNoGUI/PS4Covers.h"
 +#include "DolphinNoGUI/PS4Settings.h"
 +#include "DolphinNoGUI/PS4XMBDisplay.h"
 +
@@ -5487,6 +6347,11 @@ index 0000000..21b6adf
 +    if (m_pad < 0)
 +      Log("scePadOpen failed");
 +  }
++  // The pad's raw state (button capture for remapping).
++  bool Raw(OrbisPadData* out)
++  {
++    return m_pad >= 0 && scePadReadState(m_pad, out) == 0 && out->connected;
++  }
 +  // Buttons that went down this frame (directions repeat while held).
 +  uint32_t Poll(float dt)
 +  {
@@ -5628,8 +6493,11 @@ index 0000000..21b6adf
 +  std::string title;
 +  bool wii = false;
 +  int discs = 1;
++  uint16_t revision = 0;
 +  ImTextureID banner{};
 +  float banner_aspect = 3.0f;
++  ImTextureID cover{};  // box art (covers/<ID>.png)
++  float cover_aspect = 0.7f;
 +};
 +
 +enum class Category
@@ -5657,6 +6525,8 @@ index 0000000..21b6adf
 +  SET_CLOCK,
 +  SET_ABOUT,
 +  SET_RESET_ALL,
++  SET_CONTROLS,
++  SET_COVERS,
 +  SET_GROUP = 100,  // + index into PS4Settings::Categories(): an emulation settings list
 +};
 +
@@ -5712,6 +6582,14 @@ index 0000000..21b6adf
 +  void OpenSettingPanel(int setting);
 +  void ApplySettingOption(int setting, int option);
 +  void OpenSettingsList(const std::string& category, const std::string& game_id);
++  void OpenControlsList(PS4Controls::Device device);
++  void BuildControlRows();
++  void OpenCheatsList(const Game& game);
++  void BuildCheatRows();
++  void StartCoverDownload();
++  void UpdateCoverDownload();
++  void UpdateCapture(float dt);
++  void LoadCovers();
 +  void BuildSettingRows();
 +  void ChangeSettingRow(int direction);
 +  void MoveSettingRow(int direction);
@@ -5746,6 +6624,25 @@ index 0000000..21b6adf
 +  ImFont* m_bold = nullptr;
 +  ImTextureID m_wallpaper{};
 +  ImTextureID m_icon_gc{}, m_icon_wii{}, m_logo{};
++
++  // Controls panel: which controller, and a button capture in progress.
++  int m_controls_device = -1;  // PS4Controls::Device, or -1
++  bool m_capture = false;
++  bool m_capture_released = false;
++  float m_capture_time = 0.0f;
++  int m_capture_row = 0;
++
++  // Cheats panel.
++  PS4Cheats::List m_cheats;
++  std::string m_cheats_game;
++
++  // Cover download (background thread).
++  std::thread m_cover_thread;
++  std::atomic<bool> m_cover_cancel{false};
++  std::atomic<bool> m_cover_done{false};
++  std::mutex m_cover_mutex;
++  std::string m_cover_status;
++  PS4Covers::Result m_cover_result;
 +  float m_time = 0.0f;
 +  float m_fade = 1.0f;  // black overlay: fades in at start, out at launch
 +  int m_launch = -1;
@@ -5797,6 +6694,7 @@ index 0000000..21b6adf
 +    Game game;
 +    game.path = disc.path;
 +    game.id = disc.game_id;
++    game.revision = disc.revision;
 +    game.title = disc.title.empty() ? std::filesystem::path(disc.path).stem().string() : disc.title;
 +    for (const std::string& id : {disc.game_id, disc.game_id.substr(0, 4)})
 +    {
@@ -5842,6 +6740,7 @@ index 0000000..21b6adf
 +  m_icon_gc = LoadPngTexture(resources + "Platform_Gamecube@4x.png");
 +  m_icon_wii = LoadPngTexture(resources + "Platform_Wii@4x.png");
 +  m_logo = LoadPngTexture(resources + "dolphin_logo@2x.png");
++  LoadCovers();
 +
 +  // Banners from the discs (GameCube; Wii discs carry none Dolphin can read without a NAND).
 +  for (Game& game : m_games)
@@ -5942,6 +6841,9 @@ index 0000000..21b6adf
 +  settings.push_back({"Sound Effects", m_prefs.sounds ? "On" : "Off", -1, -1, SET_SOUNDS});
 +  settings.push_back({"Volume", std::to_string(m_prefs.volume), -1, -1, SET_VOLUME});
 +  settings.push_back({"Clock", m_prefs.clock ? "On" : "Off", -1, -1, SET_CLOCK});
++  settings.push_back({"Controls", "Remap the GameCube and Wii buttons", -1, -1, SET_CONTROLS});
++  settings.push_back({"Download Covers", "Box art from GameTDB for your games", -1, -1,
++                      SET_COVERS});
 +  settings.push_back({"Reset All Settings", "Every setting back to the defaults", -1, -1,
 +                      SET_RESET_ALL});
 +  settings.push_back({"About", "", -1, -1, SET_ABOUT});
@@ -5994,6 +6896,15 @@ index 0000000..21b6adf
 +    m_panel.title = "Clock";
 +    m_panel.options = {"On", "Off"};
 +    m_panel.selected = m_prefs.clock ? 0 : 1;
++    break;
++  case SET_CONTROLS:
++    m_panel.title = "Controls";
++    m_panel.options = {PS4Controls::DeviceName(PS4Controls::Device::GameCube),
++                       PS4Controls::DeviceName(PS4Controls::Device::Wii)};
++    break;
++  case SET_COVERS:
++    m_panel.title = "Download Covers";
++    StartCoverDownload();
 +    break;
 +  case SET_RESET_ALL:
 +    m_panel.title = "Reset All Settings";
@@ -6086,6 +6997,49 @@ index 0000000..21b6adf
 +    return;
 +  const SettingRow& row = m_panel.rows[m_panel.selected];
 +  const std::string& game = m_panel.game_id;
++  if (row.key.rfind("ctl:", 0) == 0 || row.key == "__ctlreset__")
++  {
++    const auto device = static_cast<PS4Controls::Device>(m_controls_device);
++    if (row.key == "__ctlreset__")
++    {
++      if (direction > 0)
++        PS4Controls::ResetToDefault(device);
++      BuildControlRows();
++      return;
++    }
++    const auto& binding = PS4Controls::Bindings(device)[std::atoi(row.key.c_str() + 4)];
++    if (binding.stick_group)
++    {
++      // Sticks: Left Stick / Right Stick / D-Pad.
++      const auto choices = PS4Controls::StickChoices();
++      const std::string current = PS4Controls::Get(device, binding);
++      int index = 0;
++      for (size_t i = 0; i < choices.size(); i++)
++      {
++        if (choices[i] == current)
++          index = static_cast<int>(i);
++      }
++      const int count = static_cast<int>(choices.size());
++      index = ((index + direction) % count + count) % count;
++      PS4Controls::Set(device, binding, choices[index]);
++      BuildControlRows();
++    }
++    else if (direction > 0)
++    {
++      // Buttons: wait for the next press (UpdateCapture).
++      m_capture = true;
++      m_capture_released = false;
++      m_capture_time = 0.0f;
++      m_capture_row = m_panel.selected;
++    }
++    return;
++  }
++  if (row.key.rfind("cheat:", 0) == 0)
++  {
++    m_cheats.Toggle(static_cast<size_t>(std::atoi(row.key.c_str() + 6)));
++    BuildCheatRows();
++    return;
++  }
 +  if (row.scope)
 +  {
 +    PS4Settings::SetCustom(game, !PS4Settings::IsCustom(game));
@@ -6123,6 +7077,187 @@ index 0000000..21b6adf
 +  BuildSettingRows();
 +}
 +
++void Menu::OpenControlsList(PS4Controls::Device device)
++{
++  m_panel = {};
++  m_panel.open = true;
++  m_panel.title = PS4Controls::DeviceName(device);
++  m_controls_device = static_cast<int>(device);
++  BuildControlRows();
++  m_panel.selected = 0;
++}
++
++void Menu::BuildControlRows()
++{
++  const auto device = static_cast<PS4Controls::Device>(m_controls_device);
++  std::vector<SettingRow> rows;
++  const auto& bindings = PS4Controls::Bindings(device);
++  for (size_t i = 0; i < bindings.size(); i++)
++  {
++    const std::string value = PS4Controls::Get(device, bindings[i]);
++    rows.push_back({bindings[i].label,
++                    bindings[i].stick_group ? value : PS4Controls::Describe(value),
++                    "ctl:" + std::to_string(i)});
++  }
++  rows.push_back({"", "", "", true});
++  rows.push_back({"Reset to Default", "", "__ctlreset__"});
++  m_panel.rows = std::move(rows);
++}
++
++void Menu::OpenCheatsList(const Game& game)
++{
++  m_panel = {};
++  m_panel.open = true;
++  m_panel.title = "Cheats";
++  m_cheats_game = game.id;
++  m_cheats.Load(game.id, game.revision);
++  BuildCheatRows();
++  if (m_panel.rows.empty())
++    m_panel.lines = {"", "No cheats for this game.", "",
++                     "Dolphin's cheat database has none for " + game.id + "."};
++  m_panel.selected = 0;
++  MoveSettingRow(0);
++}
++
++void Menu::BuildCheatRows()
++{
++  std::vector<SettingRow> rows;
++  const auto entries = m_cheats.Entries();
++  bool last_gecko = false;
++  for (size_t i = 0; i < entries.size(); i++)
++  {
++    if (i == 0 || entries[i].gecko != last_gecko)
++      rows.push_back({entries[i].gecko ? "Gecko Codes" : "Action Replay Codes", "", "", true});
++    last_gecko = entries[i].gecko;
++    rows.push_back({entries[i].name, entries[i].enabled ? "On" : "Off",
++                    "cheat:" + std::to_string(i)});
++  }
++  m_panel.rows = std::move(rows);
++}
++
++// A button capture for the selected controls row: waits until the pad is at rest, then takes the
++// next press (5 s without one cancels).
++void Menu::UpdateCapture(float dt)
++{
++  if (!m_capture)
++    return;
++  m_capture_time += dt;
++  OrbisPadData data = {};
++  if (!m_input.Raw(&data))
++    return;
++  if (!m_capture_released)
++  {
++    m_capture_released = PS4Controls::IsAtRest(data);
++    return;
++  }
++  if (m_capture_time > 5.0f)
++  {
++    m_capture = false;
++    Play("back");
++    return;
++  }
++  const auto device = static_cast<PS4Controls::Device>(m_controls_device);
++  const std::string& key = m_panel.rows[m_capture_row].key;
++  const auto& binding = PS4Controls::Bindings(device)[std::atoi(key.c_str() + 4)];
++  const bool analog = std::string(binding.key).find("Analog") != std::string::npos;
++  const std::string expression = PS4Controls::Capture(data, analog);
++  if (expression.empty())
++    return;
++  PS4Controls::Set(device, binding, expression);
++  BuildControlRows();
++  m_capture = false;
++  // Swallow the press: the menu sees the pad again once it is released.
++  m_input.Poll(0.0f);
++  Play("confirm");
++}
++
++void Menu::StartCoverDownload()
++{
++  if (m_cover_thread.joinable())
++    return;  // already running
++  m_cover_cancel = false;
++  m_cover_done = false;
++  {
++    std::lock_guard lock(m_cover_mutex);
++    m_cover_status = "Connecting to GameTDB...";
++  }
++  std::vector<std::string> ids;
++  for (const Game& game : m_games)
++    ids.push_back(game.id);
++  m_cover_thread = std::thread([this, ids] {
++    const PS4Covers::Result result = PS4Covers::Download(
++        ids, m_data_dir + "/covers", m_assets_dir + "/xmb/cacert.pem",
++        [this](int done, int total, const std::string& id) {
++          std::lock_guard lock(m_cover_mutex);
++          m_cover_status = id.empty() ? "Finishing..." :
++                                        "Downloading " + std::to_string(done + 1) + " of " +
++                                            std::to_string(total) + ": " + id;
++        },
++        m_cover_cancel);
++    std::lock_guard lock(m_cover_mutex);
++    m_cover_result = result;
++    m_cover_done = true;
++  });
++}
++
++// Shows the download's progress in the panel; at the end, loads the new covers.
++void Menu::UpdateCoverDownload()
++{
++  if (!m_cover_thread.joinable())
++    return;
++  std::string status;
++  {
++    std::lock_guard lock(m_cover_mutex);
++    status = m_cover_status;
++  }
++  if (!m_cover_done)
++  {
++    if (m_panel.open && m_panel.setting == SET_COVERS)
++      m_panel.lines = {"", status, "", "Circle cancels."};
++    return;
++  }
++  m_cover_thread.join();
++  const PS4Covers::Result result = m_cover_result;
++  LoadCovers();
++  Log("covers: " + std::to_string(result.downloaded) + " downloaded, " +
++      std::to_string(result.already) + " already there, " + std::to_string(result.not_found) +
++      " not on GameTDB, " + std::to_string(result.failed) + " failed " + result.error);
++  if (m_panel.open && m_panel.setting == SET_COVERS)
++  {
++    m_panel.lines = {"",
++                     "Downloaded: " + std::to_string(result.downloaded),
++                     "Already there: " + std::to_string(result.already),
++                     "Not on GameTDB: " + std::to_string(result.not_found)};
++    if (result.failed > 0)
++    {
++      m_panel.lines.push_back("Failed: " + std::to_string(result.failed));
++      m_panel.lines.push_back(result.error);
++    }
++    m_panel.lines.push_back("");
++    m_panel.lines.push_back("Your own pictures: " + m_data_dir + "/covers/<GAMEID>.png");
++  }
++  Play(result.failed > 0 ? "error" : "confirm");
++}
++
++// Box art: data_dir/covers/<game ID>.png (downloaded or the user's own).
++void Menu::LoadCovers()
++{
++  for (Game& game : m_games)
++  {
++    if (game.id.empty())
++      continue;
++    if (game.cover != ImTextureID{})
++      continue;
++    float aspect = 0.7f;
++    const ImTextureID cover = LoadPngTexture(m_data_dir + "/covers/" + game.id + ".png", &aspect);
++    if (cover != ImTextureID{})
++    {
++      game.cover = cover;
++      game.cover_aspect = aspect;
++    }
++  }
++}
++
 +void Menu::ApplySettingOption(int setting, int option)
 +{
 +  switch (setting)
@@ -6140,6 +7275,9 @@ index 0000000..21b6adf
 +    if (option == 1)
 +      PS4Settings::ResetAll();
 +    return;
++  case SET_CONTROLS:
++    OpenControlsList(option == 0 ? PS4Controls::Device::GameCube : PS4Controls::Device::Wii);
++    return;
 +  default:
 +    return;
 +  }
@@ -6152,10 +7290,15 @@ index 0000000..21b6adf
 +  if (m_launch >= 0 || pressed == 0)
 +    return;
 +
++  if (m_capture)
++    return;  // a button capture takes the pad (UpdateCapture)
 +  if (m_panel.open)
 +  {
 +    if (pressed & BTN_CIRCLE)
 +    {
++      if (m_panel.setting == SET_COVERS)
++        m_cover_cancel = true;
++      m_controls_device = -1;
 +      m_panel.open = false;
 +      Play("back");
 +      return;
@@ -6202,6 +7345,12 @@ index 0000000..21b6adf
 +    }
 +    if (pressed & BTN_CROSS)
 +    {
++      if (m_panel.setting == SET_CONTROLS)
++      {
++        ApplySettingOption(m_panel.setting, m_panel.selected);
++        Play("confirm");
++        return;
++      }
 +      if (m_panel.setting >= 0)
 +      {
 +        ApplySettingOption(m_panel.setting, m_panel.selected);
@@ -6220,6 +7369,13 @@ index 0000000..21b6adf
 +        return;
 +      }
 +      else if (m_panel.title == "Game" && m_panel.selected == 2)
++      {
++        const Item& item = m_items[m_category][m_selected[m_category]];
++        OpenCheatsList(m_games[item.game]);
++        Play("confirm");
++        return;
++      }
++      else if (m_panel.title == "Game" && m_panel.selected == 3)
 +      {
 +        const Item& item = m_items[m_category][m_selected[m_category]];
 +        const Game& game = m_games[item.game];
@@ -6317,7 +7473,7 @@ index 0000000..21b6adf
 +      m_panel = {};
 +      m_panel.open = true;
 +      m_panel.title = "Game";
-+      m_panel.options = {"Start", "Game Settings", "Information"};
++      m_panel.options = {"Start", "Game Settings", "Cheats", "Information"};
 +      Play("menu");
 +    }
 +  }
@@ -6457,7 +7613,21 @@ index 0000000..21b6adf
 +  if (item.game >= 0)
 +  {
 +    const Game& game = m_games[item.game];
-+    if (game.banner != ImTextureID{})
++    if (game.cover != ImTextureID{})
++    {
++      // Box art, upright, centred where the banner would be.
++      const float ch = selected ? 150.0f : 112.0f;
++      const float cw = ch * game.cover_aspect;
++      const ImVec2 cmin(x - cw * 0.5f, y - ch * 0.5f), cmax(x + cw * 0.5f, y + ch * 0.5f);
++      dl->AddRectFilled(ImVec2(cmin.x + 4, cmin.y + 6), ImVec2(cmax.x + 4, cmax.y + 6),
++                        IM_COL32(0, 0, 0, static_cast<int>(alpha * 90)), 6.0f);
++      dl->AddImageRounded(ImTextureRef(game.cover), cmin, cmax, ImVec2(0, 0), ImVec2(1, 1),
++                          IM_COL32(255, 255, 255, static_cast<int>(alpha * 255)), 6.0f);
++      if (selected)
++        dl->AddRect(cmin, cmax, Rgba(theme.text, alpha * 0.9f), 6.0f, 0, 3.0f);
++      // (no banner frame below)
++    }
++    else if (game.banner != ImTextureID{})
 +    {
 +      dl->AddImageRounded(ImTextureRef(game.banner), icon_min, icon_max, ImVec2(0, 0),
 +                          ImVec2(1, 1), IM_COL32(255, 255, 255, static_cast<int>(alpha * 255)),
@@ -6478,7 +7648,7 @@ index 0000000..21b6adf
 +                     ImVec2(x + s * 0.5f, y + s * 0.5f), ImVec2(0, 0), ImVec2(1, 1), tint);
 +      }
 +    }
-+    if (selected)
++    if (selected && game.cover == ImTextureID{})
 +      dl->AddRect(icon_min, icon_max, Rgba(theme.text, alpha * 0.9f), 8.0f, 0, 3.0f);
 +  }
 +  else if (item.theme != -1)
@@ -6605,7 +7775,15 @@ index 0000000..21b6adf
 +    {
 +      const SettingRow& row = m_panel.rows[m_panel.selected];
 +      std::string help;
-+      if (row.scope)
++      if (m_capture)
++        help = "Press the DualShock 4 button for " + row.label + "...  (5 s: cancel)";
++      else if (row.key.rfind("ctl:", 0) == 0)
++        help = "Cross: press a new button for it. Sticks: Left/Right to choose.";
++      else if (row.key == "__ctlreset__")
++        help = "Back to the default layout.";
++      else if (row.key.rfind("cheat:", 0) == 0)
++        help = "Applies the next time the game starts, or now from the in-game menu (L3+R3).";
++      else if (row.scope)
 +        help = "All Games: this game follows the global settings. This Game: its own.";
 +      else if (const PS4Settings::Setting* setting = PS4Settings::Find(row.key))
 +        help = std::string(setting->help) + (setting->live ? "" : " (Next game start.)");
@@ -6756,6 +7934,9 @@ index 0000000..21b6adf
 +std::string Menu::Run()
 +{
 +  s_log = fopen((m_data_dir + "/xmb.log").c_str(), "w");
++  File::SetUserPath(D_USER_IDX, m_data_dir + "/User/");
++  PS4Controls::SetUserDirectory(m_data_dir + "/User");
++  PS4Controls::WriteDefaultsIfMissing();
 +  int user = 0;
 +  sceUserServiceInitialize(nullptr);
 +  sceUserServiceGetInitialUser(&user);
@@ -6799,7 +7980,10 @@ index 0000000..21b6adf
 +    m_time += dt;
 +    io.DeltaTime = dt > 0.0f ? dt : 1.0f / 60.0f;
 +
-+    HandleInput(m_input.Poll(dt));
++    UpdateCapture(dt);
++    if (!m_capture)
++      HandleInput(m_input.Poll(dt));
++    UpdateCoverDownload();
 +
 +    m_display.BeginFrame();
 +    ImGui::NewFrame();
@@ -6814,6 +7998,9 @@ index 0000000..21b6adf
 +    }
 +  }
 +
++  m_cover_cancel = true;
++  if (m_cover_thread.joinable())
++    m_cover_thread.join();
 +  m_audio.Stop();
 +  m_display.Shutdown();
 +  ImGui::DestroyContext();
@@ -7510,10 +8697,10 @@ index f4dc8a9..4e5ff67 100644
  
 diff --git a/Source/Core/DolphinNoGUI/PlatformPS4.cpp b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
 new file mode 100644
-index 0000000..bf745d9
+index 0000000..7056d5c
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
-@@ -0,0 +1,1038 @@
+@@ -0,0 +1,982 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -7547,6 +8734,7 @@ index 0000000..bf745d9
 +#include <fmt/format.h>
 +
 +#include "Common/Config/Config.h"
++#include "DolphinNoGUI/PS4Controls.h"
 +#include "DolphinNoGUI/PS4IngameMenu.h"
 +#include "DolphinNoGUI/PS4Settings.h"
 +#include "DolphinNoGUI/PS4XMB.h"
@@ -8299,63 +9487,6 @@ index 0000000..bf745d9
 +
 +// Controller mappings for the DualShock 4 (ciface::PS4Pad), written on first launch only so that
 +// user edits are kept.
-+constexpr char GCPAD_DEFAULTS[] = R"([GCPad1]
-+Device = PS4/0/DualShock 4
-+Buttons/A = Cross
-+Buttons/B = Square
-+Buttons/X = Circle
-+Buttons/Y = Triangle
-+Buttons/Z = R1
-+Buttons/Start = Options
-+Main Stick/Up = `Left Y-`
-+Main Stick/Down = `Left Y+`
-+Main Stick/Left = `Left X-`
-+Main Stick/Right = `Left X+`
-+C-Stick/Up = `Right Y-`
-+C-Stick/Down = `Right Y+`
-+C-Stick/Left = `Right X-`
-+C-Stick/Right = `Right X+`
-+Triggers/L = `L2 Click`
-+Triggers/R = `R2 Click`
-+Triggers/L-Analog = L2
-+Triggers/R-Analog = R2
-+D-Pad/Up = `Pad N`
-+D-Pad/Down = `Pad S`
-+D-Pad/Left = `Pad W`
-+D-Pad/Right = `Pad E`
-+Rumble/Motor = `Motor L`
-+)";
-+
-+constexpr char WIIMOTE_DEFAULTS[] = R"([Wiimote1]
-+Device = PS4/0/DualShock 4
-+Buttons/A = Cross
-+Buttons/B = R2
-+Buttons/1 = Square
-+Buttons/2 = Triangle
-+Buttons/- = L1
-+Buttons/+ = Options
-+Buttons/Home = Touchpad
-+D-Pad/Up = `Pad N`
-+D-Pad/Down = `Pad S`
-+D-Pad/Left = `Pad W`
-+D-Pad/Right = `Pad E`
-+IR/Up = `Right Y-`
-+IR/Down = `Right Y+`
-+IR/Left = `Right X-`
-+IR/Right = `Right X+`
-+Shake/X = R3
-+Shake/Y = R3
-+Shake/Z = R3
-+Rumble/Motor = `Motor L`
-+Extension = Nunchuk
-+Nunchuk/Buttons/C = L1
-+Nunchuk/Buttons/Z = L2
-+Nunchuk/Stick/Up = `Left Y-`
-+Nunchuk/Stick/Down = `Left Y+`
-+Nunchuk/Stick/Left = `Left X-`
-+Nunchuk/Stick/Right = `Left X+`
-+)";
-+
 +void WriteDefaultFile(const std::string& path, const char* contents)
 +{
 +  struct stat st;
@@ -8372,8 +9503,8 @@ index 0000000..bf745d9
 +{
 +  mkdir(user_dir.c_str(), 0777);
 +  mkdir((user_dir + "/Config").c_str(), 0777);
-+  WriteDefaultFile(user_dir + "/Config/GCPadNew.ini", GCPAD_DEFAULTS);
-+  WriteDefaultFile(user_dir + "/Config/WiimoteNew.ini", WIIMOTE_DEFAULTS);
++  PS4Controls::SetUserDirectory(user_dir);
++  PS4Controls::WriteDefaultsIfMissing();
 +}
 +
 +void OnExit()
