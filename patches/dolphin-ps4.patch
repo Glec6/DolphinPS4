@@ -23,10 +23,10 @@ index 5ea7f8e..874f376 100644
  endif()
  
 diff --git a/Externals/curl/CMakeLists.txt b/Externals/curl/CMakeLists.txt
-index b0a7ea0..03cee2c 100644
+index b0a7ea0..4bb022f 100644
 --- a/Externals/curl/CMakeLists.txt
 +++ b/Externals/curl/CMakeLists.txt
-@@ -21,7 +21,14 @@ set(BROTLI_FOUND FALSE) # TODO: Same as above
+@@ -21,7 +21,19 @@ set(BROTLI_FOUND FALSE) # TODO: Same as above
  set(USE_LIBIDN2 OFF)
  set(USE_NGHTTP2 OFF)
  
@@ -37,12 +37,17 @@ index b0a7ea0..03cee2c 100644
 +  add_compile_definitions(SOL_IP=IPPROTO_IP)
 +  # Its stropts.h declares ioctl() unlike its sys/ioctl.h; curl does not need it.
 +  set(HAVE_STROPTS_H 0 CACHE INTERNAL "")
++  # Socket flags, eventfd and accept4 the PS4 kernel does not have (ps4_compat.h); socketpair() is used
++  # for curl's wake-up pair instead of eventfd.
++  add_compile_options(-include ${CMAKE_CURRENT_SOURCE_DIR}/ps4_compat.h)
++  set(HAVE_EVENTFD 0 CACHE INTERNAL "")
++  set(HAVE_ACCEPT4 0 CACHE INTERNAL "")
 +endif()
 +if(UNIX OR PS4)
    # We use mbedtls on Unix(-like) systems and Android.
    set(CURL_USE_OPENSSL OFF)
  
-@@ -50,7 +57,7 @@ endif()
+@@ -50,7 +62,7 @@ endif()
  
  add_subdirectory(curl)
  
@@ -51,6 +56,21 @@ index b0a7ea0..03cee2c 100644
    # HACK: Manually link with the mbedtls libraries.
    target_link_libraries(libcurl_static PRIVATE
      MbedTLS::mbedtls
+diff --git a/Externals/curl/ps4_compat.h b/Externals/curl/ps4_compat.h
+new file mode 100644
+index 0000000..76b3ce0
+--- /dev/null
++++ b/Externals/curl/ps4_compat.h
+@@ -0,0 +1,9 @@
++// PS4 build of curl (included first in every curl source file; see CMakeLists.txt).
++#pragma once
++#include <sys/types.h>
++#include <sys/socket.h>
++// The PS4 kernel (FreeBSD 9) has no SOCK_NONBLOCK / SOCK_CLOEXEC flags for socket(), and
++// OpenOrbis defines them with Linux values, which socket() rejects: every connection failed at
++// once. Without them curl makes sockets non-blocking with fcntl(O_NONBLOCK).
++#undef SOCK_NONBLOCK
++#undef SOCK_CLOEXEC
 diff --git a/Externals/zstd/CMakeLists.txt b/Externals/zstd/CMakeLists.txt
 index d83ce4c..07b3a67 100644
 --- a/Externals/zstd/CMakeLists.txt
@@ -2237,6 +2257,37 @@ index 054596e..939e27c 100644
  }
  
  bool MemoryManager::TryAddLargePageTableMapping(u32 logical_address, u32 translated_address,
+diff --git a/Source/Core/Core/IOS/ES/ES.cpp b/Source/Core/Core/IOS/ES/ES.cpp
+index 5366444..9518b9c 100644
+--- a/Source/Core/Core/IOS/ES/ES.cpp
++++ b/Source/Core/Core/IOS/ES/ES.cpp
+@@ -32,6 +32,10 @@
+ #include "Core/System.h"
+ #include "DiscIO/Enums.h"
+ 
++#ifdef __ORBIS__
++extern "C" void ps4_request_quit_to_menu();  // DolphinNoGUI/PS4IngameMenu.cpp
++#endif
++
+ namespace IOS::HLE
+ {
+ namespace
+@@ -420,6 +424,15 @@ bool ESDevice::LaunchPPCTitle(u64 title_id)
+ 
+   if (!tmd.IsValid() || !ticket.IsValid())
+   {
++#ifdef __ORBIS__
++    // PS4 port: there is no Wii Menu. A game's HOME Menu "Wii Menu" quits to the port's XMB
++    // (DolphinNoGUI/PS4IngameMenu.cpp) instead of hanging the emulated software.
++    if (title_id == Titles::SYSTEM_MENU)
++    {
++      ps4_request_quit_to_menu();
++      return false;
++    }
++#endif
+     if (title_id == Titles::SYSTEM_MENU)
+     {
+       PanicAlertFmtT("Could not launch the Wii Menu because it is missing from the NAND.\n"
 diff --git a/Source/Core/Core/IOS/Network/KD/NetKDRequest.cpp b/Source/Core/Core/IOS/Network/KD/NetKDRequest.cpp
 index ed320f5..e6f93a5 100644
 --- a/Source/Core/Core/IOS/Network/KD/NetKDRequest.cpp
@@ -5260,10 +5311,10 @@ index 0000000..5157e21
 +}  // namespace PS4Glyphs
 diff --git a/Source/Core/DolphinNoGUI/PS4IngameMenu.cpp b/Source/Core/DolphinNoGUI/PS4IngameMenu.cpp
 new file mode 100755
-index 0000000..1debb78
+index 0000000..a19c7ea
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4IngameMenu.cpp
-@@ -0,0 +1,874 @@
+@@ -0,0 +1,926 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -5392,6 +5443,11 @@ index 0000000..1debb78
 +float s_repeat = 0.0f;
 +bool s_quit = false;
 +Clock::time_point s_quit_time;
++// A game asked for the Wii Menu (IOS ES), which the port doesn't have: quit to the XMB instead.
++std::atomic<bool> s_quit_requested{false};
++// The first seconds of a game: which buttons open this menu, bottom right.
++bool s_hint_started = false;
++Clock::time_point s_hint_start;
 +int s_saving_slot = 0;  // a save to this slot is being written
 +
 +// Watchdog (menu-hang.txt).
@@ -5715,6 +5771,20 @@ index 0000000..1debb78
 +  Log(std::string("wii remote: ") + key + "=" + value + " (" + s_game_id + ")");
 +}
 +
++// A clean stop writes the memory cards; the app then restarts into the XMB (PlatformPS4).
++void QuitToXMB(Core::System& system, const char* why)
++{
++  Log(why);
++  s_quit = true;
++  s_quit_time = Clock::now();
++  {
++    std::lock_guard lock(s_mutex);
++    s_open = false;
++  }
++  s_watch = false;
++  Core::Stop(system);
++}
++
 +void Activate(Core::System& system)
 +{
 +  if (s_page != Page::Main)
@@ -5768,16 +5838,7 @@ index 0000000..1debb78
 +      s_settings_selected = 0;
 +    break;
 +  case MAIN_QUIT:
-+    // A clean stop writes the memory cards; the app then restarts into the XMB (PlatformPS4).
-+    Log("quit to the XMB");
-+    s_quit = true;
-+    s_quit_time = Clock::now();
-+    {
-+      std::lock_guard lock(s_mutex);
-+      s_open = false;
-+    }
-+    s_watch = false;
-+    Core::Stop(system);
++    QuitToXMB(system, "quit to the XMB");
 +    break;
 +  }
 +}
@@ -5846,7 +5907,18 @@ index 0000000..1debb78
 +  s_last_draw = now;
 +  s_appear += ((s_open ? 1.0f : 0.0f) - s_appear) * (1.0f - std::exp(-14.0f * dt));
 +  const bool toast = now < s_toast_until;
-+  if (s_appear < 0.01f && !toast)
++  if (!s_hint_started)
++  {
++    s_hint_started = true;
++    s_hint_start = now;
++  }
++  // Shown from 3 s to 10 s after the game's first frame, fading in and out.
++  const float hint_time = std::chrono::duration<float>(now - s_hint_start).count();
++  const float hint_alpha =
++      hint_time < 3.0f || hint_time > 10.0f ?
++          0.0f :
++          std::min({1.0f, (hint_time - 3.0f) / 0.4f, (10.0f - hint_time) / 0.6f});
++  if (s_appear < 0.01f && !toast && hint_alpha <= 0.0f)
 +    return;
 +
 +  ImDrawList* dl = ImGui::GetForegroundDrawList();
@@ -5952,6 +6024,25 @@ index 0000000..1debb78
 +                      IM_COL32(8, 20, 46, 225), 14 * s);
 +    dl->AddText(bold, 32 * s, p, IM_COL32(255, 255, 255, 255), s_toast.c_str());
 +  }
++  if (hint_alpha > 0.0f && s_appear < 0.5f && !toast)
++  {
++    // "L3 + R3 for the menu", with the two stick icons, in the bottom-right corner.
++    const char* label = "Press L3 + R3 for the menu";
++    const float ts = 28 * s, r = 17 * s;
++    const float tw = regular->CalcTextSizeA(ts, FLT_MAX, 0, label).x;
++    const float icon_w = r * 3.8f, pad = 24 * s, gap = 14 * s;
++    const float right = size.x - 60 * s, bottom = size.y - 60 * s, height = 62 * s;
++    const float left = right - pad - tw - gap - icon_w - pad;
++    const auto alpha = [hint_alpha](int a) { return static_cast<int>(a * hint_alpha); };
++    dl->AddRectFilled(ImVec2(left, bottom - height), ImVec2(right, bottom),
++                      IM_COL32(8, 20, 46, alpha(215)), 16 * s);
++    dl->AddRect(ImVec2(left, bottom - height), ImVec2(right, bottom),
++                IM_COL32(120, 196, 255, alpha(90)), 16 * s, 0, 1.5f * s);
++    DrawGlyph(dl, Glyph::L3R3, ImVec2(left + pad + icon_w * 0.5f, bottom - height * 0.5f), r,
++              hint_alpha);
++    dl->AddText(regular, ts, ImVec2(left + pad + icon_w + gap, bottom - height * 0.5f - ts * 0.55f),
++                IM_COL32(255, 255, 255, alpha(255)), label);
++  }
 +}
 +
 +// While the menu is open: if the drawing or the polling stops for 3 s, every thread's stack goes
@@ -5998,6 +6089,16 @@ index 0000000..1debb78
 +{
 +  return s_quit;
 +}
++}  // namespace PS4IngameMenu
++
++// IOS ES (Core/IOS/ES/ES.cpp), any thread: a game chose "Wii Menu" in its HOME Menu.
++extern "C" void ps4_request_quit_to_menu()
++{
++  PS4IngameMenu::s_quit_requested = true;
++}
++
++namespace PS4IngameMenu
++{
 +
 +void Poll(Core::System& system)
 +{
@@ -6008,6 +6109,8 @@ index 0000000..1debb78
 +    Log("saved state " + std::to_string(s_saving_slot));
 +    s_saving_slot = 0;
 +  }
++  if (s_quit_requested.exchange(false) && !s_quit)
++    QuitToXMB(system, "the game asked for the Wii Menu: quit to the XMB");
 +  if (s_quit)
 +  {
 +    // The clean stop normally ends the main loop quickly; don't wait forever on it.
@@ -6170,10 +6273,10 @@ index 0000000..4af50c8
 +}  // namespace PS4IngameMenu
 diff --git a/Source/Core/DolphinNoGUI/PS4Net.cpp b/Source/Core/DolphinNoGUI/PS4Net.cpp
 new file mode 100755
-index 0000000..de39a24
+index 0000000..023f183
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4Net.cpp
-@@ -0,0 +1,221 @@
+@@ -0,0 +1,245 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -6254,7 +6357,16 @@ index 0000000..de39a24
 +  const Sink* sink = nullptr;
 +  const Progress* progress = nullptr;
 +  bool stopped = false;
++  std::string notes;  // curl's own connection notes, logged when a request fails
 +};
++
++int Debug(CURL*, curl_infotype type, char* data, size_t size, void* user)
++{
++  auto* transfer = static_cast<Transfer*>(user);
++  if (type == CURLINFO_TEXT && transfer->notes.size() < 4096)
++    transfer->notes.append(data, size);
++  return 0;
++}
 +
 +size_t Write(char* data, size_t size, size_t count, void* user)
 +{
@@ -6362,6 +6474,9 @@ index 0000000..de39a24
 +    curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, XferInfo);
 +    curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &transfer);
 +    curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
++    curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
++    curl_easy_setopt(curl, CURLOPT_DEBUGFUNCTION, Debug);
++    curl_easy_setopt(curl, CURLOPT_DEBUGDATA, &transfer);
 +
 +    const CURLcode code = curl_easy_perform(curl);
 +    long status = 0;
@@ -6382,6 +6497,18 @@ index 0000000..de39a24
 +    {
 +      *error = std::string(curl_easy_strerror(code)) + (detail[0] ? std::string(": ") + detail : "");
 +      Log(host + ": " + *error);
++      size_t start = 0;
++      while (start < transfer.notes.size())
++      {
++        const size_t end = transfer.notes.find('\n', start);
++        const std::string line = transfer.notes.substr(
++            start, end == std::string::npos ? std::string::npos : end - start);
++        if (!line.empty())
++          Log("  curl: " + line);
++        if (end == std::string::npos)
++          break;
++        start = end + 1;
++      }
 +      return 0;
 +    }
 +    if (status >= 300 && status < 400 && !next.empty())
