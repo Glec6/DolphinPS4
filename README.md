@@ -12,7 +12,7 @@
 <h3 align="center">Your GameCube and Wii library, on the PS4.</h3>
 
 <p align="center">
-  <a href="https://github.com/iHaiDeeZ/DolphinPS4/releases/latest"><b>⬇ Get v02.95</b></a> ·
+  <a href="https://github.com/iHaiDeeZ/DolphinPS4/releases/latest"><b>⬇ Get v02.99</b></a> ·
   <a href="#getting-started">Getting started</a> ·
   <a href="#controls">Controls</a> ·
   <a href="#faq">FAQ</a> ·
@@ -50,7 +50,13 @@ You bring your own game backups. Nothing copyrighted is bundled: no games, BIOS 
 - The app ships with settings tested on a base PS4, plus ready-made fixes for some games, such as
   Wii Sports without a Nunchuk and sideways Wii Remote games.
 - Cheat codes (Action Replay and Gecko) can be switched on per game, from the launcher or the
-  pause menu.
+  pause menu. Each code shows a green ON or red OFF tag, and *Enable All* / *Disable All* flip
+  them in one go.
+
+**Play together**
+- Up to four players, each on their own DualShock 4. Turn on another controller, pick a PS4 user
+  for it, and it becomes the next player, even in the middle of a game.
+- Games only see the controllers that are really there, so nobody gets an empty extra port.
 
 **A pause menu on L3 + R3**
 - Eight save state slots, with a message while a state is being written.
@@ -64,13 +70,16 @@ You bring your own game backups. Nothing copyrighted is bundled: no games, BIOS 
   *Midnight*.
 - Drop PNG images in a folder to use them as wallpapers, or WAV files to replace the menu sounds.
 - Remap the GameCube controller and the Wii Remote, with the DualShock 4 buttons shown as
-  icons.
+  icons. The layout you pick is used by every player.
 
 **Built for the PS4's hardware**
 - Shaders are compiled in the background on spare CPU cores, and the cache is kept for next
   time.
 - An automatic CPU clock that slows the emulated GameCube CPU down in heavy scenes, so games keep
-  their normal speed instead of dragging.
+  their normal speed instead of dragging, and brings it back up when a game starts dropping
+  frames of its own.
+- Pressure-sensitive L and R: a partial pull reaches the game as a partial press, and the
+  click comes at the end of the pull.
 - An *Auto (60/30)* frame limit that switches to a steady 30 FPS when a game can't hold 60.
 - Logs, freeze reports and a profiler you can switch on when something needs investigating.
 
@@ -79,7 +88,7 @@ You bring your own game backups. Nothing copyrighted is bundled: no games, BIOS 
 **You need:** a jailbroken PS4 that runs homebrew packages (developed on a launch-model "fat"
 PS4), an FTP connection to it, and backups of games you own.
 
-1. Grab **`DolphinPS4-v02.95.pkg`** from the [releases page](https://github.com/iHaiDeeZ/DolphinPS4/releases/latest)
+1. Grab **`DolphinPS4-v02.99.pkg`** from the [releases page](https://github.com/iHaiDeeZ/DolphinPS4/releases/latest)
    and install it with your package installer.
 2. Put your games in **`/data/DolphinPS4/games/`**. Accepted formats are `.rvz`, `.iso`,
    `.nkit.iso`, `.gcm`, `.gcz`, `.ciso`, `.wia` and `.wbfs`. Multi-disc games just need
@@ -134,6 +143,9 @@ PS4), an FTP connection to it, and backups of games you own.
 Any of these can be changed under **Settings → Controls**: highlight an input, press Cross, then
 press the button you'd like to use.
 
+**More players:** switch on another DualShock 4 and choose a PS4 user for it. Players 2 to 4 use
+the same layout on their own controller. The pause menu belongs to player 1.
+
 ## Settings at a glance
 
 | Group | Highlights |
@@ -182,6 +194,7 @@ Measured on a launch-model PS4, average frames per second while playing:
 | Super Mario Galaxy | Wii | 40–57 |
 | Wii Sports | Wii | ~40 |
 | Wii Sports Resort | Wii | ~37 |
+| Bully: Scholarship Edition | Wii | 15–30 (its normal rate is 30) |
 
 A range means the frame rate depends on what's on screen. Tested a game that isn't listed? Let
 us know how it runs in an [issue](https://github.com/iHaiDeeZ/DolphinPS4/issues).
@@ -214,13 +227,8 @@ Turn on *Settings → Diagnostics → All Diagnostics*, play until the problem s
 `dolphin.log` from `/data/DolphinPS4/`, plus `crash.log` or any `*-stacks*.txt` file if there is
 one, and mention the game, its region and the app version.
 
-## What's next
+## Good to know
 
-- **Local multiplayer** for up to four DualShock 4 controllers, including players joining in the
-  middle of a game. Today only the first controller plays.
-- A smarter automatic CPU clock that also watches the game's own frame rate.
-
-Also worth knowing:
 - Games built around Wii Remote pointing or motion are hard to play on a DualShock 4.
 - Save states belong to the version that made them, so an update may not load older ones.
   In-game saves are never affected.
