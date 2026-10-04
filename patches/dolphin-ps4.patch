@@ -3407,7 +3407,7 @@ index 8d84ed1..d1377b7 100644
  
  #ifdef _M_X86_64
 diff --git a/Source/Core/DolphinNoGUI/CMakeLists.txt b/Source/Core/DolphinNoGUI/CMakeLists.txt
-index 51c3fff..096a86c 100644
+index 51c3fff..33bbd30 100644
 --- a/Source/Core/DolphinNoGUI/CMakeLists.txt
 +++ b/Source/Core/DolphinNoGUI/CMakeLists.txt
 @@ -23,6 +23,28 @@ if(${CMAKE_SYSTEM_NAME} STREQUAL "Linux")
@@ -3419,7 +3419,7 @@ index 51c3fff..096a86c 100644
 +  # into the top-level project (CMAKE_PROJECT_dolphin-emu_INCLUDE).
 +  target_sources(dolphin-nogui PRIVATE PlatformPS4.cpp ${PS4_RUNTIME_SOURCES})
 +  # The XMB launcher: Dear ImGui drawn with Vulkan (PS4XMBDisplay.cpp) through Dolphin's loader.
-+  target_sources(dolphin-nogui PRIVATE PS4XMB.cpp PS4XMBDisplay.cpp
++  target_sources(dolphin-nogui PRIVATE PS4XMB.cpp PS4XMBDisplay.cpp PS4IngameMenu.cpp
 +    ${CMAKE_SOURCE_DIR}/Externals/imgui/imgui/backends/imgui_impl_vulkan.cpp)
 +  set_source_files_properties(
 +    ${CMAKE_SOURCE_DIR}/Externals/imgui/imgui/backends/imgui_impl_vulkan.cpp
@@ -3860,12 +3860,415 @@ index 3bf40ea..951591f 100644
    if (!BootManager::BootCore(Core::System::GetInstance(), std::move(boot), wsi))
    {
      fprintf(stderr, "Could not boot the specified file\n");
+diff --git a/Source/Core/DolphinNoGUI/PS4IngameMenu.cpp b/Source/Core/DolphinNoGUI/PS4IngameMenu.cpp
+new file mode 100755
+index 0000000..c974d63
+--- /dev/null
++++ b/Source/Core/DolphinNoGUI/PS4IngameMenu.cpp
+@@ -0,0 +1,367 @@
++// Copyright 2026 Dolphin Emulator Project
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++#include "DolphinNoGUI/PS4IngameMenu.h"
++
++#include <algorithm>
++#include <atomic>
++#include <chrono>
++#include <cmath>
++#include <cstdio>
++#include <mutex>
++#include <string>
++#include <vector>
++
++#include <imgui.h>
++#include <orbis/Pad.h>
++#include <orbis/SystemService.h>
++#include <orbis/libkernel.h>
++
++#include "Common/Config/Config.h"
++#include "Core/Config/GraphicsSettings.h"
++#include "Core/ConfigManager.h"
++#include "Core/Core.h"
++#include "Core/State.h"
++#include "Core/System.h"
++#include "VideoCommon/Fifo.h"
++#include "VideoCommon/VideoConfig.h"
++
++extern "C" void ps4_boot_trace(const char* line);  // port/ps4_crashlog.cpp
++extern "C" int ps4_pad_handle;                     // InputCommon/.../PS4Pad/PS4Pad.cpp
++extern "C" int ps4_pad_block;                      // InputCommon/.../PS4Pad/PS4Pad.cpp
++extern "C" int ps4_show_fps;                       // VideoCommon/Present.cpp
++namespace VideoCommon  // VideoCommon/OnScreenUI.cpp
++{
++extern void (*ps4_overlay_draw)();
++extern ImFont* ps4_overlay_font;
++extern ImFont* ps4_overlay_font_regular;
++}  // namespace VideoCommon
++namespace Fifo  // VideoCommon/Fifo.cpp
++{
++extern std::atomic<int> ps4_overlay_repaint;
++}  // namespace Fifo
++using Fifo::ps4_overlay_repaint;
++using VideoCommon::ps4_overlay_draw;
++using VideoCommon::ps4_overlay_font;
++using VideoCommon::ps4_overlay_font_regular;
++
++namespace PS4IngameMenu
++{
++namespace
++{
++using Clock = std::chrono::steady_clock;
++
++enum Item
++{
++  ITEM_RESUME,
++  ITEM_SLOT,
++  ITEM_SAVE,
++  ITEM_LOAD,
++  ITEM_ASPECT,
++  ITEM_FPS,
++  ITEM_QUIT,
++  ITEM_COUNT,
++};
++
++constexpr const char* ASPECT_NAMES[] = {"Auto", "16:9", "4:3", "Stretch"};
++constexpr AspectMode ASPECT_MODES[] = {AspectMode::Auto, AspectMode::ForceWide,
++                                       AspectMode::ForceStandard, AspectMode::Stretch};
++
++// Shared between the host thread (Poll) and the video thread (Draw).
++std::mutex s_mutex;
++bool s_open = false;
++int s_selected = 0;
++int s_slot = 1;
++std::string s_title;
++std::string s_toast;
++Clock::time_point s_toast_until;
++float s_appear = 0.0f;  // drawing animation (video thread)
++Clock::time_point s_last_draw;
++
++// Host thread only.
++uint32_t s_held = 0;
++float s_repeat = 0.0f;
++bool s_quit = false;
++Clock::time_point s_quit_time;
++
++void Log(const std::string& text)
++{
++  fprintf(stderr, "[menu] %s\n", text.c_str());
++  ps4_boot_trace(("menu: " + text).c_str());
++}
++
++int AspectIndex()
++{
++  const AspectMode mode = Config::Get(Config::GFX_ASPECT_RATIO);
++  for (int i = 0; i < 4; i++)
++  {
++    if (ASPECT_MODES[i] == mode)
++      return i;
++  }
++  return 0;
++}
++
++std::string Label(int item)
++{
++  switch (item)
++  {
++  case ITEM_RESUME:
++    return "Resume Game";
++  case ITEM_SLOT:
++    return "State Slot";
++  case ITEM_SAVE:
++    return "Save State";
++  case ITEM_LOAD:
++    return "Load State";
++  case ITEM_ASPECT:
++    return "Aspect Ratio";
++  case ITEM_FPS:
++    return "FPS Counter";
++  case ITEM_QUIT:
++    return "Quit Game";
++  }
++  return {};
++}
++
++std::string Value(int item)
++{
++  switch (item)
++  {
++  case ITEM_SLOT:
++    return "< " + std::to_string(s_slot) + " >";
++  case ITEM_ASPECT:
++    return std::string("< ") + ASPECT_NAMES[AspectIndex()] + " >";
++  case ITEM_FPS:
++    return ps4_show_fps ? "< On >" : "< Off >";
++  }
++  return {};
++}
++
++void Toast(const std::string& text)
++{
++  s_toast = text;
++  s_toast_until = Clock::now() + std::chrono::milliseconds(1800);
++}
++
++void Close(Core::System& system)
++{
++  s_open = false;
++  Core::SetState(system, Core::State::Running);
++  // The game keeps seeing a neutral pad until the menu's buttons are released.
++  ps4_pad_block = 1;
++}
++
++void Change(int item, int direction)
++{
++  switch (item)
++  {
++  case ITEM_SLOT:
++    s_slot = (s_slot - 1 + direction + 8) % 8 + 1;
++    break;
++  case ITEM_ASPECT:
++  {
++    const int index = (AspectIndex() + direction + 4) % 4;
++    Config::SetBase(Config::GFX_ASPECT_RATIO, ASPECT_MODES[index]);
++    break;
++  }
++  case ITEM_FPS:
++    ps4_show_fps = !ps4_show_fps;
++    break;
++  }
++}
++
++void Activate(Core::System& system, int item)
++{
++  switch (item)
++  {
++  case ITEM_RESUME:
++    Close(system);
++    break;
++  case ITEM_SAVE:
++    State::Save(system, static_cast<u32>(s_slot));
++    Toast("Saved to slot " + std::to_string(s_slot));
++    Log("saved state " + std::to_string(s_slot));
++    break;
++  case ITEM_LOAD:
++    State::Load(system, static_cast<u32>(s_slot));
++    Toast("Loaded slot " + std::to_string(s_slot));
++    Log("loaded state " + std::to_string(s_slot));
++    Close(system);
++    break;
++  case ITEM_SLOT:
++  case ITEM_ASPECT:
++  case ITEM_FPS:
++    Change(item, 1);
++    break;
++  case ITEM_QUIT:
++    // A clean stop writes the memory cards; the app then restarts into the XMB (PlatformPS4).
++    Log("quit to the XMB");
++    s_quit = true;
++    s_quit_time = Clock::now();
++    s_open = false;
++    Core::Stop(system);
++    break;
++  }
++}
++
++void Draw()
++{
++  std::lock_guard lock(s_mutex);
++  const auto now = Clock::now();
++  const float dt =
++      std::clamp(std::chrono::duration<float>(now - s_last_draw).count(), 0.0f, 0.1f);
++  s_last_draw = now;
++  s_appear += ((s_open ? 1.0f : 0.0f) - s_appear) * (1.0f - std::exp(-14.0f * dt));
++  const bool toast = now < s_toast_until;
++  if (s_appear < 0.01f && !toast)
++    return;
++
++  ImDrawList* dl = ImGui::GetForegroundDrawList();
++  const ImVec2 size = ImGui::GetIO().DisplaySize;
++  ImFont* bold = ps4_overlay_font ? ps4_overlay_font : ImGui::GetFont();
++  ImFont* regular = ps4_overlay_font_regular ? ps4_overlay_font_regular : bold;
++  const float s = size.y / 1080.0f;  // layout is in 1080p units
++  const float a = s_appear;
++
++  if (a > 0.01f)
++  {
++    dl->AddRectFilled(ImVec2(0, 0), size, IM_COL32(0, 0, 0, static_cast<int>(150 * a)));
++    // Left panel, sliding in.
++    const float panel_w = 720.0f * s;
++    const float x0 = -panel_w * (1.0f - a);
++    dl->AddRectFilledMultiColor(ImVec2(x0, 0), ImVec2(x0 + panel_w, size.y),
++                                IM_COL32(8, 20, 46, static_cast<int>(235 * a)),
++                                IM_COL32(8, 20, 46, static_cast<int>(120 * a)),
++                                IM_COL32(2, 6, 16, static_cast<int>(120 * a)),
++                                IM_COL32(2, 6, 16, static_cast<int>(235 * a)));
++    dl->AddLine(ImVec2(x0 + panel_w, 0), ImVec2(x0 + panel_w, size.y),
++                IM_COL32(91, 184, 255, static_cast<int>(200 * a)), 2.0f * s);
++    const ImU32 white = IM_COL32(255, 255, 255, static_cast<int>(255 * a));
++    const ImU32 dim = IM_COL32(255, 255, 255, static_cast<int>(170 * a));
++    dl->AddText(regular, 28 * s, ImVec2(x0 + 70 * s, 110 * s), dim, "PAUSED");
++    dl->AddText(bold, 40 * s, ImVec2(x0 + 70 * s, 145 * s), white, s_title.c_str(), nullptr,
++                panel_w - 120 * s);
++    float y = 300 * s;
++    for (int i = 0; i < ITEM_COUNT; i++, y += 78 * s)
++    {
++      const bool sel = i == s_selected;
++      if (sel)
++      {
++        dl->AddRectFilled(ImVec2(x0 + 40 * s, y - 10 * s), ImVec2(x0 + panel_w - 40 * s, y + 58 * s),
++                          IM_COL32(91, 184, 255, static_cast<int>(70 * a)), 12 * s);
++      }
++      dl->AddText(sel ? bold : regular, (sel ? 40 : 34) * s, ImVec2(x0 + 70 * s, y),
++                  sel ? white : dim, Label(i).c_str());
++      const std::string value = Value(i);
++      if (!value.empty())
++      {
++        const float tw = regular->CalcTextSizeA(32 * s, FLT_MAX, 0, value.c_str()).x;
++        dl->AddText(regular, 32 * s, ImVec2(x0 + panel_w - 80 * s - tw, y + 4 * s),
++                    sel ? white : dim, value.c_str());
++      }
++    }
++    dl->AddText(regular, 26 * s, ImVec2(x0 + 70 * s, size.y - 110 * s), dim,
++                "Cross: select   Circle / L3+R3: resume   Left/Right: change");
++  }
++  if (toast)
++  {
++    const float tw = bold->CalcTextSizeA(34 * s, FLT_MAX, 0, s_toast.c_str()).x;
++    const ImVec2 p(size.x - tw - 120 * s, size.y - 150 * s);
++    dl->AddRectFilled(ImVec2(p.x - 30 * s, p.y - 18 * s), ImVec2(p.x + tw + 30 * s, p.y + 58 * s),
++                      IM_COL32(8, 20, 46, 220), 14 * s);
++    dl->AddText(bold, 34 * s, p, IM_COL32(255, 255, 255, 255), s_toast.c_str());
++  }
++}
++}  // namespace
++
++void Install()
++{
++  ps4_overlay_draw = Draw;
++}
++
++bool ReturnToXMB()
++{
++  return s_quit;
++}
++
++void Poll(Core::System& system)
++{
++  if (s_quit)
++  {
++    // The clean stop normally ends the main loop quickly; don't wait forever on it.
++    if (Clock::now() - s_quit_time > std::chrono::seconds(6))
++    {
++      Log("stop took too long, restarting into the XMB");
++      sceSystemServiceLoadExec("/app0/eboot.bin", nullptr);
++    }
++    return;
++  }
++  if (ps4_pad_handle < 0)
++    return;
++  OrbisPadData data = {};
++  if (scePadReadState(ps4_pad_handle, &data) != 0 || !data.connected)
++    return;
++  const uint32_t held = data.buttons;
++  const uint32_t pressed = held & ~s_held;
++  s_held = held;
++  // Releasing every button ends the post-menu input block.
++  if (ps4_pad_block && !s_open && held == 0)
++    ps4_pad_block = 0;
++
++  constexpr uint32_t COMBO = ORBIS_PAD_BUTTON_L3 | ORBIS_PAD_BUTTON_R3;
++  std::lock_guard lock(s_mutex);
++  if (!s_open)
++  {
++    if ((held & COMBO) == COMBO && (pressed & COMBO) &&
++        Core::GetState(system) == Core::State::Running)
++    {
++      s_open = true;
++      s_selected = ITEM_RESUME;
++      s_title = SConfig::GetInstance().GetTitleName();
++      if (s_title.empty())
++        s_title = SConfig::GetInstance().GetGameID();
++      ps4_pad_block = 1;
++      Core::SetState(system, Core::State::Paused);
++      Log("opened");
++    }
++  }
++  else
++  {
++    // Directions repeat while held.
++    uint32_t nav = pressed;
++    constexpr uint32_t DIRS = ORBIS_PAD_BUTTON_UP | ORBIS_PAD_BUTTON_DOWN |
++                              ORBIS_PAD_BUTTON_LEFT | ORBIS_PAD_BUTTON_RIGHT;
++    if (held & DIRS)
++    {
++      s_repeat -= 1.0f / 60.0f;
++      if (s_repeat <= 0.0f)
++      {
++        nav |= held & DIRS;
++        s_repeat = 0.08f;
++      }
++      if (pressed & DIRS)
++        s_repeat = 0.35f;
++    }
++    if ((nav & ORBIS_PAD_BUTTON_UP) && s_selected > 0)
++      s_selected--;
++    if ((nav & ORBIS_PAD_BUTTON_DOWN) && s_selected < ITEM_COUNT - 1)
++      s_selected++;
++    if (nav & ORBIS_PAD_BUTTON_LEFT)
++      Change(s_selected, -1);
++    if (nav & ORBIS_PAD_BUTTON_RIGHT)
++      Change(s_selected, 1);
++    if (pressed & ORBIS_PAD_BUTTON_CROSS)
++      Activate(system, s_selected);
++    else if ((pressed & ORBIS_PAD_BUTTON_CIRCLE) ||
++             ((held & COMBO) == COMBO && (pressed & COMBO)))
++      Close(system);
++  }
++
++  // While the menu is open (or a toast is showing) the paused frame is redrawn with it.
++  if (s_open || s_appear > 0.01f || Clock::now() < s_toast_until)
++  {
++    ps4_overlay_repaint = 1;
++    system.GetFifo().PS4WakeGpu();
++  }
++}
++}  // namespace PS4IngameMenu
+diff --git a/Source/Core/DolphinNoGUI/PS4IngameMenu.h b/Source/Core/DolphinNoGUI/PS4IngameMenu.h
+new file mode 100755
+index 0000000..4af50c8
+--- /dev/null
++++ b/Source/Core/DolphinNoGUI/PS4IngameMenu.h
+@@ -0,0 +1,24 @@
++// Copyright 2026 Dolphin Emulator Project
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++// The PS4 in-game menu: L3+R3 pauses the game and shows an XMB-style overlay (resume, save and
++// load states, aspect ratio, FPS counter, quit to the XMB). Its logic runs on the host thread
++// (PlatformPS4's main loop); it is drawn by Dolphin's on-screen ImGui layer on the video thread,
++// which keeps redrawing the paused frame while the menu is open (VideoCommon/Fifo.cpp).
++
++#pragma once
++
++namespace Core
++{
++class System;
++}
++
++namespace PS4IngameMenu
++{
++// Called by PlatformPS4's main loop (~60 times a second).
++void Poll(Core::System& system);
++// Installs the overlay drawing hook (VideoCommon/OnScreenUI.cpp).
++void Install();
++// "Quit Game" was chosen: the app restarts into the XMB instead of closing.
++bool ReturnToXMB();
++}  // namespace PS4IngameMenu
 diff --git a/Source/Core/DolphinNoGUI/PS4XMB.cpp b/Source/Core/DolphinNoGUI/PS4XMB.cpp
 new file mode 100755
-index 0000000..dcc93e8
+index 0000000..cca2e02
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4XMB.cpp
-@@ -0,0 +1,1366 @@
+@@ -0,0 +1,1384 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -3910,10 +4313,19 @@ index 0000000..dcc93e8
 +constexpr float W = static_cast<float>(Display::WIDTH);
 +constexpr float H = static_cast<float>(Display::HEIGHT);
 +
++// The XMB's own log (/data/DolphinPS4/xmb.log): dolphin.log and the boot trace start over when
++// the app restarts into a game.
++FILE* s_log = nullptr;
++
 +void Log(const std::string& text)
 +{
 +  fprintf(stderr, "[xmb] %s\n", text.c_str());
 +  ps4_boot_trace(("xmb: " + text).c_str());
++  if (s_log)
++  {
++    fprintf(s_log, "%s\n", text.c_str());
++    fflush(s_log);
++  }
 +}
 +
 +std::string ReadFile(const std::string& path)
@@ -4022,14 +4434,19 @@ index 0000000..dcc93e8
 +public:
 +  void Start(int user)
 +  {
-+    sceAudioOutInit();
-+    m_port = sceAudioOutOpen(user, ORBIS_AUDIO_OUT_PORT_TYPE_MAIN, 0, FRAMES, 48000,
++    (void)user;
++    const int init = sceAudioOutInit();
++    // The system user (as Dolphin's PS4AudioStream): any user hears the main port.
++    m_port = sceAudioOutOpen(0xFF, ORBIS_AUDIO_OUT_PORT_TYPE_MAIN, 0, FRAMES, 48000,
 +                             ORBIS_AUDIO_OUT_PARAM_FORMAT_S16_STEREO);
++    char line[96];
++    snprintf(line, sizeof(line), "audio: init %#x, port %#x", static_cast<unsigned>(init),
++             static_cast<unsigned>(m_port));
++    Log(line);
 +    if (m_port < 0)
-+    {
-+      Log("sceAudioOutOpen failed");
 +      return;
-+    }
++    int32_t levels[2] = {32768, 32768};  // 0 dB on front left and right
++    sceAudioOutSetVolume(m_port, 0x3, levels);
 +    m_thread = std::thread([this] { Loop(); });
 +  }
 +  void Stop()
@@ -4448,7 +4865,10 @@ index 0000000..dcc93e8
 +      sound = LoadWav(m_assets_dir + "/xmb/sounds/" + name + ".wav");
 +    if (sound)
 +      m_sounds[name] = std::move(sound);
++    else
++      Log(std::string("sound not loaded: ") + name);
 +  }
++  Log("sounds loaded: " + std::to_string(m_sounds.size()));
 +
 +  const std::string resources = m_assets_dir + "/Sys/Resources/";
 +  m_icon_gc = LoadPngTexture(resources + "Platform_Gamecube@4x.png");
@@ -5160,6 +5580,7 @@ index 0000000..dcc93e8
 +
 +std::string Menu::Run()
 +{
++  s_log = fopen((m_data_dir + "/xmb.log").c_str(), "w");
 +  int user = 0;
 +  sceUserServiceInitialize(nullptr);
 +  sceUserServiceGetInitialUser(&user);
@@ -5914,10 +6335,10 @@ index f4dc8a9..4e5ff67 100644
  
 diff --git a/Source/Core/DolphinNoGUI/PlatformPS4.cpp b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
 new file mode 100644
-index 0000000..35e6ccb
+index 0000000..7f4988a
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
-@@ -0,0 +1,953 @@
+@@ -0,0 +1,959 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -5951,6 +6372,7 @@ index 0000000..35e6ccb
 +#include <fmt/format.h>
 +
 +#include "Common/Config/Config.h"
++#include "DolphinNoGUI/PS4IngameMenu.h"
 +#include "DolphinNoGUI/PS4XMB.h"
 +#include "DiscIO/Volume.h"
 +#include "DiscIO/VolumeDisc.h"
@@ -6195,6 +6617,7 @@ index 0000000..35e6ccb
 +void PlatformPS4::MainLoop()
 +{
 +  BootTrace("main loop");
++  PS4IngameMenu::Install();
 +  int frame = 0;
 +  const auto start = std::chrono::steady_clock::now();
 +  // Hang watchdog: if emulated time stops advancing for ~10 s while running, every Dolphin
@@ -6205,6 +6628,7 @@ index 0000000..35e6ccb
 +  {
 +    UpdateRunningFlag();
 +    Core::HostDispatchJobs(Core::System::GetInstance());
++    PS4IngameMenu::Poll(Core::System::GetInstance());
 +    std::this_thread::sleep_for(std::chrono::milliseconds(16));
 +    // Keeps the FPS average fresh for the on-screen counter (VideoCommon/Present.cpp).
 +    if (frame % 30 == 29)
@@ -6733,8 +7157,11 @@ index 0000000..35e6ccb
 +
 +void OnExit()
 +{
-+  // The raw exit syscall isn't allowed for apps: ask the system to close us.
++  // The raw exit syscall isn't allowed for apps: ask the system to close us, or restart into the
++  // XMB when the in-game menu's "Quit Game" stopped the emulation.
 +  fflush(stderr);
++  if (PS4IngameMenu::ReturnToXMB())
++    sceSystemServiceLoadExec("/app0/eboot.bin", nullptr);
 +  sceSystemServiceLoadExec("exit", nullptr);
 +  for (;;)
 +    sceKernelUsleep(100000);
@@ -6950,10 +7377,10 @@ index 8f7f4ba..34feb8e 100644
  {
 diff --git a/Source/Core/InputCommon/ControllerInterface/PS4Pad/PS4Pad.cpp b/Source/Core/InputCommon/ControllerInterface/PS4Pad/PS4Pad.cpp
 new file mode 100644
-index 0000000..2ae5384
+index 0000000..d2d6534
 --- /dev/null
 +++ b/Source/Core/InputCommon/ControllerInterface/PS4Pad/PS4Pad.cpp
-@@ -0,0 +1,218 @@
+@@ -0,0 +1,227 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -6969,6 +7396,13 @@ index 0000000..2ae5384
 +#include "Common/CommonTypes.h"
 +#include "Common/Logging/Log.h"
 +#include "InputCommon/ControllerInterface/ControllerInterface.h"
++
++// The in-game menu (DolphinNoGUI/PS4IngameMenu.cpp) reads the first DualShock 4 itself; while
++// it is open, and until its buttons are released, the game sees a neutral pad.
++extern "C" int ps4_pad_handle;
++int ps4_pad_handle = -1;
++extern "C" int ps4_pad_block;
++int ps4_pad_block = 0;
 +
 +namespace ciface::PS4Pad
 +{
@@ -7086,7 +7520,7 @@ index 0000000..2ae5384
 +  {
 +    OrbisPadData data;
 +    std::memset(&data, 0, sizeof(data));
-+    if (scePadReadState(m_handle, &data) == 0 && data.connected)
++    if (!ps4_pad_block && scePadReadState(m_handle, &data) == 0 && data.connected)
 +    {
 +      m_state = data;
 +      m_buttons = data.buttons;
@@ -7162,6 +7596,8 @@ index 0000000..2ae5384
 +      }
 +      INFO_LOG_FMT(CONTROLLERINTERFACE, "DualShock 4 of user {:#x} opened (handle {})",
 +                   static_cast<u32>(user), handle);
++      if (ps4_pad_handle < 0)
++        ps4_pad_handle = handle;
 +      GetControllerInterface().AddDevice(std::make_shared<Device>(user, handle));
 +    }
 +  }
@@ -11483,7 +11919,7 @@ index 976592c..a20137f 100644
    void UpdateInterruptsFromVideoBackend(u64 userdata);
  
 diff --git a/Source/Core/VideoCommon/Fifo.cpp b/Source/Core/VideoCommon/Fifo.cpp
-index f183c93..c34a2d4 100644
+index f183c93..cfb64e4 100644
 --- a/Source/Core/VideoCommon/Fifo.cpp
 +++ b/Source/Core/VideoCommon/Fifo.cpp
 @@ -2,6 +2,7 @@
@@ -11494,7 +11930,15 @@ index f183c93..c34a2d4 100644
  
  #include <atomic>
  #include <cstring>
-@@ -230,8 +231,24 @@ void FifoManager::ReadDataFromFifo(u32 read_ptr)
+@@ -28,6 +29,7 @@
+ #include "VideoCommon/DataReader.h"
+ #include "VideoCommon/FramebufferManager.h"
+ #include "VideoCommon/OpcodeDecoding.h"
++#include "VideoCommon/Present.h"
+ #include "VideoCommon/VertexLoaderManager.h"
+ #include "VideoCommon/VertexManagerBase.h"
+ #include "VideoCommon/VideoBackendBase.h"
+@@ -230,8 +232,24 @@ void FifoManager::ReadDataFromFifo(u32 read_ptr)
    }
    // Copy new video instructions to m_video_buffer for future use in rendering the new picture
    auto& memory = m_system.GetMemory();
@@ -11520,7 +11964,7 @@ index f183c93..c34a2d4 100644
  }
  
  // The deterministic_gpu_thread version.
-@@ -283,10 +300,34 @@ void FifoManager::ResetVideoBuffer()
+@@ -283,16 +301,52 @@ void FifoManager::ResetVideoBuffer()
  
  // Description: Main FIFO update loop
  // Purpose: Keep the Core HW updated about the CPU-GPU distance
@@ -11541,6 +11985,12 @@ index f183c93..c34a2d4 100644
 +{
 +#endif
 +
++#ifdef __ORBIS__
++// Set by the PS4 in-game menu (DolphinNoGUI/PS4IngameMenu.cpp) while the game is paused: the
++// video thread presents the last frame again, with the menu drawn over it.
++std::atomic<int> ps4_overlay_repaint{0};
++#endif
++
  void FifoManager::RunGpuLoop()
  {
    m_gpu_mainloop.Run(
@@ -11555,7 +12005,19 @@ index f183c93..c34a2d4 100644
          // Run events from the CPU thread.
          AsyncRequests::GetInstance()->PullEvents();
  
-@@ -302,6 +343,7 @@ void FifoManager::RunGpuLoop()
+         // Do nothing while paused
+         if (!m_emu_running_state.IsSet())
++        {
++#ifdef __ORBIS__
++          if (ps4_overlay_repaint.exchange(0) && g_presenter)
++            g_presenter->Present(nullptr);
++#endif
+           return;
++        }
+ 
+         if (m_use_deterministic_gpu_thread)
+         {
+@@ -302,6 +356,7 @@ void FifoManager::RunGpuLoop()
            // See comment in SyncGPU
            if (write_ptr > seen_ptr)
            {
@@ -11563,7 +12025,7 @@ index f183c93..c34a2d4 100644
              m_video_buffer_read_ptr =
                  OpcodeDecoder::RunFifo(DataReader(m_video_buffer_read_ptr, write_ptr), nullptr);
              m_video_buffer_seen_ptr = write_ptr;
-@@ -324,27 +366,56 @@ void FifoManager::RunGpuLoop()
+@@ -324,27 +379,56 @@ void FifoManager::RunGpuLoop()
  
              u32 cyclesExecuted = 0;
              u32 readPtr = fifo.CPReadPointer.load(std::memory_order_relaxed);
@@ -11629,7 +12091,7 @@ index f183c93..c34a2d4 100644
              if ((write_ptr - m_video_buffer_read_ptr) == 0)
              {
                fifo.SafeCPReadPointer.store(fifo.CPReadPointer.load(std::memory_order_relaxed),
-@@ -393,7 +464,16 @@ void FifoManager::FlushGpu()
+@@ -393,7 +477,16 @@ void FifoManager::FlushGpu()
    if (!m_system.IsDualCoreMode() || m_use_deterministic_gpu_thread)
      return;
  
@@ -11646,7 +12108,7 @@ index f183c93..c34a2d4 100644
  }
  
  void FifoManager::GpuMaySleep()
-@@ -551,7 +631,10 @@ int FifoManager::WaitForGpuThread(int ticks)
+@@ -551,7 +644,10 @@ int FifoManager::WaitForGpuThread(int ticks)
  
    // Wait for GPU
    if (now >= m_config_sync_gpu_max_distance)
@@ -11657,6 +12119,21 @@ index f183c93..c34a2d4 100644
  
    return GPU_TIME_SLOT_SIZE;
  }
+diff --git a/Source/Core/VideoCommon/Fifo.h b/Source/Core/VideoCommon/Fifo.h
+index 2afa110..2ef4071 100644
+--- a/Source/Core/VideoCommon/Fifo.h
++++ b/Source/Core/VideoCommon/Fifo.h
+@@ -64,6 +64,10 @@ public:
+   // In single core mode, this runs the GPU for a single slice.
+   // In dual core mode, this synchronizes with the GPU thread.
+   void SyncGPUForRegisterAccess();
++#ifdef __ORBIS__
++  // The PS4 in-game menu redraws the paused frame (ps4_overlay_repaint, RunGpuLoop).
++  void PS4WakeGpu() { m_gpu_mainloop.Wakeup(); }
++#endif
+ 
+   void PushFifoAuxBuffer(const void* ptr, size_t size);
+   void* PopFifoAuxBuffer(size_t size);
 diff --git a/Source/Core/VideoCommon/FramebufferManager.cpp b/Source/Core/VideoCommon/FramebufferManager.cpp
 index 6277598..f1455dc 100644
 --- a/Source/Core/VideoCommon/FramebufferManager.cpp
@@ -11753,6 +12230,51 @@ index 3c57ea7..aa515f1 100644
  
    using PrimitiveFunction = u16* (*)(u16*, u32, u32);
    Common::EnumMap<PrimitiveFunction, OpcodeDecoder::Primitive::GX_DRAW_POINTS> m_primitive_table{};
+diff --git a/Source/Core/VideoCommon/OnScreenUI.cpp b/Source/Core/VideoCommon/OnScreenUI.cpp
+index 209e96c..9266380 100644
+--- a/Source/Core/VideoCommon/OnScreenUI.cpp
++++ b/Source/Core/VideoCommon/OnScreenUI.cpp
+@@ -39,6 +39,14 @@
+ 
+ namespace VideoCommon
+ {
++#ifdef __ORBIS__
++// The PS4 in-game menu (DolphinNoGUI/PS4IngameMenu.cpp): drawn into every ImGui frame, with the
++// XMB's fonts (added to the OSD atlas here).
++void (*ps4_overlay_draw)() = nullptr;
++ImFont* ps4_overlay_font = nullptr;
++ImFont* ps4_overlay_font_regular = nullptr;
++#endif
++
+ bool OnScreenUI::Initialize(u32 width, u32 height, float scale)
+ {
+   std::unique_lock<std::mutex> imgui_lock(m_imgui_mutex);
+@@ -95,6 +103,14 @@ bool OnScreenUI::Initialize(u32 width, u32 height, float scale)
+     io.Fonts->Clear();
+     io.Fonts->AddFontFromFileTTF(file.c_str());
+   }
++#ifdef __ORBIS__
++  if (File::Exists("/app0/xmb/fonts/Nunito-ExtraBold.ttf"))
++  {
++    ps4_overlay_font = io.Fonts->AddFontFromFileTTF("/app0/xmb/fonts/Nunito-ExtraBold.ttf", 32.0f);
++    ps4_overlay_font_regular =
++        io.Fonts->AddFontFromFileTTF("/app0/xmb/fonts/Nunito-Regular.ttf", 32.0f);
++  }
++#endif
+ 
+   // Setup new font management behavior
+   io.BackendFlags |= ImGuiBackendFlags_RendererHasTextures | ImGuiBackendFlags_RendererHasVtxOffset;
+@@ -422,6 +438,10 @@ void OnScreenUI::Finalize()
+   DrawDebugText();
+   OSD::DrawMessages();
+   DrawChallengesAndLeaderboards();
++#ifdef __ORBIS__
++  if (ps4_overlay_draw)
++    ps4_overlay_draw();
++#endif
+   ImGui::Render();
+ 
+   // Check for font changes
 diff --git a/Source/Core/VideoCommon/PS4Profile.h b/Source/Core/VideoCommon/PS4Profile.h
 new file mode 100644
 index 0000000..e39e130
