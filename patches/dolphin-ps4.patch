@@ -3448,7 +3448,7 @@ index 51c3fff..33bbd30 100644
 +  ps4_add_eboot(dolphin-nogui)
 +endif()
 diff --git a/Source/Core/DolphinNoGUI/MainNoGUI.cpp b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
-index 3bf40ea..951591f 100644
+index 3bf40ea..a8e02bd 100644
 --- a/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 +++ b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 @@ -5,7 +5,9 @@
@@ -3565,11 +3565,14 @@ index 3bf40ea..951591f 100644
  #endif
        });
  
-@@ -270,7 +330,271 @@ int main(const int argc, char* argv[])
+@@ -270,7 +330,275 @@ int main(const int argc, char* argv[])
  
    UICommon::SetUserDirectory(user_directory);
    UICommon::Init();
 +#ifdef __ORBIS__
++  // Dolphin's user folders (StateSaves, ...): the Qt frontend creates them, NoGUI didn't, and
++  // every save state failed writing into the missing User/StateSaves.
++  UICommon::CreateDirectories();
 +  // Everything to the console listener, which goes to /data/DolphinPS4/dolphin.log.
 +  {
 +    auto* log_manager = Common::Log::LogManager::GetInstance();
@@ -3580,10 +3583,11 @@ index 3bf40ea..951591f 100644
 +    for (int i = 0; i < static_cast<int>(Common::Log::LogType::NUMBER_OF_LOGS); i++)
 +      log_manager->SetEnable(static_cast<Common::Log::LogType>(i), true);
 +  }
-+  // Straight into the game: no IPL, no on-screen messages or overlays, no background shader
-+  // compiler threads (they need shared GL contexts, which Piglet can't create).
++  // Straight into the game: no IPL, no overlays, no background shader compiler threads (they
++  // need shared GL contexts, which Piglet can't create). Dolphin's on-screen messages ("Saved
++  // State to ...") are shown: the Vulkan backend has its on-screen layer (the in-game menu).
 +  Config::SetBase(Config::MAIN_SKIP_IPL, true);
-+  Config::SetBase(Config::MAIN_OSD_MESSAGES, false);
++  Config::SetBase(Config::MAIN_OSD_MESSAGES, true);
 +  Config::SetBase(Config::MAIN_SHOW_ACTIVE_TITLE, false);
 +  Config::SetBase(Config::GFX_SHOW_FPS, false);
 +  Config::SetBase(Config::GFX_SHADER_COMPILER_THREADS, 0);
@@ -3837,7 +3841,7 @@ index 3bf40ea..951591f 100644
  
    Common::ScopeGuard ui_common_guard([] {
      UICommon::ShutdownControllers();
-@@ -284,6 +608,12 @@ int main(const int argc, char* argv[])
+@@ -284,6 +612,12 @@ int main(const int argc, char* argv[])
    }
  
    auto core_state_changed_hook = Core::AddOnStateChangedCallback([](const Core::State state) {
@@ -3850,7 +3854,7 @@ index 3bf40ea..951591f 100644
      if (state == Core::State::Uninitialized)
        s_platform->Stop();
    });
-@@ -303,6 +633,9 @@ int main(const int argc, char* argv[])
+@@ -303,6 +637,9 @@ int main(const int argc, char* argv[])
  
    DolphinAnalytics::Instance().ReportDolphinStart("nogui");
  
@@ -6461,10 +6465,10 @@ index f4dc8a9..4e5ff67 100644
  
 diff --git a/Source/Core/DolphinNoGUI/PlatformPS4.cpp b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
 new file mode 100644
-index 0000000..7f4988a
+index 0000000..87248d7
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
-@@ -0,0 +1,959 @@
+@@ -0,0 +1,964 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -7320,7 +7324,12 @@ index 0000000..7f4988a
 +  // stdout/stderr go nowhere on PS4: send them to a file, unbuffered so it survives a crash.
 +  // (Not freopen: the OpenOrbis libc's freopen frees the static stderr FILE and output is lost.)
 +  const int log_fd =
-+      open((std::string(PS4_DATA_DIR_PATH) + "/dolphin.log").c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0666);
++      open((std::string(PS4_DATA_DIR_PATH) +
++            (access((std::string(PS4_DATA_DIR_PATH) + "/launch.txt").c_str(), F_OK) == 0 ?
++                 "/dolphin.log" :      // starting a game (launch.txt from the XMB)
++                 "/xmb-stderr.log"))  // the XMB: keeps the last game's log
++               .c_str(),
++           O_WRONLY | O_CREAT | O_TRUNC, 0666);
 +  if (log_fd >= 0)
 +  {
 +    dup2(log_fd, STDOUT_FILENO);

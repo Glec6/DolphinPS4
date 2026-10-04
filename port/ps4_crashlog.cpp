@@ -44,7 +44,12 @@ int g_traceFd = -1;
 int traceFd() {
     if (g_traceFd < 0) {
         mkdir("/data/DolphinPS4", 0777);
-        g_traceFd = open("/data/DolphinPS4/boot-trace.log", O_WRONLY | O_CREAT | O_TRUNC, 0666);
+        // A game start (launch.txt from the XMB) writes boot-trace.log; the XMB writes
+        // xmb-trace.log, so restarting into the XMB keeps the last game's trace.
+        struct stat st;
+        const bool game = stat("/data/DolphinPS4/launch.txt", &st) == 0;
+        g_traceFd = open(game ? "/data/DolphinPS4/boot-trace.log" : "/data/DolphinPS4/xmb-trace.log",
+                         O_WRONLY | O_CREAT | O_TRUNC, 0666);
     }
     return g_traceFd;
 }
