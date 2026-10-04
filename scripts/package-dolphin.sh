@@ -23,6 +23,8 @@ cp -r "$SRC/Data/Sys" "$STAGE/Sys"
 rm -rf "$STAGE/Sys/Themes" "$STAGE/Sys/Load"
 # The XMB launcher's fonts and sounds (DolphinNoGUI/PS4XMB.cpp reads /app0/xmb).
 cp -r "$HERE/../xmb" "$STAGE/xmb"
+# The app version, for the logs and the XMB's About (PlatformPS4.cpp AppVersion).
+echo "$VERSION" > "$STAGE/xmb/version.txt"
 # Vulkan (RADV on GNM) runs under the plain homebrew identity (4.5 GiB of direct memory);
 # SFO_STYLE=retroarch + PS4_PAID 0x3100000000000002 for the OpenGL (Piglet) backend.
 PKG="$(SFO_STYLE="${SFO_STYLE:-plain}" "$HERE/make-pkg.sh" "$STAGE" DLPH00010 "Dolphin" "$VERSION" DOLPHIN "$PS4_BUILD_ROOT/out" | tail -1)"

@@ -3422,6 +3422,71 @@ index 8d84ed1..d1377b7 100644
  };
  
  #ifdef _M_X86_64
+diff --git a/Source/Core/Core/State.cpp b/Source/Core/Core/State.cpp
+index 2dcd2ca..f6a75df 100644
+--- a/Source/Core/Core/State.cpp
++++ b/Source/Core/Core/State.cpp
+@@ -54,6 +54,13 @@
+ #include "VideoCommon/OnScreenDisplay.h"
+ #include "VideoCommon/VideoBackendBase.h"
+ 
++#ifdef __ORBIS__
++// PS4 in-game menu (DolphinNoGUI/PS4IngameMenu.cpp): saves in progress. A save needs a buffer as
++// big as the state (~140 MB in Resident Evil 4) until it is written; two at once ran the heap
++// out of memory and crashed, so the menu starts one at a time.
++std::atomic<int> ps4_state_busy{0};
++#endif
++
+ namespace State
+ {
+ #if defined(__LZO_STRICT_16BIT)
+@@ -391,6 +398,16 @@ static void WriteHeadersToFile(size_t uncompressed_size, File::IOFile& f)
+ 
+ static void CompressAndDumpState(Core::System& system, const CompressAndDumpStateArgs& save_args)
+ {
++#ifdef __ORBIS__
++  struct BusyGuard
++  {
++    ~BusyGuard()
++    {
++      if (ps4_state_busy > 0)
++        ps4_state_busy--;
++    }
++  } busy_guard;
++#endif
+   const auto& buffer = save_args.buffer;
+   const std::string& filename = save_args.filename;
+ 
+@@ -493,11 +510,18 @@ static void SaveAsFromCore(Core::System& system, std::string filename)
+   else
+   {
+     Core::DisplayMessage("Unable to save: Internal DoState Error", 4000);
++#ifdef __ORBIS__
++    if (ps4_state_busy > 0)
++      ps4_state_busy--;
++#endif
+   }
+ }
+ 
+ void SaveAs(Core::System& system, std::string filename)
+ {
++#ifdef __ORBIS__
++  ps4_state_busy++;
++#endif
+   Core::RunOnCPUThread(
+       system, [&system, filename = std::move(filename), lock = GetStateSaveTaskLock()]() mutable {
+         SaveAsFromCore(system, std::move(filename));
+@@ -816,7 +840,10 @@ static void LoadAsFromCore(Core::System& system, std::string filename)
+   auto& movie = system.GetMovie();
+   if (!movie.IsJustStartingRecordingInputFromSaveState())
+   {
++#ifndef __ORBIS__
++    // PS4: no undo buffer - another copy of the whole state (~140 MB) kept for good.
+     SaveToBuffer(system, s_undo_load_buffer);
++#endif
+     const std::string dtmpath = File::GetUserPath(D_STATESAVES_IDX) + "undo.dtm";
+     if (movie.IsMovieActive())
+       movie.SaveRecording(dtmpath);
 diff --git a/Source/Core/DolphinNoGUI/CMakeLists.txt b/Source/Core/DolphinNoGUI/CMakeLists.txt
 index 51c3fff..c9f6895 100644
 --- a/Source/Core/DolphinNoGUI/CMakeLists.txt
@@ -3904,10 +3969,10 @@ index 3bf40ea..4c32cd5 100644
      fprintf(stderr, "Could not boot the specified file\n");
 diff --git a/Source/Core/DolphinNoGUI/PS4IngameMenu.cpp b/Source/Core/DolphinNoGUI/PS4IngameMenu.cpp
 new file mode 100755
-index 0000000..c62762e
+index 0000000..f6d0d17
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4IngameMenu.cpp
-@@ -0,0 +1,643 @@
+@@ -0,0 +1,690 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -3953,6 +4018,7 @@ index 0000000..c62762e
 +using VideoCommon::ps4_overlay_draw;
 +using VideoCommon::ps4_overlay_font;
 +using VideoCommon::ps4_overlay_font_regular;
++extern std::atomic<int> ps4_state_busy;  // Core/State.cpp
 +
 +namespace PS4IngameMenu
 +{
@@ -4020,6 +4086,7 @@ index 0000000..c62762e
 +float s_repeat = 0.0f;
 +bool s_quit = false;
 +Clock::time_point s_quit_time;
++int s_saving_slot = 0;  // a save to this slot is being written
 +
 +// Watchdog (menu-hang.txt).
 +std::atomic<unsigned> s_draws{0};
@@ -4075,6 +4142,10 @@ index 0000000..c62762e
 +        keys.push_back(setting.key);
 +      }
 +    }
++    rows.push_back({"", "", true});
++    keys.push_back("");
++    rows.push_back({custom ? "Reset This Game" : "Reset to Defaults", ""});
++    keys.push_back("__reset__");
 +    selected = s_settings_selected;
 +    subtitle = custom ? "SETTINGS - THIS GAME" : "SETTINGS - ALL GAMES";
 +    hints = {{Glyph::LeftRight, "Change"}, {Glyph::UpDown, "Move"}, {Glyph::Circle, "Back"}};
@@ -4151,6 +4222,30 @@ index 0000000..c62762e
 +    return;
 +  }
 +  const std::string key = s_row_keys[row];
++  if (key == "__reset__")
++  {
++    // This game: back to the global settings. All games: back to ps4.ini's tuned defaults.
++    if (direction <= 0)
++      return;  // Cross or Right only
++    const bool custom = Custom();
++    if (custom)
++    {
++      PS4Settings::ResetGame(s_game_id);
++    }
++    else
++    {
++      for (const PS4Settings::Setting& setting : PS4Settings::All())
++        PS4Settings::ResetGlobal(setting.key);
++    }
++    for (const PS4Settings::Setting& setting : PS4Settings::All())
++    {
++      if (setting.live)
++        PS4Settings::ApplyLive(setting.key, PS4Settings::Get(setting.key, s_game_id));
++    }
++    Toast(custom ? "This game uses the global settings again" : "Settings reset to defaults");
++    Log(custom ? "settings: reset " + s_game_id : "settings: reset global");
++    return;
++  }
 +  const PS4Settings::Setting* setting = PS4Settings::Find(key);
 +  if (!setting)
 +    return;
@@ -4193,11 +4288,22 @@ index 0000000..c62762e
 +    Close(system);
 +    break;
 +  case MAIN_SAVE:
++    if (ps4_state_busy > 0)
++    {
++      Toast("Still saving, please wait...");
++      break;
++    }
 +    Log("saving state " + std::to_string(s_slot));
++    s_saving_slot = s_slot;
 +    State::Save(system, static_cast<u32>(s_slot));
-+    Log("save requested " + std::to_string(s_slot));
++    Toast("Saving to slot " + std::to_string(s_slot) + "...");
 +    break;
 +  case MAIN_LOAD:
++    if (ps4_state_busy > 0)
++    {
++      Toast("Still saving, please wait...");
++      break;
++    }
 +    Log("loading state " + std::to_string(s_slot));
 +    State::Load(system, static_cast<u32>(s_slot));
 +    Log("load requested " + std::to_string(s_slot));
@@ -4430,6 +4536,12 @@ index 0000000..c62762e
 +void Poll(Core::System& system)
 +{
 +  s_polls++;
++  if (s_saving_slot != 0 && ps4_state_busy == 0)
++  {
++    Toast("Saved to slot " + std::to_string(s_saving_slot));
++    Log("saved state " + std::to_string(s_saving_slot));
++    s_saving_slot = 0;
++  }
 +  if (s_quit)
 +  {
 +    // The clean stop normally ends the main loop quickly; don't wait forever on it.
@@ -4583,10 +4695,10 @@ index 0000000..4af50c8
 +}  // namespace PS4IngameMenu
 diff --git a/Source/Core/DolphinNoGUI/PS4Settings.cpp b/Source/Core/DolphinNoGUI/PS4Settings.cpp
 new file mode 100755
-index 0000000..aba170f
+index 0000000..08f7a6f
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4Settings.cpp
-@@ -0,0 +1,394 @@
+@@ -0,0 +1,423 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -4875,6 +4987,35 @@ index 0000000..aba170f
 +  Save();
 +}
 +
++void ResetGlobal(const std::string& key)
++{
++  {
++    std::lock_guard lock(s_mutex);
++    auto global = s_sections.find("global");
++    if (global != s_sections.end())
++      global->second.erase(key);
++  }
++  Save();
++}
++
++void ResetGame(const std::string& game_id)
++{
++  {
++    std::lock_guard lock(s_mutex);
++    s_sections.erase(game_id);
++  }
++  Save();
++}
++
++void ResetAll()
++{
++  {
++    std::lock_guard lock(s_mutex);
++    s_sections.clear();
++  }
++  Save();
++}
++
 +std::string LabelOf(const Setting& setting, const std::string& value)
 +{
 +  for (const Choice& choice : setting.choices)
@@ -4983,10 +5124,10 @@ index 0000000..aba170f
 +}  // namespace PS4Settings
 diff --git a/Source/Core/DolphinNoGUI/PS4Settings.h b/Source/Core/DolphinNoGUI/PS4Settings.h
 new file mode 100755
-index 0000000..e3e4d83
+index 0000000..42ebba7
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4Settings.h
-@@ -0,0 +1,66 @@
+@@ -0,0 +1,72 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -5045,6 +5186,12 @@ index 0000000..e3e4d83
 +// Custom on: the game starts with a copy of the effective global values.
 +void SetCustom(const std::string& game_id, bool custom);
 +
++// Back to the defaults (ps4.ini's tuned values): one global setting, a game (it follows the
++// global settings again), or everything.
++void ResetGlobal(const std::string& key);
++void ResetGame(const std::string& game_id);
++void ResetAll();
++
 +// Label of a value for display ("16:9" for "wide").
 +std::string LabelOf(const Setting& setting, const std::string& value);
 +// Next / previous choice (wrapping).
@@ -5055,10 +5202,10 @@ index 0000000..e3e4d83
 +}  // namespace PS4Settings
 diff --git a/Source/Core/DolphinNoGUI/PS4XMB.cpp b/Source/Core/DolphinNoGUI/PS4XMB.cpp
 new file mode 100755
-index 0000000..201465c
+index 0000000..21b6adf
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4XMB.cpp
-@@ -0,0 +1,1580 @@
+@@ -0,0 +1,1613 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -5500,6 +5647,7 @@ index 0000000..201465c
 +  SET_VOLUME,
 +  SET_CLOCK,
 +  SET_ABOUT,
++  SET_RESET_ALL,
 +  SET_GROUP = 100,  // + index into PS4Settings::Categories(): an emulation settings list
 +};
 +
@@ -5785,6 +5933,8 @@ index 0000000..201465c
 +  settings.push_back({"Sound Effects", m_prefs.sounds ? "On" : "Off", -1, -1, SET_SOUNDS});
 +  settings.push_back({"Volume", std::to_string(m_prefs.volume), -1, -1, SET_VOLUME});
 +  settings.push_back({"Clock", m_prefs.clock ? "On" : "Off", -1, -1, SET_CLOCK});
++  settings.push_back({"Reset All Settings", "Every setting back to the defaults", -1, -1,
++                      SET_RESET_ALL});
 +  settings.push_back({"About", "", -1, -1, SET_ABOUT});
 +
 +  auto& games = m_items[static_cast<int>(Category::Games)];
@@ -5835,6 +5985,11 @@ index 0000000..201465c
 +    m_panel.title = "Clock";
 +    m_panel.options = {"On", "Off"};
 +    m_panel.selected = m_prefs.clock ? 0 : 1;
++    break;
++  case SET_RESET_ALL:
++    m_panel.title = "Reset All Settings";
++    m_panel.options = {"Cancel", "Reset everything"};
++    m_panel.lines = {"", "All games, global and per game,", "go back to the default settings."};
 +    break;
 +  case SET_ABOUT:
 +    m_panel.title = "About";
@@ -5899,6 +6054,8 @@ index 0000000..201465c
 +                      setting.key, false, false, !setting.live});
 +    }
 +  }
++  rows.push_back({"", "", "", true});
++  rows.push_back({game.empty() ? "Reset to Defaults" : "Reset This Game", "", "__reset__"});
 +  m_panel.rows = std::move(rows);
 +}
 +
@@ -5923,6 +6080,25 @@ index 0000000..201465c
 +  if (row.scope)
 +  {
 +    PS4Settings::SetCustom(game, !PS4Settings::IsCustom(game));
++  }
++  else if (row.key == "__reset__")
++  {
++    // A game: it follows the global settings again. A category: its global values go back to
++    // ps4.ini's tuned defaults.
++    if (direction <= 0)
++      return;
++    if (!game.empty())
++    {
++      PS4Settings::ResetGame(game);
++    }
++    else
++    {
++      for (const PS4Settings::Setting& setting : PS4Settings::All())
++      {
++        if (m_panel.category == setting.category)
++          PS4Settings::ResetGlobal(setting.key);
++      }
++    }
 +  }
 +  else if (!row.key.empty())
 +  {
@@ -5951,6 +6127,10 @@ index 0000000..201465c
 +  case SET_CLOCK:
 +    m_prefs.clock = option == 0;
 +    break;
++  case SET_RESET_ALL:
++    if (option == 1)
++      PS4Settings::ResetAll();
++    return;
 +  default:
 +    return;
 +  }
@@ -7321,10 +7501,10 @@ index f4dc8a9..4e5ff67 100644
  
 diff --git a/Source/Core/DolphinNoGUI/PlatformPS4.cpp b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
 new file mode 100644
-index 0000000..6206288
+index 0000000..bf745d9
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
-@@ -0,0 +1,1027 @@
+@@ -0,0 +1,1038 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -7411,6 +7591,17 @@ index 0000000..6206288
 +// The app version (APP_VER of /app0/sce_sys/param.sfo), for the logs and the XMB's About.
 +std::string AppVersion()
 +{
++  // Written by scripts/package-dolphin.sh (param.sfo may not be readable from the sandbox).
++  {
++    std::ifstream version("/app0/xmb/version.txt");
++    std::string line;
++    if (std::getline(version, line) && !line.empty())
++    {
++      while (!line.empty() && (line.back() == '\r' || line.back() == ' '))
++        line.pop_back();
++      return line;
++    }
++  }
 +  std::ifstream file("/app0/sce_sys/param.sfo", std::ios::binary);
 +  const std::string sfo((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
 +  auto u32_at = [&](size_t at) {
