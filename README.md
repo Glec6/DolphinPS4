@@ -228,12 +228,16 @@ Also worth knowing:
 - Only the original PS4 has been tested so far. PS4 Pro reports are welcome.
 
 ## Thanks
-This port exists thanks to the **[Dolphin](https://dolphin-emu.org)** team, from its creators
-**F|RES** and **ector** to the hundreds of people who have contributed since. Thanks also to
-**[Mesa](https://mesa3d.org)** (RADV), the **[OpenOrbis](https://github.com/OpenOrbis)** and
-**[PacBrew](https://github.com/PacBrew)** PS4 toolchains, **[love-ps4](https://github.com/Mari0/love-ps4)**
-and **[GameTDB](https://www.gametdb.com)**. Everyone involved, with licences, is listed in
-**[CREDITS.md](CREDITS.md)**.
+
+- **[Dolphin](https://dolphin-emu.org)**: the emulator itself, from its creators **F|RES** and
+  **ector** to the hundreds of people who have contributed since
+- **[Mesa](https://mesa3d.org)**: the RADV Vulkan driver that draws every frame
+- **[OpenOrbis](https://github.com/OpenOrbis)** and **[PacBrew](https://github.com/PacBrew)**: the
+  PS4 toolchains
+- **[love-ps4](https://github.com/Mari0/love-ps4)**: the reference PS4 setup
+- **[GameTDB](https://www.gametdb.com)**: game titles and box art
+
+Everyone involved, with licences, is listed in **[CREDITS.md](CREDITS.md)**.
 
 ## License and disclaimer
 
