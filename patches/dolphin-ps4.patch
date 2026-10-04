@@ -3862,10 +3862,10 @@ index 3bf40ea..951591f 100644
      fprintf(stderr, "Could not boot the specified file\n");
 diff --git a/Source/Core/DolphinNoGUI/PS4IngameMenu.cpp b/Source/Core/DolphinNoGUI/PS4IngameMenu.cpp
 new file mode 100755
-index 0000000..8d4ce5d
+index 0000000..ab40d50
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4IngameMenu.cpp
-@@ -0,0 +1,436 @@
+@@ -0,0 +1,493 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -3878,6 +3878,7 @@ index 0000000..8d4ce5d
 +#include <cstdio>
 +#include <mutex>
 +#include <string>
++#include <thread>
 +#include <vector>
 +
 +#include <imgui.h>
@@ -3898,6 +3899,7 @@ index 0000000..8d4ce5d
 +extern "C" int ps4_pad_handle;                     // InputCommon/.../PS4Pad/PS4Pad.cpp
 +extern "C" int ps4_pad_block;                      // InputCommon/.../PS4Pad/PS4Pad.cpp
 +extern "C" int ps4_show_fps;                       // VideoCommon/Present.cpp
++extern "C" void ps4_dump_thread_stacks(const char* path, const char* reason);  // ps4_sampler.cpp
 +namespace VideoCommon  // VideoCommon/OnScreenUI.cpp
 +{
 +extern void (*ps4_overlay_draw)();
@@ -3946,6 +3948,13 @@ index 0000000..8d4ce5d
 +Clock::time_point s_toast_until;
 +float s_appear = 0.0f;  // drawing animation (video thread)
 +Clock::time_point s_last_draw;
++
++// Watchdog (menu-hang.txt): progress counters of the drawing (video thread) and the polling
++// (host thread), and the last thing the menu did.
++std::atomic<unsigned> s_draws{0};
++std::atomic<unsigned> s_polls{0};
++std::atomic<bool> s_watch{false};
++std::atomic<const char*> s_last_action{"none"};
 +
 +// Host thread only.
 +uint32_t s_held = 0;
@@ -4098,6 +4107,7 @@ index 0000000..8d4ce5d
 +
 +void Draw()
 +{
++  s_draws++;
 +  std::lock_guard lock(s_mutex);
 +  const auto now = Clock::now();
 +  const float dt =
@@ -4166,9 +4176,43 @@ index 0000000..8d4ce5d
 +}
 +}  // namespace
 +
++// While the menu is open: if the drawing or the polling stops for 3 s, every thread's stack goes
++// to /data/DolphinPS4/menu-hang.txt (once).
++static void Watchdog()
++{
++  unsigned last_draws = 0, last_polls = 0;
++  int stalled = 0;
++  bool dumped = false;
++  for (;;)
++  {
++    std::this_thread::sleep_for(std::chrono::milliseconds(500));
++    const unsigned draws = s_draws, polls = s_polls;
++    if (s_watch && !dumped && (draws == last_draws || polls == last_polls))
++    {
++      if (++stalled >= 6)
++      {
++        char reason[160];
++        snprintf(reason, sizeof(reason), "in-game menu stalled (%s%s), last action: %s",
++                 draws == last_draws ? "drawing " : "", polls == last_polls ? "polling" : "",
++                 s_last_action.load());
++        ps4_boot_trace(reason);
++        ps4_dump_thread_stacks("/data/DolphinPS4/menu-hang.txt", reason);
++        dumped = true;
++      }
++    }
++    else
++    {
++      stalled = 0;
++    }
++    last_draws = draws;
++    last_polls = polls;
++  }
++}
++
 +void Install()
 +{
 +  ps4_overlay_draw = Draw;
++  std::thread(Watchdog).detach();
 +}
 +
 +bool ReturnToXMB()
@@ -4178,6 +4222,7 @@ index 0000000..8d4ce5d
 +
 +void Poll(Core::System& system)
 +{
++  s_polls++;
 +  if (s_quit)
 +  {
 +    // The clean stop normally ends the main loop quickly; don't wait forever on it.
@@ -4255,6 +4300,16 @@ index 0000000..8d4ce5d
 +    }
 +  }
 +
++  static const char* const ACTION_NAMES[] = {"none", "open", "close", "activate", "change"};
++  if (action != Action::None)
++  {
++    char line[96];
++    snprintf(line, sizeof(line), "%s item %d (%s) direction %d",
++             ACTION_NAMES[static_cast<int>(action)], item, Label(item).c_str(), direction);
++    Log(line);
++    s_last_action = ACTION_NAMES[static_cast<int>(action)];
++  }
++
 +  switch (action)
 +  {
 +  case Action::Open:
@@ -4273,10 +4328,12 @@ index 0000000..8d4ce5d
 +    }
 +    ps4_pad_block = 1;
 +    Core::SetState(system, Core::State::Paused);
++    s_watch = true;
 +    Log("opened");
 +    break;
 +  case Action::Close:
 +    Close(system);
++    s_watch = false;
 +    Log("closed");
 +    break;
 +  case Action::Activate:
