@@ -8916,10 +8916,10 @@ index f4dc8a9..4e5ff67 100644
  
 diff --git a/Source/Core/DolphinNoGUI/PlatformPS4.cpp b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
 new file mode 100644
-index 0000000..51a2b4d
+index 0000000..df3c53c
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
-@@ -0,0 +1,1051 @@
+@@ -0,0 +1,1066 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -9284,12 +9284,27 @@ index 0000000..51a2b4d
 +  auto stall_since = std::chrono::steady_clock::now();
 +  int stall_dumps = 0;
 +  bool stall_dumped = false;
++  // Slow start: still starting after 4 s and 12 s -> boot-stacks-N.txt (where the boot waits).
++  const auto boot_since = std::chrono::steady_clock::now();
++  int boot_dumps = 0;
 +  while (m_running.IsSet())
 +  {
 +    UpdateRunningFlag();
 +    Core::HostDispatchJobs(Core::System::GetInstance());
 +    {
 +      const auto now = std::chrono::steady_clock::now();
++      if (boot_dumps < 2 && Core::GetState(Core::System::GetInstance()) == Core::State::Starting &&
++          now - boot_since > std::chrono::seconds(boot_dumps == 0 ? 4 : 12))
++      {
++        boot_dumps++;
++        char reason[96];
++        snprintf(reason, sizeof(reason), "slow start %d: still starting after %d s", boot_dumps,
++                 boot_dumps == 1 ? 4 : 12);
++        BootTrace(reason);
++        const std::string path = std::string(PS4_DATA_DIR_PATH) + "/boot-stacks-" +
++                                 std::to_string(boot_dumps) + ".txt";
++        ps4_dump_thread_stacks(path.c_str(), reason);
++      }
 +      if (ps4_present_counter != stall_presents ||
 +          Core::GetState(Core::System::GetInstance()) != Core::State::Running)
 +      {
@@ -13865,7 +13880,7 @@ index 0000000..26ef750
 +void PS4ShutdownCommandRecorder();
 +}  // namespace Vulkan
 diff --git a/Source/Core/VideoBackends/Vulkan/VKMain.cpp b/Source/Core/VideoBackends/Vulkan/VKMain.cpp
-index 6338e52..ad1953f 100644
+index 6338e52..6383b77 100644
 --- a/Source/Core/VideoBackends/Vulkan/VKMain.cpp
 +++ b/Source/Core/VideoBackends/Vulkan/VKMain.cpp
 @@ -7,6 +7,9 @@
@@ -13886,7 +13901,21 @@ index 6338e52..ad1953f 100644
  #include "VideoCommon/TextureCacheBase.h"
  #include "VideoCommon/VideoConfig.h"
  
-@@ -189,6 +193,12 @@ bool VideoBackend::Initialize(const WindowSystemInfo& wsi)
+@@ -23,6 +27,13 @@
+ #include <objc/message.h>
+ #endif
+ 
++#ifdef __ORBIS__
++extern "C" void ps4_boot_trace(const char* line);  // port/ps4_crashlog.cpp
++#define PS4_VIDEO_MARK(text) ps4_boot_trace(text)
++#else
++#define PS4_VIDEO_MARK(text)
++#endif
++
+ namespace Vulkan
+ {
+ void VideoBackend::InitBackendInfo(const WindowSystemInfo& wsi)
+@@ -189,6 +200,12 @@ bool VideoBackend::Initialize(const WindowSystemInfo& wsi)
  
    // Remaining classes are also dependent on object cache.
    g_object_cache = std::make_unique<ObjectCache>();
@@ -13899,7 +13928,7 @@ index 6338e52..ad1953f 100644
    if (!g_object_cache->Initialize())
    {
      PanicAlertFmt("Failed to initialize Vulkan object cache.");
-@@ -210,7 +220,14 @@ bool VideoBackend::Initialize(const WindowSystemInfo& wsi)
+@@ -210,7 +227,14 @@ bool VideoBackend::Initialize(const WindowSystemInfo& wsi)
    }
  
    // Create command buffers. We do this separately because the other classes depend on it.
@@ -13914,6 +13943,20 @@ index 6338e52..ad1953f 100644
    size_t swapchain_image_count =
        surface != VK_NULL_HANDLE ? swap_chain->GetSwapChainImageCount() : 0;
    if (!g_command_buffer_mgr->Initialize(swapchain_image_count))
+@@ -232,8 +256,11 @@ bool VideoBackend::Initialize(const WindowSystemInfo& wsi)
+   auto perf_query = std::make_unique<PerfQuery>();
+   auto bounding_box = std::make_unique<VKBoundingBox>();
+ 
+-  return InitializeShared(std::move(gfx), std::move(vertex_manager), std::move(perf_query),
+-                          std::move(bounding_box));
++  PS4_VIDEO_MARK("video: vulkan objects created");
++  const bool shared = InitializeShared(std::move(gfx), std::move(vertex_manager),
++                                       std::move(perf_query), std::move(bounding_box));
++  PS4_VIDEO_MARK("video: vulkan backend ready");
++  return shared;
+ }
+ 
+ void VideoBackend::Shutdown()
 diff --git a/Source/Core/VideoBackends/Vulkan/VKPipeline.cpp b/Source/Core/VideoBackends/Vulkan/VKPipeline.cpp
 index 6dbd9e5..fe50a42 100644
 --- a/Source/Core/VideoBackends/Vulkan/VKPipeline.cpp
@@ -15667,11 +15710,81 @@ index 41d05f3..26046bf 100644
  
    if (m_onscreen_ui)
    {
+diff --git a/Source/Core/VideoCommon/Resources/CustomResourceManager.cpp b/Source/Core/VideoCommon/Resources/CustomResourceManager.cpp
+index 29e215b..536aa2e 100644
+--- a/Source/Core/VideoCommon/Resources/CustomResourceManager.cpp
++++ b/Source/Core/VideoCommon/Resources/CustomResourceManager.cpp
+@@ -10,14 +10,25 @@
+ 
+ namespace VideoCommon
+ {
++#ifdef __ORBIS__
++extern "C" void ps4_boot_trace(const char* line);  // port/ps4_crashlog.cpp
++#define PS4_VIDEO_MARK(text) ps4_boot_trace(text)
++#else
++#define PS4_VIDEO_MARK(text)
++#endif
++
+ void CustomResourceManager::Initialize()
+ {
++  PS4_VIDEO_MARK("video: custom resources: asset cache");
+   m_asset_cache.Initialize();
++  PS4_VIDEO_MARK("video: custom resources: worker thread");
+   m_worker_thread.Reset("resource-worker");
+   m_host_config.bits = ShaderHostConfig::GetCurrent().bits;
+   m_async_shader_compiler = g_gfx->CreateAsyncShaderCompiler();
+ 
++  PS4_VIDEO_MARK("video: custom resources: compiler thread");
+   m_async_shader_compiler->StartWorkerThreads(1);  // TODO expose to config
++  PS4_VIDEO_MARK("video: custom resources: textures");
+ 
+   m_xfb_event =
+       GetVideoEvents().after_frame_event.Register([this](Core::System&) { XFBTriggered(); });
+@@ -26,6 +37,7 @@ void CustomResourceManager::Initialize()
+   m_invalid_color_texture = CreateInvalidColorTexture();
+   m_invalid_cubemap_texture = CreateInvalidCubemapTexture();
+   m_invalid_transparent_texture = CreateInvalidTransparentTexture();
++  PS4_VIDEO_MARK("video: custom resources: done");
+ }
+ 
+ void CustomResourceManager::Shutdown()
 diff --git a/Source/Core/VideoCommon/ShaderCache.cpp b/Source/Core/VideoCommon/ShaderCache.cpp
-index 2627656..6f0217f 100644
+index 2627656..efc8177 100644
 --- a/Source/Core/VideoCommon/ShaderCache.cpp
 +++ b/Source/Core/VideoCommon/ShaderCache.cpp
-@@ -865,6 +865,35 @@ void ShaderCache::LoadPipelineUIDCache()
+@@ -54,8 +54,16 @@ bool ShaderCache::Initialize()
+   return true;
+ }
+ 
++#ifdef __ORBIS__
++extern "C" void ps4_boot_trace(const char* line);  // port/ps4_crashlog.cpp
++#define PS4_VIDEO_MARK(text) ps4_boot_trace(text)
++#else
++#define PS4_VIDEO_MARK(text)
++#endif
++
+ void ShaderCache::InitializeShaderCache()
+ {
++  PS4_VIDEO_MARK("video: shader cache: start");
+   m_async_shader_compiler->ResizeWorkerThreads(g_ActiveConfig.GetShaderPrecompilerThreads());
+ 
+   // Load shader and UID caches.
+@@ -70,12 +78,14 @@ void ShaderCache::InitializeShaderCache()
+     QueueUberShaderPipelines();
+ 
+   // Compile all known UIDs.
++  PS4_VIDEO_MARK("video: shader cache: queue pipelines");
+   CompileMissingPipelines();
+   if (g_ActiveConfig.bWaitForShadersBeforeStarting)
+     WaitForAsyncCompiler();
+ 
+   // Switch to the runtime shader compiler thread configuration.
+   m_async_shader_compiler->ResizeWorkerThreads(g_ActiveConfig.GetShaderCompilerThreads());
++  PS4_VIDEO_MARK("video: shader cache: done");
+ }
+ 
+ void ShaderCache::Reload()
+@@ -865,6 +875,35 @@ void ShaderCache::LoadPipelineUIDCache()
    INFO_LOG_FMT(VIDEO, "Read {} pipeline UIDs from {}", m_gx_pipeline_cache.size(), filename);
  }
  
