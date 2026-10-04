@@ -1244,7 +1244,7 @@ index 32f74a0..cbd4922 100644
    if (is_running_or_starting)
      DolphinAnalytics::Instance().ReportGameStart();
 diff --git a/Source/Core/Core/Core.cpp b/Source/Core/Core/Core.cpp
-index fc614fd..25a840f 100644
+index fc614fd..75657a7 100644
 --- a/Source/Core/Core/Core.cpp
 +++ b/Source/Core/Core/Core.cpp
 @@ -91,6 +91,30 @@
@@ -1278,7 +1278,23 @@ index fc614fd..25a840f 100644
  namespace Core
  {
  static bool s_wants_determinism;
-@@ -325,6 +349,10 @@ static void CpuThread(Core::System& system, const std::optional<std::string>& sa
+@@ -170,8 +194,15 @@ std::string StopMessage(bool main_thread, std::string_view message)
+                      Common::CurrentThreadId(), message);
+ }
+ 
++#ifdef __ORBIS__
++extern "C" void ps4_boot_trace(const char* line);  // port/ps4_crashlog.cpp
++#endif
++
+ void DisplayMessage(std::string message, int time_in_ms)
+ {
++#ifdef __ORBIS__
++  ps4_boot_trace(("message: " + message).c_str());
++#endif
+   if (!IsRunningOrStarting(Core::System::GetInstance()))
+     return;
+ 
+@@ -325,6 +356,10 @@ static void CpuThread(Core::System& system, const std::optional<std::string>& sa
      Common::SetCurrentThreadName("CPU thread");
    else
      Common::SetCurrentThreadName("CPU-GPU thread");
@@ -1289,7 +1305,7 @@ index fc614fd..25a840f 100644
  
    // This needs to be delayed until after the video backend is ready.
    DolphinAnalytics::Instance().ReportGameStart();
-@@ -468,6 +496,9 @@ static void FifoPlayerThread(Core::System& system, const std::optional<std::stri
+@@ -468,6 +503,9 @@ static void FifoPlayerThread(Core::System& system, const std::optional<std::stri
      // Spawn the GPU thread.
      std::thread gpu_thread{[&] {
        Common::SetCurrentThreadName("Video thread");
@@ -1299,7 +1315,7 @@ index fc614fd..25a840f 100644
  
        const bool is_init = init_video();
        init_from_thread.set_value(is_init);
-@@ -574,9 +605,11 @@ static void EmuThread(Core::System& system, std::unique_ptr<BootParameters> boot
+@@ -574,9 +612,11 @@ static void EmuThread(Core::System& system, std::unique_ptr<BootParameters> boot
    system.GetMovie().Init(*boot);
    Common::ScopeGuard movie_guard([&system] { system.GetMovie().Shutdown(); });
  
@@ -1311,7 +1327,7 @@ index fc614fd..25a840f 100644
    HW::Init(system,
             NetPlay::IsNetPlayRunning() ? &(boot_session_data.GetNetplaySettings()->sram) : nullptr);
  
-@@ -599,6 +632,7 @@ static void EmuThread(Core::System& system, std::unique_ptr<BootParameters> boot
+@@ -599,6 +639,7 @@ static void EmuThread(Core::System& system, std::unique_ptr<BootParameters> boot
    // In single-core mode: This holds a video backend shutdown function.
    // In dual-core mode: This holds a GPU thread stopping function (which does the backend shutdown).
    const auto video_guard = GetInitializedVideoGuard(system, wsi);
@@ -1319,7 +1335,7 @@ index fc614fd..25a840f 100644
    if (!video_guard)
    {
      PanicAlertFmt("Failed to initialize video backend!");
-@@ -617,6 +651,7 @@ static void EmuThread(Core::System& system, std::unique_ptr<BootParameters> boot
+@@ -617,6 +658,7 @@ static void EmuThread(Core::System& system, std::unique_ptr<BootParameters> boot
      return;
    }
  
@@ -1327,7 +1343,7 @@ index fc614fd..25a840f 100644
    AudioCommon::PostInitSoundStream(system);
  
    // Set execution state to known values (CPU/FIFO/Audio Paused)
-@@ -636,6 +671,7 @@ static void EmuThread(Core::System& system, std::unique_ptr<BootParameters> boot
+@@ -636,6 +678,7 @@ static void EmuThread(Core::System& system, std::unique_ptr<BootParameters> boot
    {
      ASSERT(IsCPUThread());
      CPUThreadGuard guard(system);
@@ -1335,7 +1351,7 @@ index fc614fd..25a840f 100644
      if (!CBoot::BootUp(system, guard, std::move(boot)))
        return;
    }
-@@ -659,6 +695,7 @@ static void EmuThread(Core::System& system, std::unique_ptr<BootParameters> boot
+@@ -659,6 +702,7 @@ static void EmuThread(Core::System& system, std::unique_ptr<BootParameters> boot
        GetVideoEvents().after_present_event.Register(&Core::Callback_FramePresented);
  
    // Setup our core
@@ -3407,7 +3423,7 @@ index 8d84ed1..d1377b7 100644
  
  #ifdef _M_X86_64
 diff --git a/Source/Core/DolphinNoGUI/CMakeLists.txt b/Source/Core/DolphinNoGUI/CMakeLists.txt
-index 51c3fff..33bbd30 100644
+index 51c3fff..c9f6895 100644
 --- a/Source/Core/DolphinNoGUI/CMakeLists.txt
 +++ b/Source/Core/DolphinNoGUI/CMakeLists.txt
 @@ -23,6 +23,28 @@ if(${CMAKE_SYSTEM_NAME} STREQUAL "Linux")
@@ -3419,7 +3435,7 @@ index 51c3fff..33bbd30 100644
 +  # into the top-level project (CMAKE_PROJECT_dolphin-emu_INCLUDE).
 +  target_sources(dolphin-nogui PRIVATE PlatformPS4.cpp ${PS4_RUNTIME_SOURCES})
 +  # The XMB launcher: Dear ImGui drawn with Vulkan (PS4XMBDisplay.cpp) through Dolphin's loader.
-+  target_sources(dolphin-nogui PRIVATE PS4XMB.cpp PS4XMBDisplay.cpp PS4IngameMenu.cpp
++  target_sources(dolphin-nogui PRIVATE PS4XMB.cpp PS4XMBDisplay.cpp PS4IngameMenu.cpp PS4Settings.cpp
 +    ${CMAKE_SOURCE_DIR}/Externals/imgui/imgui/backends/imgui_impl_vulkan.cpp)
 +  set_source_files_properties(
 +    ${CMAKE_SOURCE_DIR}/Externals/imgui/imgui/backends/imgui_impl_vulkan.cpp
@@ -3448,10 +3464,18 @@ index 51c3fff..33bbd30 100644
 +  ps4_add_eboot(dolphin-nogui)
 +endif()
 diff --git a/Source/Core/DolphinNoGUI/MainNoGUI.cpp b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
-index 3bf40ea..a8e02bd 100644
+index 3bf40ea..4c32cd5 100644
 --- a/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 +++ b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
-@@ -5,7 +5,9 @@
+@@ -2,10 +2,17 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
+ #include "DolphinNoGUI/Platform.h"
++#ifdef __ORBIS__
++#include <sys/stat.h>
++#include "Common/FileUtil.h"
++#include "DolphinNoGUI/PS4Settings.h"
++#endif
  
  #include <OptionParser.h>
  #include <csignal>
@@ -3461,7 +3485,7 @@ index 3bf40ea..a8e02bd 100644
  #include <string>
  #include <vector>
  
-@@ -15,7 +17,13 @@
+@@ -15,7 +22,13 @@
  #include <windows.h>
  #endif
  
@@ -3475,7 +3499,7 @@ index 3bf40ea..a8e02bd 100644
  #include "Core/Boot/Boot.h"
  #include "Core/BootManager.h"
  #include "Core/Core.h"
-@@ -23,6 +31,7 @@
+@@ -23,6 +36,7 @@
  #include "Core/Host.h"
  #include "Core/System.h"
  
@@ -3483,7 +3507,7 @@ index 3bf40ea..a8e02bd 100644
  #include "UICommon/CommandLineParse.h"
  #ifdef USE_DISCORD_PRESENCE
  #include "UICommon/DiscordPresence.h"
-@@ -31,6 +40,40 @@
+@@ -31,6 +45,40 @@
  
  static std::unique_ptr<Platform> s_platform;
  
@@ -3524,7 +3548,7 @@ index 3bf40ea..a8e02bd 100644
  static void signal_handler(int)
  {
    constexpr char message[] = "A signal was received. A second signal will force Dolphin to stop.\n";
-@@ -173,6 +216,10 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
+@@ -173,6 +221,10 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
    if (platform_name == "macos" || platform_name.empty())
      return Platform::CreateMacOSPlatform();
  #endif
@@ -3535,7 +3559,7 @@ index 3bf40ea..a8e02bd 100644
  
    if (platform_name == "headless" || platform_name.empty())
      return Platform::CreateHeadlessPlatform();
-@@ -184,8 +231,17 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
+@@ -184,8 +236,17 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
  #define main app_main
  #endif
  
@@ -3554,7 +3578,7 @@ index 3bf40ea..a8e02bd 100644
    const auto parser =
        CommandLineParse::CreateParser(CommandLineParse::ParserOptions::OmitGUIOptions);
    parser->add_option("-p", "--platform")
-@@ -207,6 +263,10 @@ int main(const int argc, char* argv[])
+@@ -207,6 +268,10 @@ int main(const int argc, char* argv[])
  #ifdef __APPLE__
                  ,
                  "macos"
@@ -3565,7 +3589,7 @@ index 3bf40ea..a8e02bd 100644
  #endif
        });
  
-@@ -270,7 +330,275 @@ int main(const int argc, char* argv[])
+@@ -270,7 +335,289 @@ int main(const int argc, char* argv[])
  
    UICommon::SetUserDirectory(user_directory);
    UICommon::Init();
@@ -3573,6 +3597,12 @@ index 3bf40ea..a8e02bd 100644
 +  // Dolphin's user folders (StateSaves, ...): the Qt frontend creates them, NoGUI didn't, and
 +  // every save state failed writing into the missing User/StateSaves.
 +  UICommon::CreateDirectories();
++  {
++    const std::string states = File::GetUserPath(D_STATESAVES_IDX);
++    mkdir(states.c_str(), 0777);
++    fprintf(stderr, "[dolphin] state saves: %s (%s)\n", states.c_str(),
++            File::IsDirectory(states) ? "ok" : "MISSING");
++  }
 +  // Everything to the console listener, which goes to /data/DolphinPS4/dolphin.log.
 +  {
 +    auto* log_manager = Common::Log::LogManager::GetInstance();
@@ -3739,9 +3769,17 @@ index 3bf40ea..a8e02bd 100644
 +    // aspect=wide: Dolphin's "Force 16:9" (games with their own 16:9 mode); aspect=stretch.
 +    {
 +      const std::string aspect = Platform::GetPS4Option("aspect", "auto");
-+      Config::SetBase(Config::GFX_ASPECT_RATIO, aspect == "wide"    ? AspectMode::ForceWide :
-+                                                aspect == "stretch" ? AspectMode::Stretch :
-+                                                                      AspectMode::Auto);
++      Config::SetBase(Config::GFX_ASPECT_RATIO, aspect == "wide"     ? AspectMode::ForceWide :
++                                                aspect == "standard" ? AspectMode::ForceStandard :
++                                                aspect == "stretch"  ? AspectMode::Stretch :
++                                                                       AspectMode::Auto);
++    }
++    // The menus' settings that can change while a game runs (PS4Settings), applied once here.
++    // (cpu_clock is set up above, with the auto clock governor.)
++    for (const PS4Settings::Setting& setting : PS4Settings::All())
++    {
++      if (setting.live && std::string(setting.key) != "cpu_clock")
++        PS4Settings::ApplyLive(setting.key, Platform::GetPS4Option(setting.key, setting.fallback));
 +    }
 +    snprintf(ps4_game_hle_only, sizeof(ps4_game_hle_only), "%s",
 +             Platform::GetPS4Option("game_hle_only", "").c_str());
@@ -3841,7 +3879,7 @@ index 3bf40ea..a8e02bd 100644
  
    Common::ScopeGuard ui_common_guard([] {
      UICommon::ShutdownControllers();
-@@ -284,6 +612,12 @@ int main(const int argc, char* argv[])
+@@ -284,6 +631,12 @@ int main(const int argc, char* argv[])
    }
  
    auto core_state_changed_hook = Core::AddOnStateChangedCallback([](const Core::State state) {
@@ -3854,7 +3892,7 @@ index 3bf40ea..a8e02bd 100644
      if (state == Core::State::Uninitialized)
        s_platform->Stop();
    });
-@@ -303,6 +637,9 @@ int main(const int argc, char* argv[])
+@@ -303,6 +656,9 @@ int main(const int argc, char* argv[])
  
    DolphinAnalytics::Instance().ReportDolphinStart("nogui");
  
@@ -3866,10 +3904,10 @@ index 3bf40ea..a8e02bd 100644
      fprintf(stderr, "Could not boot the specified file\n");
 diff --git a/Source/Core/DolphinNoGUI/PS4IngameMenu.cpp b/Source/Core/DolphinNoGUI/PS4IngameMenu.cpp
 new file mode 100755
-index 0000000..ab40d50
+index 0000000..c62762e
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4IngameMenu.cpp
-@@ -0,0 +1,493 @@
+@@ -0,0 +1,643 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -3890,19 +3928,16 @@ index 0000000..ab40d50
 +#include <orbis/SystemService.h>
 +#include <orbis/libkernel.h>
 +
-+#include "Common/Config/Config.h"
-+#include "Core/Config/GraphicsSettings.h"
 +#include "Core/ConfigManager.h"
 +#include "Core/Core.h"
 +#include "Core/State.h"
 +#include "Core/System.h"
++#include "DolphinNoGUI/PS4Settings.h"
 +#include "VideoCommon/Fifo.h"
-+#include "VideoCommon/VideoConfig.h"
 +
 +extern "C" void ps4_boot_trace(const char* line);  // port/ps4_crashlog.cpp
 +extern "C" int ps4_pad_handle;                     // InputCommon/.../PS4Pad/PS4Pad.cpp
 +extern "C" int ps4_pad_block;                      // InputCommon/.../PS4Pad/PS4Pad.cpp
-+extern "C" int ps4_show_fps;                       // VideoCommon/Present.cpp
 +extern "C" void ps4_dump_thread_stacks(const char* path, const char* reason);  // ps4_sampler.cpp
 +namespace VideoCommon  // VideoCommon/OnScreenUI.cpp
 +{
@@ -3925,46 +3960,72 @@ index 0000000..ab40d50
 +{
 +using Clock = std::chrono::steady_clock;
 +
-+enum Item
++enum MainItem
 +{
-+  ITEM_RESUME,
-+  ITEM_SLOT,
-+  ITEM_SAVE,
-+  ITEM_LOAD,
-+  ITEM_ASPECT,
-+  ITEM_FPS,
-+  ITEM_QUIT,
-+  ITEM_COUNT,
++  MAIN_RESUME,
++  MAIN_SAVE,
++  MAIN_LOAD,
++  MAIN_SETTINGS,
++  MAIN_QUIT,
++  MAIN_COUNT,
 +};
 +
-+constexpr const char* ASPECT_NAMES[] = {"Auto", "16:9", "4:3", "Stretch"};
-+constexpr AspectMode ASPECT_MODES[] = {AspectMode::Auto, AspectMode::ForceWide,
-+                                       AspectMode::ForceStandard, AspectMode::Stretch};
++enum class Page
++{
++  Main,
++  Settings,
++};
 +
-+// Shared between the host thread (Poll) and the video thread (Draw).
++// One line of the menu as drawn (prepared by the host thread, drawn by the video thread).
++struct Row
++{
++  std::string label;
++  std::string value;
++  bool header = false;  // category title, not selectable
++  bool note = false;    // value takes effect at the next start (shown in amber)
++};
++
++// Hint glyphs for the bottom bar.
++enum class Glyph
++{
++  Cross,
++  Circle,
++  LeftRight,
++  UpDown,
++  L3R3,
++};
++
++// ---- Shared between the host thread (Poll) and the video thread (Draw), under s_mutex. ----
 +std::mutex s_mutex;
 +bool s_open = false;
-+int s_selected = 0;
-+int s_slot = 1;
-+int s_aspect = 0;  // index into ASPECT_MODES, kept by the host thread (no Config reads in Draw)
 +std::string s_title;
++std::string s_subtitle;
++std::vector<Row> s_rows;
++int s_selected = 0;  // index into s_rows
++std::vector<std::pair<Glyph, std::string>> s_hints;
 +std::string s_toast;
 +Clock::time_point s_toast_until;
-+float s_appear = 0.0f;  // drawing animation (video thread)
++float s_appear = 0.0f;  // video thread animation
++float s_scroll = 0.0f;  // video thread animation
 +Clock::time_point s_last_draw;
 +
-+// Watchdog (menu-hang.txt): progress counters of the drawing (video thread) and the polling
-+// (host thread), and the last thing the menu did.
-+std::atomic<unsigned> s_draws{0};
-+std::atomic<unsigned> s_polls{0};
-+std::atomic<bool> s_watch{false};
-+std::atomic<const char*> s_last_action{"none"};
-+
-+// Host thread only.
++// ---- Host thread only. ----
++Page s_page = Page::Main;
++int s_main_selected = MAIN_RESUME;
++int s_settings_selected = 0;
++int s_slot = 1;
++std::string s_game_id;
++std::vector<std::string> s_row_keys;  // settings page: setting key per row ("" = header/scope)
 +uint32_t s_held = 0;
 +float s_repeat = 0.0f;
 +bool s_quit = false;
 +Clock::time_point s_quit_time;
++
++// Watchdog (menu-hang.txt).
++std::atomic<unsigned> s_draws{0};
++std::atomic<unsigned> s_polls{0};
++std::atomic<bool> s_watch{false};
++std::atomic<const char*> s_last_action{"none"};
 +
 +void Log(const std::string& text)
 +{
@@ -3972,130 +4033,181 @@ index 0000000..ab40d50
 +  ps4_boot_trace(("menu: " + text).c_str());
 +}
 +
-+int AspectIndex()
++bool Custom()
 +{
-+  const AspectMode mode = Config::Get(Config::GFX_ASPECT_RATIO);
-+  for (int i = 0; i < 4; i++)
-+  {
-+    if (ASPECT_MODES[i] == mode)
-+      return i;
-+  }
-+  return 0;
++  return PS4Settings::IsCustom(s_game_id);
 +}
 +
-+std::string Label(int item)
++// Rebuilds the rows for the current page (host thread, s_mutex not held while computing).
++void BuildRows()
 +{
-+  switch (item)
++  std::vector<Row> rows;
++  std::vector<std::string> keys;
++  std::vector<std::pair<Glyph, std::string>> hints;
++  int selected;
++  std::string subtitle;
++  if (s_page == Page::Main)
 +  {
-+  case ITEM_RESUME:
-+    return "Resume Game";
-+  case ITEM_SLOT:
-+    return "State Slot";
-+  case ITEM_SAVE:
-+    return "Save State";
-+  case ITEM_LOAD:
-+    return "Load State";
-+  case ITEM_ASPECT:
-+    return "Aspect Ratio";
-+  case ITEM_FPS:
-+    return "FPS Counter";
-+  case ITEM_QUIT:
-+    return "Quit Game";
++    const std::string slot = "< Slot " + std::to_string(s_slot) + " >";
++    rows = {{"Resume Game"}, {"Save State", slot}, {"Load State", slot}, {"Settings", ">"},
++            {"Quit Game"}};
++    selected = s_main_selected;
++    subtitle = "PAUSED";
++    hints = {{Glyph::Cross, "Select"}, {Glyph::LeftRight, "Slot"}, {Glyph::Circle, "Resume"},
++             {Glyph::L3R3, "Resume"}};
 +  }
-+  return {};
++  else
++  {
++    const bool custom = Custom();
++    rows.push_back({"Apply To", custom ? "< This Game >" : "< All Games >"});
++    keys.push_back("");
++    for (const char* category : PS4Settings::Categories())
++    {
++      rows.push_back({category, "", true});
++      keys.push_back("");
++      for (const PS4Settings::Setting& setting : PS4Settings::All())
++      {
++        if (std::string(setting.category) != category)
++          continue;
++        const std::string value = PS4Settings::Get(setting.key, s_game_id);
++        rows.push_back({setting.label, "< " + PS4Settings::LabelOf(setting, value) + " >", false,
++                        !setting.live});
++        keys.push_back(setting.key);
++      }
++    }
++    selected = s_settings_selected;
++    subtitle = custom ? "SETTINGS - THIS GAME" : "SETTINGS - ALL GAMES";
++    hints = {{Glyph::LeftRight, "Change"}, {Glyph::UpDown, "Move"}, {Glyph::Circle, "Back"}};
++  }
++  s_row_keys = std::move(keys);
++  std::lock_guard lock(s_mutex);
++  s_rows = std::move(rows);
++  s_selected = selected;
++  s_subtitle = subtitle;
++  s_hints = std::move(hints);
 +}
 +
-+std::string Value(int item)
-+{
-+  switch (item)
-+  {
-+  case ITEM_SLOT:
-+    return "< " + std::to_string(s_slot) + " >";
-+  case ITEM_ASPECT:
-+    return std::string("< ") + ASPECT_NAMES[s_aspect] + " >";
-+  case ITEM_FPS:
-+    return ps4_show_fps ? "< On >" : "< Off >";
-+  }
-+  return {};
-+}
-+
-+// Host thread, s_mutex not held.
 +void Toast(const std::string& text)
 +{
 +  std::lock_guard lock(s_mutex);
 +  s_toast = text;
-+  s_toast_until = Clock::now() + std::chrono::milliseconds(1800);
++  s_toast_until = Clock::now() + std::chrono::milliseconds(2200);
 +}
 +
-+// Host thread, s_mutex not held.
++// Host thread, s_mutex not held (Core calls wait for the video thread, which takes s_mutex).
 +void Close(Core::System& system)
 +{
 +  {
 +    std::lock_guard lock(s_mutex);
 +    s_open = false;
 +  }
-+  // The game keeps seeing a neutral pad until the menu's buttons are released.
-+  ps4_pad_block = 1;
++  s_watch = false;
++  ps4_pad_block = 1;  // the game sees a neutral pad until the buttons are released
 +  Core::SetState(system, Core::State::Running);
++  Log("closed");
 +}
 +
-+// The functions below run on the host thread WITHOUT s_mutex held: Core calls (pause, resume,
-+// states, stop) wait for the video thread, which takes s_mutex to draw the menu.
-+void Change(int item, int direction)
++void Open(Core::System& system)
 +{
-+  switch (item)
-+  {
-+  case ITEM_SLOT:
++  s_game_id = SConfig::GetInstance().GetGameID();
++  std::string title = SConfig::GetInstance().GetTitleName();
++  if (title.empty())
++    title = s_game_id;
++  s_page = Page::Main;
++  s_main_selected = MAIN_RESUME;
++  BuildRows();
 +  {
 +    std::lock_guard lock(s_mutex);
-+    s_slot = (s_slot - 1 + direction + 8) % 8 + 1;
-+    break;
++    s_title = std::move(title);
++    s_open = true;
 +  }
-+  case ITEM_ASPECT:
-+  {
-+    const int index = (AspectIndex() + direction + 4) % 4;
-+    Config::SetBase(Config::GFX_ASPECT_RATIO, ASPECT_MODES[index]);
-+    std::lock_guard lock(s_mutex);
-+    s_aspect = index;
-+    break;
-+  }
-+  case ITEM_FPS:
-+    ps4_show_fps = !ps4_show_fps;
-+    break;
-+  }
++  ps4_pad_block = 1;
++  Core::SetState(system, Core::State::Paused);
++  s_watch = true;
++  Log("opened");
 +}
 +
-+void Activate(Core::System& system, int item)
++// Changes the setting on a settings row (direction -1/+1) and saves it.
++void ChangeSetting(int row, int direction)
 +{
-+  int slot;
++  if (row < 0 || row >= static_cast<int>(s_row_keys.size()))
++    return;
++  if (row == 0)
 +  {
-+    std::lock_guard lock(s_mutex);
-+    slot = s_slot;
++    // Apply To: this game (its own copy of the settings) or all games (global).
++    const bool custom = !Custom();
++    PS4Settings::SetCustom(s_game_id, custom);
++    if (!custom)
++    {
++      // Back to the global values: apply them to the running game.
++      for (const PS4Settings::Setting& setting : PS4Settings::All())
++      {
++        if (setting.live)
++          PS4Settings::ApplyLive(setting.key, PS4Settings::Get(setting.key, s_game_id));
++      }
++    }
++    Toast(custom ? "Settings for this game only" : "This game follows the global settings");
++    Log(custom ? "settings: custom for " + s_game_id : "settings: global for " + s_game_id);
++    return;
 +  }
-+  switch (item)
++  const std::string key = s_row_keys[row];
++  const PS4Settings::Setting* setting = PS4Settings::Find(key);
++  if (!setting)
++    return;
++  const std::string value =
++      PS4Settings::Step(*setting, PS4Settings::Get(key, s_game_id), direction);
++  PS4Settings::Set(key, value, Custom() ? s_game_id : std::string());
++  if (setting->live)
++    PS4Settings::ApplyLive(key, value);
++  else
++    Toast(std::string(setting->label) + ": next time a game starts");
++  Log("setting " + key + "=" + value + (Custom() ? " (" + s_game_id + ")" : " (global)"));
++}
++
++void SelectableMove(int direction)
++{
++  if (s_page == Page::Main)
 +  {
-+  case ITEM_RESUME:
++    s_main_selected = std::clamp(s_main_selected + direction, 0, MAIN_COUNT - 1);
++    return;
++  }
++  const int count = static_cast<int>(s_row_keys.size());
++  int row = s_settings_selected + direction;
++  // Skip category headers (row 0, "Apply To", is selectable).
++  while (row > 0 && row < count && s_row_keys[row].empty())
++    row += direction;
++  if (row >= 0 && row < count)
++    s_settings_selected = row;
++}
++
++void Activate(Core::System& system)
++{
++  if (s_page == Page::Settings)
++  {
++    ChangeSetting(s_settings_selected, 1);
++    return;
++  }
++  switch (s_main_selected)
++  {
++  case MAIN_RESUME:
 +    Close(system);
 +    break;
-+  case ITEM_SAVE:
-+    Log("saving state " + std::to_string(slot));
-+    State::Save(system, static_cast<u32>(slot));
-+    Toast("Saved to slot " + std::to_string(slot));
-+    Log("saved state " + std::to_string(slot));
++  case MAIN_SAVE:
++    Log("saving state " + std::to_string(s_slot));
++    State::Save(system, static_cast<u32>(s_slot));
++    Log("save requested " + std::to_string(s_slot));
 +    break;
-+  case ITEM_LOAD:
-+    Log("loading state " + std::to_string(slot));
-+    State::Load(system, static_cast<u32>(slot));
-+    Toast("Loaded slot " + std::to_string(slot));
-+    Log("loaded state " + std::to_string(slot));
++  case MAIN_LOAD:
++    Log("loading state " + std::to_string(s_slot));
++    State::Load(system, static_cast<u32>(s_slot));
++    Log("load requested " + std::to_string(s_slot));
 +    Close(system);
 +    break;
-+  case ITEM_SLOT:
-+  case ITEM_ASPECT:
-+  case ITEM_FPS:
-+    Change(item, 1);
++  case MAIN_SETTINGS:
++    s_page = Page::Settings;
++    s_settings_selected = 0;
 +    break;
-+  case ITEM_QUIT:
++  case MAIN_QUIT:
 +    // A clean stop writes the memory cards; the app then restarts into the XMB (PlatformPS4).
 +    Log("quit to the XMB");
 +    s_quit = true;
@@ -4104,8 +4216,63 @@ index 0000000..ab40d50
 +      std::lock_guard lock(s_mutex);
 +      s_open = false;
 +    }
++    s_watch = false;
 +    Core::Stop(system);
 +    break;
++  }
++}
++
++// ---- Drawing (video thread) ----
++
++void DrawGlyph(ImDrawList* dl, Glyph glyph, ImVec2 c, float r, float a)
++{
++  const ImU32 ring = IM_COL32(255, 255, 255, static_cast<int>(60 * a));
++  auto colour = [a](int rr, int g, int b) {
++    return IM_COL32(rr, g, b, static_cast<int>(255 * a));
++  };
++  switch (glyph)
++  {
++  case Glyph::Cross:
++    dl->AddCircleFilled(c, r, ring, 28);
++    dl->AddLine(ImVec2(c.x - r * 0.45f, c.y - r * 0.45f), ImVec2(c.x + r * 0.45f, c.y + r * 0.45f),
++                colour(120, 170, 255), r * 0.22f);
++    dl->AddLine(ImVec2(c.x - r * 0.45f, c.y + r * 0.45f), ImVec2(c.x + r * 0.45f, c.y - r * 0.45f),
++                colour(120, 170, 255), r * 0.22f);
++    break;
++  case Glyph::Circle:
++    dl->AddCircleFilled(c, r, ring, 28);
++    dl->AddCircle(c, r * 0.48f, colour(255, 100, 110), 24, r * 0.2f);
++    break;
++  case Glyph::LeftRight:
++  case Glyph::UpDown:
++  {
++    // A D-pad with the two arrows in use lit.
++    const float s = r * 0.42f;
++    const ImU32 dim = IM_COL32(255, 255, 255, static_cast<int>(70 * a));
++    const ImU32 lit = colour(255, 255, 255);
++    const bool lr = glyph == Glyph::LeftRight;
++    dl->AddRectFilled(ImVec2(c.x - s * 0.5f, c.y - r), ImVec2(c.x + s * 0.5f, c.y - s * 0.5f),
++                      lr ? dim : lit, 2.0f);
++    dl->AddRectFilled(ImVec2(c.x - s * 0.5f, c.y + s * 0.5f), ImVec2(c.x + s * 0.5f, c.y + r),
++                      lr ? dim : lit, 2.0f);
++    dl->AddRectFilled(ImVec2(c.x - r, c.y - s * 0.5f), ImVec2(c.x - s * 0.5f, c.y + s * 0.5f),
++                      lr ? lit : dim, 2.0f);
++    dl->AddRectFilled(ImVec2(c.x + s * 0.5f, c.y - s * 0.5f), ImVec2(c.x + r, c.y + s * 0.5f),
++                      lr ? lit : dim, 2.0f);
++    break;
++  }
++  case Glyph::L3R3:
++  {
++    // Two stick tops.
++    for (int i = 0; i < 2; i++)
++    {
++      const ImVec2 p(c.x + (i == 0 ? -r * 0.95f : r * 0.95f), c.y);
++      dl->AddCircleFilled(p, r * 0.85f, ring, 24);
++      dl->AddCircle(p, r * 0.85f, colour(255, 255, 255), 24, r * 0.12f);
++      dl->AddCircleFilled(p, r * 0.3f, colour(255, 255, 255), 16);
++    }
++    break;
++  }
 +  }
 +}
 +
@@ -4126,63 +4293,98 @@ index 0000000..ab40d50
 +  const ImVec2 size = ImGui::GetIO().DisplaySize;
 +  ImFont* bold = ps4_overlay_font ? ps4_overlay_font : ImGui::GetFont();
 +  ImFont* regular = ps4_overlay_font_regular ? ps4_overlay_font_regular : bold;
-+  const float s = size.y / 1080.0f;  // layout is in 1080p units
++  const float s = size.y / 1080.0f;  // layout in 1080p units
 +  const float a = s_appear;
 +
 +  if (a > 0.01f)
 +  {
 +    dl->AddRectFilled(ImVec2(0, 0), size, IM_COL32(0, 0, 0, static_cast<int>(150 * a)));
-+    // Left panel, sliding in.
-+    const float panel_w = 720.0f * s;
++    const float panel_w = 860.0f * s;
 +    const float x0 = -panel_w * (1.0f - a);
 +    dl->AddRectFilledMultiColor(ImVec2(x0, 0), ImVec2(x0 + panel_w, size.y),
-+                                IM_COL32(8, 20, 46, static_cast<int>(235 * a)),
-+                                IM_COL32(8, 20, 46, static_cast<int>(120 * a)),
-+                                IM_COL32(2, 6, 16, static_cast<int>(120 * a)),
-+                                IM_COL32(2, 6, 16, static_cast<int>(235 * a)));
++                                IM_COL32(8, 20, 46, static_cast<int>(240 * a)),
++                                IM_COL32(8, 20, 46, static_cast<int>(150 * a)),
++                                IM_COL32(2, 6, 16, static_cast<int>(150 * a)),
++                                IM_COL32(2, 6, 16, static_cast<int>(240 * a)));
 +    dl->AddLine(ImVec2(x0 + panel_w, 0), ImVec2(x0 + panel_w, size.y),
 +                IM_COL32(91, 184, 255, static_cast<int>(200 * a)), 2.0f * s);
 +    const ImU32 white = IM_COL32(255, 255, 255, static_cast<int>(255 * a));
-+    const ImU32 dim = IM_COL32(255, 255, 255, static_cast<int>(170 * a));
-+    dl->AddText(regular, 28 * s, ImVec2(x0 + 70 * s, 110 * s), dim, "PAUSED");
-+    dl->AddText(bold, 40 * s, ImVec2(x0 + 70 * s, 145 * s), white, s_title.c_str(), nullptr,
++    const ImU32 dim = IM_COL32(255, 255, 255, static_cast<int>(165 * a));
++    const ImU32 accent = IM_COL32(120, 196, 255, static_cast<int>(255 * a));
++    dl->AddText(regular, 26 * s, ImVec2(x0 + 70 * s, 90 * s), accent, s_subtitle.c_str());
++    dl->AddText(bold, 40 * s, ImVec2(x0 + 70 * s, 122 * s), white, s_title.c_str(), nullptr,
 +                panel_w - 120 * s);
-+    float y = 300 * s;
-+    for (int i = 0; i < ITEM_COUNT; i++, y += 78 * s)
++
++    // The list scrolls to keep the selection in view.
++    const float row_h = 62.0f * s;
++    const float top = 220.0f * s, bottom = size.y - 160.0f * s;
++    const float visible = (bottom - top) / row_h;
++    const float target = std::clamp(static_cast<float>(s_selected) - visible * 0.5f + 1.0f, 0.0f,
++                                    std::max(0.0f, static_cast<float>(s_rows.size()) - visible));
++    s_scroll += (target - s_scroll) * (1.0f - std::exp(-16.0f * dt));
++    dl->PushClipRect(ImVec2(x0, top - 10 * s), ImVec2(x0 + panel_w, bottom + 10 * s), true);
++    for (size_t i = 0; i < s_rows.size(); i++)
 +    {
-+      const bool sel = i == s_selected;
++      const Row& row = s_rows[i];
++      const float y = top + (static_cast<float>(i) - s_scroll) * row_h;
++      if (y < top - row_h || y > bottom)
++        continue;
++      if (row.header)
++      {
++        dl->AddText(bold, 26 * s, ImVec2(x0 + 70 * s, y + 16 * s), accent, row.label.c_str());
++        dl->AddLine(ImVec2(x0 + 70 * s, y + 52 * s), ImVec2(x0 + panel_w - 60 * s, y + 52 * s),
++                    IM_COL32(120, 196, 255, static_cast<int>(70 * a)), 1.5f * s);
++        continue;
++      }
++      const bool sel = static_cast<int>(i) == s_selected;
 +      if (sel)
 +      {
-+        dl->AddRectFilled(ImVec2(x0 + 40 * s, y - 10 * s), ImVec2(x0 + panel_w - 40 * s, y + 58 * s),
++        dl->AddRectFilled(ImVec2(x0 + 40 * s, y - 4 * s),
++                          ImVec2(x0 + panel_w - 40 * s, y + 54 * s),
 +                          IM_COL32(91, 184, 255, static_cast<int>(70 * a)), 12 * s);
 +      }
-+      dl->AddText(sel ? bold : regular, (sel ? 40 : 34) * s, ImVec2(x0 + 70 * s, y),
-+                  sel ? white : dim, Label(i).c_str());
-+      const std::string value = Value(i);
-+      if (!value.empty())
++      dl->AddText(sel ? bold : regular, (sel ? 36 : 32) * s, ImVec2(x0 + 70 * s, y + 4 * s),
++                  sel ? white : dim, row.label.c_str());
++      if (!row.value.empty())
 +      {
-+        const float tw = regular->CalcTextSizeA(32 * s, FLT_MAX, 0, value.c_str()).x;
-+        dl->AddText(regular, 32 * s, ImVec2(x0 + panel_w - 80 * s - tw, y + 4 * s),
-+                    sel ? white : dim, value.c_str());
++        const float vs = 30 * s;
++        const float tw = regular->CalcTextSizeA(vs, FLT_MAX, 0, row.value.c_str()).x;
++        const ImU32 colour =
++            row.note ? IM_COL32(255, 210, 120, static_cast<int>((sel ? 255 : 170) * a)) :
++            sel      ? white :
++                       dim;
++        dl->AddText(regular, vs, ImVec2(x0 + panel_w - 80 * s - tw, y + 7 * s), colour,
++                    row.value.c_str());
 +      }
 +    }
-+    dl->AddText(regular, 26 * s, ImVec2(x0 + 70 * s, size.y - 110 * s), dim,
-+                "Cross: select   Circle / L3+R3: resume   Left/Right: change");
++    dl->PopClipRect();
++
++    // Button hints with icons.
++    float hx = x0 + 70 * s;
++    const float hy = size.y - 90 * s;
++    for (const auto& [glyph, text] : s_hints)
++    {
++      const float r = 18 * s;
++      const float w = glyph == Glyph::L3R3 ? r * 2.0f : r;
++      DrawGlyph(dl, glyph, ImVec2(hx + w, hy), r, a);
++      hx += w * 2 + 14 * s;
++      dl->AddText(regular, 28 * s, ImVec2(hx, hy - 17 * s), dim, text.c_str());
++      hx += regular->CalcTextSizeA(28 * s, FLT_MAX, 0, text.c_str()).x + 40 * s;
++    }
 +  }
 +  if (toast)
 +  {
-+    const float tw = bold->CalcTextSizeA(34 * s, FLT_MAX, 0, s_toast.c_str()).x;
++    const float tw = bold->CalcTextSizeA(32 * s, FLT_MAX, 0, s_toast.c_str()).x;
 +    const ImVec2 p(size.x - tw - 120 * s, size.y - 150 * s);
-+    dl->AddRectFilled(ImVec2(p.x - 30 * s, p.y - 18 * s), ImVec2(p.x + tw + 30 * s, p.y + 58 * s),
-+                      IM_COL32(8, 20, 46, 220), 14 * s);
-+    dl->AddText(bold, 34 * s, p, IM_COL32(255, 255, 255, 255), s_toast.c_str());
++    dl->AddRectFilled(ImVec2(p.x - 30 * s, p.y - 18 * s), ImVec2(p.x + tw + 30 * s, p.y + 56 * s),
++                      IM_COL32(8, 20, 46, 225), 14 * s);
++    dl->AddText(bold, 32 * s, p, IM_COL32(255, 255, 255, 255), s_toast.c_str());
 +  }
 +}
-+}  // namespace
 +
 +// While the menu is open: if the drawing or the polling stops for 3 s, every thread's stack goes
 +// to /data/DolphinPS4/menu-hang.txt (once).
-+static void Watchdog()
++void Watchdog()
 +{
 +  unsigned last_draws = 0, last_polls = 0;
 +  int stalled = 0;
@@ -4212,6 +4414,7 @@ index 0000000..ab40d50
 +    last_polls = polls;
 +  }
 +}
++}  // namespace
 +
 +void Install()
 +{
@@ -4245,35 +4448,38 @@ index 0000000..ab40d50
 +  const uint32_t held = data.buttons;
 +  const uint32_t pressed = held & ~s_held;
 +  s_held = held;
-+  // Releasing every button ends the post-menu input block.
-+  if (ps4_pad_block && !s_open && held == 0)
-+    ps4_pad_block = 0;
-+
-+  constexpr uint32_t COMBO = ORBIS_PAD_BUTTON_L3 | ORBIS_PAD_BUTTON_R3;
-+  const bool combo = (held & COMBO) == COMBO && (pressed & COMBO);
-+
-+  // Decide under the lock; act (Core calls) after releasing it.
-+  enum class Action
-+  {
-+    None,
-+    Open,
-+    Close,
-+    Activate,
-+    Change,
-+  };
-+  Action action = Action::None;
-+  int item = 0, direction = 0;
 +  bool open;
 +  {
 +    std::lock_guard lock(s_mutex);
 +    open = s_open;
-+    if (open)
++  }
++  // Releasing every button ends the post-menu input block.
++  if (ps4_pad_block && !open && held == 0)
++    ps4_pad_block = 0;
++
++  constexpr uint32_t COMBO = ORBIS_PAD_BUTTON_L3 | ORBIS_PAD_BUTTON_R3;
++  const bool combo = (held & COMBO) == COMBO && (pressed & COMBO);
++  if (!open)
++  {
++    if (combo && Core::GetState(system) == Core::State::Running)
 +    {
-+      // Directions repeat while held.
-+      uint32_t nav = pressed;
-+      constexpr uint32_t DIRS = ORBIS_PAD_BUTTON_UP | ORBIS_PAD_BUTTON_DOWN |
-+                                ORBIS_PAD_BUTTON_LEFT | ORBIS_PAD_BUTTON_RIGHT;
-+      if (held & DIRS)
++      s_last_action = "open";
++      Open(system);
++    }
++  }
++  else
++  {
++    // Directions repeat while held.
++    uint32_t nav = pressed;
++    constexpr uint32_t DIRS = ORBIS_PAD_BUTTON_UP | ORBIS_PAD_BUTTON_DOWN |
++                              ORBIS_PAD_BUTTON_LEFT | ORBIS_PAD_BUTTON_RIGHT;
++    if (held & DIRS)
++    {
++      if (pressed & DIRS)
++      {
++        s_repeat = 0.35f;
++      }
++      else
 +      {
 +        s_repeat -= 1.0f / 60.0f;
 +        if (s_repeat <= 0.0f)
@@ -4281,73 +4487,55 @@ index 0000000..ab40d50
 +          nav |= held & DIRS;
 +          s_repeat = 0.08f;
 +        }
-+        if (pressed & DIRS)
-+          s_repeat = 0.35f;
 +      }
-+      if ((nav & ORBIS_PAD_BUTTON_UP) && s_selected > 0)
-+        s_selected--;
-+      if ((nav & ORBIS_PAD_BUTTON_DOWN) && s_selected < ITEM_COUNT - 1)
-+        s_selected++;
-+      item = s_selected;
-+      if (nav & ORBIS_PAD_BUTTON_LEFT)
-+        action = Action::Change, direction = -1;
-+      else if (nav & ORBIS_PAD_BUTTON_RIGHT)
-+        action = Action::Change, direction = 1;
-+      if (pressed & ORBIS_PAD_BUTTON_CROSS)
-+        action = Action::Activate;
-+      else if ((pressed & ORBIS_PAD_BUTTON_CIRCLE) || combo)
-+        action = Action::Close;
++    }
++    bool rebuild = false;
++    if (nav & ORBIS_PAD_BUTTON_UP)
++    {
++      SelectableMove(-1);
++      rebuild = true;
++    }
++    if (nav & ORBIS_PAD_BUTTON_DOWN)
++    {
++      SelectableMove(1);
++      rebuild = true;
++    }
++    if (nav & (ORBIS_PAD_BUTTON_LEFT | ORBIS_PAD_BUTTON_RIGHT))
++    {
++      const int direction = (nav & ORBIS_PAD_BUTTON_LEFT) ? -1 : 1;
++      if (s_page == Page::Main)
++        s_slot = (s_slot - 1 + direction + 8) % 8 + 1;
++      else
++        ChangeSetting(s_settings_selected, direction);
++      s_last_action = "change";
++      rebuild = true;
++    }
++    if (pressed & ORBIS_PAD_BUTTON_CROSS)
++    {
++      s_last_action = "activate";
++      Log("activate " +
++          std::to_string(s_page == Page::Main ? s_main_selected : s_settings_selected));
++      Activate(system);
++      rebuild = true;
 +    }
 +    else if (combo)
 +    {
-+      action = Action::Open;
++      Close(system);
 +    }
-+  }
-+
-+  static const char* const ACTION_NAMES[] = {"none", "open", "close", "activate", "change"};
-+  if (action != Action::None)
-+  {
-+    char line[96];
-+    snprintf(line, sizeof(line), "%s item %d (%s) direction %d",
-+             ACTION_NAMES[static_cast<int>(action)], item, Label(item).c_str(), direction);
-+    Log(line);
-+    s_last_action = ACTION_NAMES[static_cast<int>(action)];
-+  }
-+
-+  switch (action)
-+  {
-+  case Action::Open:
-+    if (Core::GetState(system) != Core::State::Running)
-+      break;
++    else if (pressed & ORBIS_PAD_BUTTON_CIRCLE)
 +    {
-+      std::string title = SConfig::GetInstance().GetTitleName();
-+      if (title.empty())
-+        title = SConfig::GetInstance().GetGameID();
-+      const int aspect = AspectIndex();
-+      std::lock_guard lock(s_mutex);
-+      s_aspect = aspect;
-+      s_open = true;
-+      s_selected = ITEM_RESUME;
-+      s_title = std::move(title);
++      if (s_page == Page::Settings)
++      {
++        s_page = Page::Main;
++        rebuild = true;
++      }
++      else
++      {
++        Close(system);
++      }
 +    }
-+    ps4_pad_block = 1;
-+    Core::SetState(system, Core::State::Paused);
-+    s_watch = true;
-+    Log("opened");
-+    break;
-+  case Action::Close:
-+    Close(system);
-+    s_watch = false;
-+    Log("closed");
-+    break;
-+  case Action::Activate:
-+    Activate(system, item);
-+    break;
-+  case Action::Change:
-+    Change(item, direction);
-+    break;
-+  case Action::None:
-+    break;
++    if (rebuild && !s_quit)
++      BuildRows();
 +  }
 +
 +  // While the menu is open (or a toast is showing) the paused frame is redrawn with it.
@@ -4393,12 +4581,484 @@ index 0000000..4af50c8
 +// "Quit Game" was chosen: the app restarts into the XMB instead of closing.
 +bool ReturnToXMB();
 +}  // namespace PS4IngameMenu
+diff --git a/Source/Core/DolphinNoGUI/PS4Settings.cpp b/Source/Core/DolphinNoGUI/PS4Settings.cpp
+new file mode 100755
+index 0000000..aba170f
+--- /dev/null
++++ b/Source/Core/DolphinNoGUI/PS4Settings.cpp
+@@ -0,0 +1,394 @@
++// Copyright 2026 Dolphin Emulator Project
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++#include "DolphinNoGUI/PS4Settings.h"
++
++#include <algorithm>
++#include <cstdlib>
++#include <fstream>
++#include <map>
++#include <mutex>
++
++#include "Common/Config/Config.h"
++#include "Core/Config/GraphicsSettings.h"
++#include "Core/Config/MainSettings.h"
++#include "VideoCommon/VideoConfig.h"
++
++extern "C" int ps4_show_fps;        // VideoCommon/Present.cpp
++extern "C" int ps4_zoom_letterbox;  // VideoCommon/Present.cpp
++extern "C" int ps4_fps_limit;       // VideoCommon/Present.cpp
++extern "C" int ps4_auto_clock;      // DolphinNoGUI/PlatformPS4.cpp
++
++namespace PS4Settings
++{
++namespace
++{
++const std::vector<Setting> SETTINGS = {
++    // Video
++    {"aspect", "Aspect Ratio", "Video",
++     {{"auto", "Auto"}, {"wide", "16:9"}, {"standard", "4:3"}, {"stretch", "Stretch"}},
++     "auto", true, "The game's picture shape on the TV."},
++    {"zoom", "Letterbox Zoom", "Video", {{"off", "Off"}, {"letterbox", "On"}}, "off", true,
++     "Fills a 16:9 TV with games that letterbox a 16:9 picture (Resident Evil 4)."},
++    {"widescreen_hack", "Widescreen Hack", "Video", {{"off", "Off"}, {"on", "On"}}, "off", true,
++     "Renders a wider view in 4:3 games (may show glitches at the edges)."},
++    {"crop", "Crop to Aspect Ratio", "Video", {{"off", "Off"}, {"on", "On"}}, "off", true,
++     "Crops the picture to the chosen aspect ratio instead of adding black bars."},
++    {"resolution", "Internal Resolution", "Video",
++     {{"1", "Native (480p)"}, {"2", "2x (720p)"}, {"3", "3x (1080p)"}}, "1", true,
++     "Sharper pictures at higher settings; costs GPU time."},
++    {"fps_limit", "Frame Rate Limit", "Video",
++     {{"0", "Unlimited"}, {"60", "60 FPS"}, {"45", "45 FPS"}, {"30", "30 FPS"}}, "0", true,
++     "Caps the frames shown per second, for steadier pacing in games that drop frames."},
++    {"vsync", "V-Sync", "Video", {{"on", "On"}, {"off", "Off"}}, "on", true,
++     "Waits for the TV's refresh (no tearing)."},
++    {"show_fps", "FPS Counter", "Video", {{"on", "On"}, {"off", "Off"}}, "on", true,
++     "Frames and emulation speed in the corner."},
++    // Graphics
++    {"texture_filtering", "Texture Filtering", "Graphics",
++     {{"default", "Default"}, {"linear", "Smooth (linear)"}, {"nearest", "Sharp (nearest)"}},
++     "default", true, "How textures are smoothed."},
++    {"anisotropy", "Anisotropic Filtering", "Graphics",
++     {{"default", "Default"}, {"1", "1x"}, {"2", "2x"}, {"4", "4x"}, {"8", "8x"}, {"16", "16x"}},
++     "default", true, "Sharper textures at an angle; costs GPU time."},
++    {"antialiasing", "Anti-Aliasing", "Graphics",
++     {{"1", "Off"}, {"2", "2x MSAA"}, {"4", "4x MSAA"}}, "1", true,
++     "Smoother edges; costs GPU time."},
++    {"disable_fog", "Disable Fog", "Graphics", {{"off", "Off"}, {"on", "On"}}, "off", true,
++     "Removes distance fog (some games use fog for effects)."},
++    {"copy_filter", "Copy Filter", "Graphics", {{"on", "On"}, {"off", "Off"}}, "on", true,
++     "The game's own blur/deflicker filter on copies; Off is sharper."},
++    {"efb_copies", "EFB Copies", "Graphics",
++     {{"texture", "To Texture (fast)"}, {"ram", "To RAM (accurate)"}}, "texture", true,
++     "Some effects need RAM copies; Texture is faster."},
++    {"efb_access", "CPU Access to EFB", "Graphics", {{"on", "On"}, {"off", "Off"}}, "on", true,
++     "Needed by some games (lens flares, cursors); Off is faster."},
++    {"manual_texture_sampling", "Manual Texture Sampling", "Graphics",
++     {{"off", "Off"}, {"on", "On"}}, "off", true,
++     "Exact texture sampling (fixes some videos, e.g. FIFA Street 2); slower."},
++    {"shader_compile", "Shader Compilation", "Graphics",
++     {{"async", "Asynchronous"}, {"sync", "Synchronous"}}, "async", false,
++     "Asynchronous: no stutter, objects may appear a moment late."},
++    // Performance
++    {"cpu_clock", "Emulated CPU Clock", "Performance",
++     {{"auto", "Auto"}, {"50", "50%"}, {"60", "60%"}, {"75", "75%"}, {"90", "90%"},
++      {"100", "100%"}, {"120", "120%"}, {"150", "150%"}},
++     "auto", true, "Auto lowers the clock only when the CPU is the limit."},
++    {"speed_mode", "Speed Features", "Performance",
++     {{"fast", "Fast"}, {"compatible", "Compatible"}}, "fast", false,
++     "Compatible turns off the port's command-stream shortcuts if a game glitches or freezes."},
++    {"dual_core", "Dual Core", "Performance",
++     {{"on", "On"}, {"force", "Forced"}, {"off", "Off"}}, "on", false,
++     "Emulates the GPU on its own thread."},
++    {"vk_thread", "Vulkan Thread", "Performance", {{"on", "On"}, {"off", "Off"}}, "on", false,
++     "Records graphics commands on a separate core."},
++    {"fast_disc", "Fast Disc Speed", "Performance", {{"on", "On"}, {"off", "Off"}}, "on", false,
++     "Shorter loading pauses (rarely breaks a game)."},
++    {"perf_overlay", "Performance Graphs", "Performance", {{"off", "Off"}, {"on", "On"}}, "off",
++     true, "Frame time and speed graphs on screen."},
++    {"profile", "Profiler Logging", "Performance", {{"off", "Off"}, {"on", "On"}}, "off", false,
++     "Records where the time goes (samples.log), for diagnosing slow games."},
++    // System
++    {"volume", "Game Volume", "System",
++     {{"100", "100"}, {"90", "90"}, {"80", "80"}, {"70", "70"}, {"60", "60"}, {"50", "50"},
++      {"40", "40"}, {"30", "30"}, {"20", "20"}, {"10", "10"}, {"0", "0"}},
++     "100", true, "Volume of the games' sound."},
++    {"audio_buffer", "Audio Buffer", "System",
++     {{"100", "100 ms"}, {"150", "150 ms"}, {"200", "200 ms"}}, "150", false,
++     "Larger is smoother when a game runs below full speed; smaller has less delay."},
++};
++
++const std::vector<const char*> CATEGORIES = {"Video", "Graphics", "Performance", "System"};
++
++std::mutex s_mutex;
++std::string s_path;
++std::map<std::string, std::map<std::string, std::string>> s_sections;  // "global", game IDs
++std::function<std::string(const std::string&)> s_base;
++
++std::string Trim(std::string text)
++{
++  while (!text.empty() && (text.back() == '\r' || text.back() == '\n' || text.back() == ' '))
++    text.pop_back();
++  return text;
++}
++
++std::string Fallback(const std::string& key)
++{
++  if (s_base)
++  {
++    const std::string base = s_base(key);
++    if (!base.empty())
++      return base;
++  }
++  const Setting* setting = Find(key);
++  return setting ? setting->fallback : "";
++}
++
++std::string GetLocked(const std::string& key, const std::string& game_id)
++{
++  if (!game_id.empty())
++  {
++    auto game = s_sections.find(game_id);
++    if (game != s_sections.end() && game->second.count("custom") &&
++        game->second.at("custom") == "on")
++    {
++      auto value = game->second.find(key);
++      if (value != game->second.end())
++        return value->second;
++    }
++  }
++  auto global = s_sections.find("global");
++  if (global != s_sections.end())
++  {
++    auto value = global->second.find(key);
++    if (value != global->second.end())
++      return value->second;
++  }
++  return Fallback(key);
++}
++}  // namespace
++
++const std::vector<Setting>& All()
++{
++  return SETTINGS;
++}
++
++const std::vector<const char*>& Categories()
++{
++  return CATEGORIES;
++}
++
++const Setting* Find(const std::string& key)
++{
++  for (const Setting& setting : SETTINGS)
++  {
++    if (key == setting.key)
++      return &setting;
++  }
++  return nullptr;
++}
++
++void Load(const std::string& data_dir)
++{
++  std::lock_guard lock(s_mutex);
++  s_path = data_dir + "/settings.ini";
++  s_sections.clear();
++  std::ifstream file(s_path);
++  std::string line, section = "global";
++  while (std::getline(file, line))
++  {
++    line = Trim(line);
++    if (line.empty() || line[0] == '#' || line[0] == ';')
++      continue;
++    if (line.front() == '[' && line.back() == ']')
++    {
++      section = line.substr(1, line.size() - 2);
++      continue;
++    }
++    const size_t eq = line.find('=');
++    if (eq != std::string::npos)
++      s_sections[section][line.substr(0, eq)] = line.substr(eq + 1);
++  }
++}
++
++void Save()
++{
++  std::lock_guard lock(s_mutex);
++  if (s_path.empty())
++    return;
++  std::ofstream file(s_path, std::ios::trunc);
++  file << "# Dolphin for PS4 settings, written by the XMB and the in-game menu.\n"
++          "# [global] applies to every game; a [GAMEID] section with custom=on overrides it.\n";
++  auto write = [&](const std::string& name, const std::map<std::string, std::string>& values) {
++    file << "\n[" << name << "]\n";
++    for (const auto& [key, value] : values)
++      file << key << "=" << value << "\n";
++  };
++  if (s_sections.count("global"))
++    write("global", s_sections["global"]);
++  for (const auto& [name, values] : s_sections)
++  {
++    if (name != "global")
++      write(name, values);
++  }
++}
++
++void SetBaseLookup(std::function<std::string(const std::string&)> lookup)
++{
++  std::lock_guard lock(s_mutex);
++  s_base = std::move(lookup);
++}
++
++std::string Get(const std::string& key, const std::string& game_id)
++{
++  std::lock_guard lock(s_mutex);
++  return GetLocked(key, game_id);
++}
++
++void Set(const std::string& key, const std::string& value, const std::string& game_id)
++{
++  {
++    std::lock_guard lock(s_mutex);
++    s_sections[game_id.empty() ? "global" : game_id][key] = value;
++  }
++  Save();
++}
++
++std::vector<std::pair<std::string, std::string>> GlobalValues()
++{
++  std::lock_guard lock(s_mutex);
++  std::vector<std::pair<std::string, std::string>> values;
++  auto global = s_sections.find("global");
++  if (global != s_sections.end())
++    values.assign(global->second.begin(), global->second.end());
++  return values;
++}
++
++std::vector<std::pair<std::string, std::string>> GameValues(const std::string& game_id)
++{
++  std::lock_guard lock(s_mutex);
++  std::vector<std::pair<std::string, std::string>> values;
++  auto game = s_sections.find(game_id);
++  if (game != s_sections.end())
++  {
++    for (const auto& [key, value] : game->second)
++    {
++      if (key != "custom")
++        values.emplace_back(key, value);
++    }
++  }
++  return values;
++}
++
++bool IsCustom(const std::string& game_id)
++{
++  std::lock_guard lock(s_mutex);
++  auto game = s_sections.find(game_id);
++  return game != s_sections.end() && game->second.count("custom") &&
++         game->second.at("custom") == "on";
++}
++
++void SetCustom(const std::string& game_id, bool custom)
++{
++  if (game_id.empty())
++    return;
++  {
++    std::lock_guard lock(s_mutex);
++    auto& section = s_sections[game_id];
++    if (custom && section.size() <= 1)
++    {
++      // First time: start from what the game uses now.
++      for (const Setting& setting : SETTINGS)
++        section[setting.key] = GetLocked(setting.key, {});
++    }
++    section["custom"] = custom ? "on" : "off";
++  }
++  Save();
++}
++
++std::string LabelOf(const Setting& setting, const std::string& value)
++{
++  for (const Choice& choice : setting.choices)
++  {
++    if (value == choice.value)
++      return choice.label;
++  }
++  return value;
++}
++
++std::string Step(const Setting& setting, const std::string& value, int direction)
++{
++  const int count = static_cast<int>(setting.choices.size());
++  int index = 0;
++  for (int i = 0; i < count; i++)
++  {
++    if (value == setting.choices[i].value)
++      index = i;
++  }
++  index = (index + direction % count + count) % count;
++  return setting.choices[index].value;
++}
++
++void ApplyLive(const std::string& key, const std::string& value)
++{
++  const bool on = value == "on";
++  if (key == "aspect")
++  {
++    Config::SetBase(Config::GFX_ASPECT_RATIO, value == "wide"     ? AspectMode::ForceWide :
++                                              value == "standard" ? AspectMode::ForceStandard :
++                                              value == "stretch"  ? AspectMode::Stretch :
++                                                                    AspectMode::Auto);
++  }
++  else if (key == "zoom")
++    ps4_zoom_letterbox = value == "letterbox";
++  else if (key == "widescreen_hack")
++    Config::SetBase(Config::GFX_WIDESCREEN_HACK, on);
++  else if (key == "crop")
++    Config::SetBase(Config::GFX_CROP_TO_ASPECT_RATIO, on);
++  else if (key == "resolution")
++    Config::SetBase(Config::GFX_EFB_SCALE, std::clamp(std::atoi(value.c_str()), 1, 4));
++  else if (key == "fps_limit")
++    ps4_fps_limit = std::max(0, std::atoi(value.c_str()));
++  else if (key == "vsync")
++    Config::SetBase(Config::GFX_VSYNC, on);
++  else if (key == "show_fps")
++    ps4_show_fps = on;
++  else if (key == "texture_filtering")
++  {
++    Config::SetBase(Config::GFX_ENHANCE_FORCE_TEXTURE_FILTERING,
++                    value == "linear"  ? TextureFilteringMode::Linear :
++                    value == "nearest" ? TextureFilteringMode::Nearest :
++                                         TextureFilteringMode::Default);
++  }
++  else if (key == "anisotropy")
++  {
++    const int x = std::atoi(value.c_str());
++    Config::SetBase(Config::GFX_ENHANCE_MAX_ANISOTROPY,
++                    x >= 16 ? AnisotropicFilteringMode::Force16x :
++                    x >= 8  ? AnisotropicFilteringMode::Force8x :
++                    x >= 4  ? AnisotropicFilteringMode::Force4x :
++                    x >= 2  ? AnisotropicFilteringMode::Force2x :
++                    x >= 1  ? AnisotropicFilteringMode::Force1x :
++                              AnisotropicFilteringMode::Default);
++  }
++  else if (key == "antialiasing")
++  {
++    Config::SetBase(Config::GFX_MSAA, static_cast<u32>(std::clamp(std::atoi(value.c_str()), 1, 4)));
++    Config::SetBase(Config::GFX_SSAA, false);
++  }
++  else if (key == "disable_fog")
++    Config::SetBase(Config::GFX_DISABLE_FOG, on);
++  else if (key == "copy_filter")
++    Config::SetBase(Config::GFX_ENHANCE_DISABLE_COPY_FILTER, value == "off");
++  else if (key == "efb_copies")
++    Config::SetBase(Config::GFX_HACK_SKIP_EFB_COPY_TO_RAM, value != "ram");
++  else if (key == "efb_access")
++    Config::SetBase(Config::GFX_HACK_EFB_ACCESS_ENABLE, on);
++  else if (key == "manual_texture_sampling")
++    Config::SetBase(Config::GFX_HACK_FAST_TEXTURE_SAMPLING, !on);
++  else if (key == "cpu_clock")
++  {
++    if (value == "auto")
++    {
++      if (ps4_auto_clock <= 0)
++        ps4_auto_clock = 100;  // the governor takes over from 100%
++      Config::SetBase(Config::MAIN_OVERCLOCK_ENABLE, false);
++      Config::SetBase(Config::MAIN_OVERCLOCK, 1.0f);
++    }
++    else
++    {
++      const int clock = std::clamp(std::atoi(value.c_str()), 20, 200);
++      ps4_auto_clock = 0;
++      Config::SetBase(Config::MAIN_OVERCLOCK_ENABLE, clock != 100);
++      Config::SetBase(Config::MAIN_OVERCLOCK, clock / 100.0f);
++    }
++  }
++  else if (key == "perf_overlay")
++  {
++    Config::SetBase(Config::GFX_SHOW_FTIMES, on);
++    Config::SetBase(Config::GFX_SHOW_SPEED, on);
++  }
++  else if (key == "volume")
++    Config::SetBase(Config::MAIN_AUDIO_VOLUME, std::clamp(std::atoi(value.c_str()), 0, 100));
++}
++}  // namespace PS4Settings
+diff --git a/Source/Core/DolphinNoGUI/PS4Settings.h b/Source/Core/DolphinNoGUI/PS4Settings.h
+new file mode 100755
+index 0000000..e3e4d83
+--- /dev/null
++++ b/Source/Core/DolphinNoGUI/PS4Settings.h
+@@ -0,0 +1,66 @@
++// Copyright 2026 Dolphin Emulator Project
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++// PS4 user settings, shared by the XMB (PS4XMB.cpp) and the in-game menu (PS4IngameMenu.cpp).
++// The user's choices are kept in /data/DolphinPS4/settings.ini: a [global] section and one
++// section per game ID for games set to "custom". A setting the user never changed falls back to
++// ps4.ini (the port's tuned defaults), then to the built-in fallback below.
++//
++// Precedence when a game starts (PlatformPS4.cpp): ps4.ini global < settings.ini [global] <
++// ps4.ini per-game compatibility sections < settings.ini [GAMEID] (custom games only).
++
++#pragma once
++
++#include <functional>
++#include <string>
++#include <vector>
++
++namespace PS4Settings
++{
++struct Choice
++{
++  const char* value;  // stored in settings.ini / ps4.ini
++  const char* label;  // shown in the menus
++};
++
++struct Setting
++{
++  const char* key;
++  const char* label;
++  const char* category;
++  std::vector<Choice> choices;
++  const char* fallback;  // when neither settings.ini nor ps4.ini has a value
++  bool live;             // takes effect while a game runs (else: next game start)
++  const char* help;
++};
++
++const std::vector<Setting>& All();
++const std::vector<const char*>& Categories();
++const Setting* Find(const std::string& key);
++
++// settings.ini
++void Load(const std::string& data_dir);
++void Save();
++
++// ps4.ini lookup for unset settings (PlatformPS4: its global options).
++void SetBaseLookup(std::function<std::string(const std::string& key)> lookup);
++
++// Effective value: the game's own (custom games), else global, else ps4.ini, else fallback.
++std::string Get(const std::string& key, const std::string& game_id = {});
++// Stores a value globally (game_id empty) or for a custom game.
++void Set(const std::string& key, const std::string& value, const std::string& game_id = {});
++// The user's global choices (only what was changed) / a custom game's own values.
++std::vector<std::pair<std::string, std::string>> GlobalValues();
++std::vector<std::pair<std::string, std::string>> GameValues(const std::string& game_id);
++bool IsCustom(const std::string& game_id);
++// Custom on: the game starts with a copy of the effective global values.
++void SetCustom(const std::string& game_id, bool custom);
++
++// Label of a value for display ("16:9" for "wide").
++std::string LabelOf(const Setting& setting, const std::string& value);
++// Next / previous choice (wrapping).
++std::string Step(const Setting& setting, const std::string& value, int direction);
++
++// Game process only: applies a live setting to the running emulator (Config / port globals).
++void ApplyLive(const std::string& key, const std::string& value);
++}  // namespace PS4Settings
 diff --git a/Source/Core/DolphinNoGUI/PS4XMB.cpp b/Source/Core/DolphinNoGUI/PS4XMB.cpp
 new file mode 100755
-index 0000000..cca2e02
+index 0000000..201465c
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4XMB.cpp
-@@ -0,0 +1,1384 @@
+@@ -0,0 +1,1580 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -4431,6 +5091,7 @@ index 0000000..cca2e02
 +#include "DiscIO/Enums.h"
 +#include "DiscIO/Volume.h"
 +#include "DiscIO/VolumeDisc.h"
++#include "DolphinNoGUI/PS4Settings.h"
 +#include "DolphinNoGUI/PS4XMBDisplay.h"
 +
 +extern "C" void ps4_boot_trace(const char* line);  // port/ps4_crashlog.cpp
@@ -4839,26 +5500,42 @@ index 0000000..cca2e02
 +  SET_VOLUME,
 +  SET_CLOCK,
 +  SET_ABOUT,
++  SET_GROUP = 100,  // + index into PS4Settings::Categories(): an emulation settings list
 +};
 +
-+// A PSP-style options panel on the right (setting values, game actions, information).
++// A row of a settings list panel (emulation settings, PS4Settings).
++struct SettingRow
++{
++  std::string label;
++  std::string value;
++  std::string key;      // setting key; empty for headers and the "Apply To" row
++  bool header = false;  // category title
++  bool scope = false;   // "Apply To: All Games / This Game" (game settings)
++  bool note = false;    // takes effect at the next game start
++};
++
++// A PSP-style panel on the right: options to pick from, information text, or a settings list.
 +struct SidePanel
 +{
 +  bool open = false;
 +  std::string title;
 +  std::vector<std::string> options;
 +  std::vector<std::string> lines;  // information text (no options)
++  std::vector<SettingRow> rows;    // settings list (Left/Right change the values)
++  std::string category;            // settings list: one category, or all (game settings)
++  std::string game_id;             // settings list: the game's own settings, else global
 +  int selected = 0;
 +  int setting = -1;
 +  float slide = 0.0f;  // 0 closed .. 1 open
++  float scroll = 0.0f;
 +};
 +
 +class Menu
 +{
 +public:
 +  Menu(const std::vector<LibraryDisc>& library, const std::string& data_dir,
-+       const std::string& assets_dir)
-+      : m_data_dir(data_dir), m_assets_dir(assets_dir)
++       const std::string& assets_dir, const std::string& version)
++      : m_data_dir(data_dir), m_assets_dir(assets_dir), m_version(version)
 +  {
 +    m_prefs.Load(m_data_dir + "/xmb.ini");
 +    BuildGames(library);
@@ -4877,6 +5554,10 @@ index 0000000..cca2e02
 +  void HandleInput(uint32_t pressed);
 +  void OpenSettingPanel(int setting);
 +  void ApplySettingOption(int setting, int option);
++  void OpenSettingsList(const std::string& category, const std::string& game_id);
++  void BuildSettingRows();
++  void ChangeSettingRow(int direction);
++  void MoveSettingRow(int direction);
 +
 +  void Draw(float dt);
 +  void DrawBackground();
@@ -4889,7 +5570,7 @@ index 0000000..cca2e02
 +            const std::string& text, bool shadow = true);
 +  float TextWidth(ImFont* font, float size, const std::string& text);
 +
-+  std::string m_data_dir, m_assets_dir;
++  std::string m_data_dir, m_assets_dir, m_version;
 +  Preferences m_prefs;
 +  std::vector<Game> m_games;
 +  std::vector<std::string> m_wallpapers;
@@ -5090,6 +5771,17 @@ index 0000000..cca2e02
 +    items.clear();
 +
 +  auto& settings = m_items[static_cast<int>(Category::Settings)];
++  // Emulation settings for every game (each game can have its own: Triangle on it).
++  const auto& categories = PS4Settings::Categories();
++  constexpr const char* GROUP_HELP[] = {"Picture, resolution, frame rate",
++                                        "Filtering, anti-aliasing, effects",
++                                        "CPU clock, speed features, profiler",
++                                        "Game volume, audio"};
++  for (size_t i = 0; i < categories.size(); i++)
++  {
++    settings.push_back({categories[i], i < std::size(GROUP_HELP) ? GROUP_HELP[i] : "", -1, -1,
++                        SET_GROUP + static_cast<int>(i)});
++  }
 +  settings.push_back({"Sound Effects", m_prefs.sounds ? "On" : "Off", -1, -1, SET_SOUNDS});
 +  settings.push_back({"Volume", std::to_string(m_prefs.volume), -1, -1, SET_VOLUME});
 +  settings.push_back({"Clock", m_prefs.clock ? "On" : "Off", -1, -1, SET_CLOCK});
@@ -5148,6 +5840,8 @@ index 0000000..cca2e02
 +    m_panel.title = "About";
 +    m_panel.lines = {"Dolphin for PS4",
 +                     "GameCube and Wii emulator",
++                     "Ported to PS4 by ShiroKlein",
++                     "Version " + m_version,
 +                     "",
 +                     "Games: " + m_data_dir + "/games",
 +                     "Wallpapers (PNG): " + m_data_dir + "/themes",
@@ -5157,8 +5851,91 @@ index 0000000..cca2e02
 +                     "Font: Nunito (SIL Open Font License)."};
 +    break;
 +  default:
++    if (setting >= SET_GROUP &&
++        setting < SET_GROUP + static_cast<int>(PS4Settings::Categories().size()))
++    {
++      OpenSettingsList(PS4Settings::Categories()[setting - SET_GROUP], {});
++      return;
++    }
 +    m_panel.open = false;
 +  }
++}
++
++// A settings list: one category of the global settings, or every setting of one game (with
++// "Apply To" first: all games = the game follows the global settings, this game = its own).
++void Menu::OpenSettingsList(const std::string& category, const std::string& game_id)
++{
++  m_panel = {};
++  m_panel.open = true;
++  m_panel.category = category;
++  m_panel.game_id = game_id;
++  m_panel.title = category.empty() ? "Game Settings" : category;
++  BuildSettingRows();
++  m_panel.selected = 0;
++  MoveSettingRow(0);
++}
++
++void Menu::BuildSettingRows()
++{
++  std::vector<SettingRow> rows;
++  const std::string& game = m_panel.game_id;
++  if (!game.empty())
++  {
++    rows.push_back({"Apply To", PS4Settings::IsCustom(game) ? "This Game" : "All Games", "", false,
++                    true});
++  }
++  for (const char* category : PS4Settings::Categories())
++  {
++    if (!m_panel.category.empty() && m_panel.category != category)
++      continue;
++    if (m_panel.category.empty())
++      rows.push_back({category, "", "", true});
++    for (const PS4Settings::Setting& setting : PS4Settings::All())
++    {
++      if (std::string(setting.category) != category)
++        continue;
++      rows.push_back({setting.label,
++                      PS4Settings::LabelOf(setting, PS4Settings::Get(setting.key, game)),
++                      setting.key, false, false, !setting.live});
++    }
++  }
++  m_panel.rows = std::move(rows);
++}
++
++// Moves the selection by direction (0: onto the nearest selectable row), skipping headers.
++void Menu::MoveSettingRow(int direction)
++{
++  const int count = static_cast<int>(m_panel.rows.size());
++  int row = std::clamp(m_panel.selected + direction, 0, std::max(0, count - 1));
++  const int step = direction < 0 ? -1 : 1;
++  while (row >= 0 && row < count && m_panel.rows[row].header)
++    row += step;
++  if (row >= 0 && row < count)
++    m_panel.selected = row;
++}
++
++void Menu::ChangeSettingRow(int direction)
++{
++  if (m_panel.selected < 0 || m_panel.selected >= static_cast<int>(m_panel.rows.size()))
++    return;
++  const SettingRow& row = m_panel.rows[m_panel.selected];
++  const std::string& game = m_panel.game_id;
++  if (row.scope)
++  {
++    PS4Settings::SetCustom(game, !PS4Settings::IsCustom(game));
++  }
++  else if (!row.key.empty())
++  {
++    const PS4Settings::Setting* setting = PS4Settings::Find(row.key);
++    if (!setting)
++      return;
++    // A game following the global settings: changing one of its values makes it custom.
++    if (!game.empty() && !PS4Settings::IsCustom(game))
++      PS4Settings::SetCustom(game, true);
++    PS4Settings::Set(row.key, PS4Settings::Step(*setting, PS4Settings::Get(row.key, game), direction),
++                     game);
++  }
++  BuildSettingRows();
 +}
 +
 +void Menu::ApplySettingOption(int setting, int option)
@@ -5194,6 +5971,26 @@ index 0000000..cca2e02
 +      Play("back");
 +      return;
 +    }
++    if (!m_panel.rows.empty())
++    {
++      // Settings list: Up/Down pick, Left/Right (or Cross) change the value.
++      if (pressed & BTN_UP)
++      {
++        MoveSettingRow(-1);
++        Play("move");
++      }
++      if (pressed & BTN_DOWN)
++      {
++        MoveSettingRow(1);
++        Play("move");
++      }
++      if (pressed & (BTN_LEFT | BTN_RIGHT | BTN_CROSS))
++      {
++        ChangeSettingRow((pressed & BTN_LEFT) ? -1 : 1);
++        Play("category");
++      }
++      return;
++    }
 +    if (m_panel.options.empty())
 +    {
 +      if (pressed & BTN_CROSS)
@@ -5227,6 +6024,13 @@ index 0000000..cca2e02
 +        return;
 +      }
 +      else if (m_panel.title == "Game" && m_panel.selected == 1)
++      {
++        const Item& item = m_items[m_category][m_selected[m_category]];
++        OpenSettingsList({}, m_games[item.game].id);
++        Play("confirm");
++        return;
++      }
++      else if (m_panel.title == "Game" && m_panel.selected == 2)
 +      {
 +        const Item& item = m_items[m_category][m_selected[m_category]];
 +        const Game& game = m_games[item.game];
@@ -5324,7 +6128,7 @@ index 0000000..cca2e02
 +      m_panel = {};
 +      m_panel.open = true;
 +      m_panel.title = "Game";
-+      m_panel.options = {"Start", "Information"};
++      m_panel.options = {"Start", "Game Settings", "Information"};
 +      Play("menu");
 +    }
 +  }
@@ -5542,7 +6346,7 @@ index 0000000..cca2e02
 +  if (m_panel.slide < 0.01f)
 +    return;
 +  const Theme& theme = CurrentTheme();
-+  const float width = 620.0f;
++  const float width = m_panel.rows.empty() ? 620.0f : 860.0f;
 +  const float x0 = W - width * m_panel.slide;
 +  const bool light = theme.text != 0xFFFFFF;
 +  dl->AddRectFilled(ImVec2(x0, 0), ImVec2(W, H),
@@ -5569,6 +6373,56 @@ index 0000000..cca2e02
 +  {
 +    Text(dl, m_font, 28, ImVec2(x0 + 50, y), text, line);
 +    y += 42;
++  }
++  if (!m_panel.rows.empty())
++  {
++    // Settings list, scrolling with the selection; the setting's help text below it.
++    const float row_h = 58.0f, top = 220.0f, bottom = H - 200.0f;
++    const float visible = (bottom - top) / row_h;
++    const float target =
++        std::clamp(static_cast<float>(m_panel.selected) - visible * 0.5f + 1.0f, 0.0f,
++                   std::max(0.0f, static_cast<float>(m_panel.rows.size()) - visible));
++    Approach(m_panel.scroll, target, 16.0f, dt);
++    dl->PushClipRect(ImVec2(x0, top - 8), ImVec2(W, bottom + 8), true);
++    for (size_t i = 0; i < m_panel.rows.size(); i++)
++    {
++      const SettingRow& row = m_panel.rows[i];
++      const float ry = top + (static_cast<float>(i) - m_panel.scroll) * row_h;
++      if (ry < top - row_h || ry > bottom)
++        continue;
++      if (row.header)
++      {
++        Text(dl, m_bold, 26, ImVec2(x0 + 50, ry + 14), Rgba(theme.wave, m_panel.slide), row.label,
++             false);
++        dl->AddLine(ImVec2(x0 + 50, ry + 50), ImVec2(W - 50, ry + 50),
++                    Rgba(theme.wave, 0.35f * m_panel.slide), 1.5f);
++        continue;
++      }
++      const bool sel = static_cast<int>(i) == m_panel.selected;
++      if (sel)
++      {
++        dl->AddRectFilled(ImVec2(x0 + 30, ry - 4), ImVec2(W - 30, ry + 50),
++                          Rgba(theme.wave, 0.30f * m_panel.slide), 10.0f);
++      }
++      Text(dl, sel ? m_bold : m_font, sel ? 32.0f : 30.0f, ImVec2(x0 + 60, ry + 4), text,
++           row.label);
++      const std::string value = sel ? "< " + row.value + " >" : row.value;
++      const float tw = TextWidth(m_font, 28, value);
++      const ImU32 colour = row.note ? Rgba(0xFFC870, m_panel.slide) : text;
++      Text(dl, m_font, 28, ImVec2(W - 70 - tw, ry + 7), colour, value);
++    }
++    dl->PopClipRect();
++    if (m_panel.selected >= 0 && m_panel.selected < static_cast<int>(m_panel.rows.size()))
++    {
++      const SettingRow& row = m_panel.rows[m_panel.selected];
++      std::string help;
++      if (row.scope)
++        help = "All Games: this game follows the global settings. This Game: its own.";
++      else if (const PS4Settings::Setting* setting = PS4Settings::Find(row.key))
++        help = std::string(setting->help) + (setting->live ? "" : " (Next game start.)");
++      dl->AddText(m_font, 25, ImVec2(x0 + 50, bottom + 24), Rgba(theme.text, 0.8f * m_panel.slide),
++                  help.c_str(), nullptr, width - 100);
++    }
 +  }
 +}
 +
@@ -5607,6 +6461,8 @@ index 0000000..cca2e02
 +    hint("Back", 1);
 +    if (!m_panel.options.empty())
 +      hint("Select", 0);
++    if (!m_panel.rows.empty())
++      hint("Change", 0);
 +  }
 +  else
 +  {
@@ -5777,15 +6633,15 @@ index 0000000..cca2e02
 +}  // namespace
 +
 +std::string Run(const std::vector<LibraryDisc>& library, const std::string& data_dir,
-+                const std::string& assets_dir)
++                const std::string& assets_dir, const std::string& version)
 +{
-+  Menu menu(library, data_dir, assets_dir);
++  Menu menu(library, data_dir, assets_dir, version);
 +  return menu.Run();
 +}
 +}  // namespace PS4XMB
 diff --git a/Source/Core/DolphinNoGUI/PS4XMB.h b/Source/Core/DolphinNoGUI/PS4XMB.h
 new file mode 100755
-index 0000000..4c06d4c
+index 0000000..87be3f8
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4XMB.h
 @@ -0,0 +1,30 @@
@@ -5817,7 +6673,7 @@ index 0000000..4c06d4c
 +// Shows the XMB until a game is picked (returns its first disc) or the user quits (empty).
 +// data_dir: /data/DolphinPS4 (xmb.ini, themes/); assets_dir: /app0 (xmb/, Sys/).
 +std::string Run(const std::vector<LibraryDisc>& library, const std::string& data_dir,
-+                const std::string& assets_dir);
++                const std::string& assets_dir, const std::string& version);
 +}  // namespace PS4XMB
 diff --git a/Source/Core/DolphinNoGUI/PS4XMBDisplay.cpp b/Source/Core/DolphinNoGUI/PS4XMBDisplay.cpp
 new file mode 100755
@@ -6465,10 +7321,10 @@ index f4dc8a9..4e5ff67 100644
  
 diff --git a/Source/Core/DolphinNoGUI/PlatformPS4.cpp b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
 new file mode 100644
-index 0000000..87248d7
+index 0000000..6206288
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
-@@ -0,0 +1,964 @@
+@@ -0,0 +1,1027 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -6503,6 +7359,7 @@ index 0000000..87248d7
 +
 +#include "Common/Config/Config.h"
 +#include "DolphinNoGUI/PS4IngameMenu.h"
++#include "DolphinNoGUI/PS4Settings.h"
 +#include "DolphinNoGUI/PS4XMB.h"
 +#include "DiscIO/Volume.h"
 +#include "DiscIO/VolumeDisc.h"
@@ -6547,6 +7404,40 @@ index 0000000..87248d7
 +// apply to that game; they override the global lines (ApplyGameOptions).
 +std::map<std::string, std::string> s_options;
 +std::map<std::string, std::map<std::string, std::string>> s_game_options;
++
++// ps4.ini's global options as read (before settings.ini): the menus' defaults.
++std::map<std::string, std::string> s_ps4_global;
++
++// The app version (APP_VER of /app0/sce_sys/param.sfo), for the logs and the XMB's About.
++std::string AppVersion()
++{
++  std::ifstream file("/app0/sce_sys/param.sfo", std::ios::binary);
++  const std::string sfo((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
++  auto u32_at = [&](size_t at) {
++    u32 value = 0;
++    if (at + 4 <= sfo.size())
++      std::memcpy(&value, sfo.data() + at, 4);
++    return value;
++  };
++  if (sfo.size() < 20 || sfo.compare(0, 4, std::string("\0PSF", 4)) != 0)
++    return "?";
++  const u32 keys = u32_at(8), data = u32_at(12), count = u32_at(16);
++  for (u32 i = 0; i < count; i++)
++  {
++    const size_t entry = 20 + i * 16;
++    if (entry + 16 > sfo.size())
++      break;
++    u16 key_offset = 0;
++    std::memcpy(&key_offset, sfo.data() + entry, 2);
++    const size_t key_at = keys + key_offset;
++    if (key_at >= sfo.size() || std::strcmp(sfo.c_str() + key_at, "APP_VER") != 0)
++      continue;
++    const size_t value_at = data + u32_at(entry + 12);
++    if (value_at < sfo.size())
++      return std::string(sfo.c_str() + value_at);
++  }
++  return "?";
++}
 +
 +void LoadOptions()
 +{
@@ -7341,7 +8232,18 @@ index 0000000..87248d7
 +  atexit(OnExit);
 +  BootTrace("log opened");
 +
++  BootTrace(("app version " + AppVersion()).c_str());
 +  LoadOptions();
++  // The menus' settings (settings.ini) over ps4.ini's global options; settings never changed in
++  // the menus keep ps4.ini's values (PS4Settings.h has the full order).
++  s_ps4_global = s_options;
++  PS4Settings::Load(PS4_DATA_DIR_PATH);
++  PS4Settings::SetBaseLookup([](const std::string& key) {
++    const auto it = s_ps4_global.find(key);
++    return it == s_ps4_global.end() ? std::string() : it->second;
++  });
++  for (const auto& [key, value] : PS4Settings::GlobalValues())
++    s_options[key] = value;
 +  for (const auto& [key, value] : s_options)
 +    BootTrace(("option " + key + "=" + value).c_str());
 +  ps4_jit_in_system_pool = GetPS4Option("jit_memory", "system") == "system" ? 1 : 0;
@@ -7372,7 +8274,7 @@ index 0000000..87248d7
 +    std::vector<PS4XMB::LibraryDisc> library;
 +    for (const LibraryEntry& entry : GameLibrary())
 +      library.push_back({entry.path, entry.game_id, entry.revision, entry.disc, entry.title});
-+    game = PS4XMB::Run(library, PS4_DATA_DIR_PATH, "/app0");
++    game = PS4XMB::Run(library, PS4_DATA_DIR_PATH, "/app0", AppVersion());
 +    if (game.empty())
 +    {
 +      // The menu couldn't start: the old automatic start, so the app stays usable.
@@ -7428,8 +8330,25 @@ index 0000000..87248d7
 +          BootTrace(("option [" + id + "] " + key + "=" + value).c_str());
 +        }
 +      }
++      // The game's own menu settings, when it is set to custom.
++      if (PS4Settings::IsCustom(entry.game_id))
++      {
++        for (const auto& [key, value] : PS4Settings::GameValues(entry.game_id))
++        {
++          s_options[key] = value;
++          BootTrace(("setting [" + entry.game_id + "] " + key + "=" + value).c_str());
++        }
++      }
 +      break;
 +    }
++  }
++  // Speed Features: Compatible turns off the command-stream shortcuts (freezes and missing menu
++  // items in Crash Tag Team Racing and FIFA Street 2 came from them).
++  if (GetPS4Option("speed_mode", "fast") == "compatible")
++  {
++    for (const char* key : {"fifo_defer", "jit_gp_fuse", "jit_lazy_lfs", "fifo_batch"})
++      s_options[key] = "off";
++    BootTrace("speed features: compatible");
 +  }
 +  return args;
 +}
@@ -12740,7 +13659,7 @@ index 92f7c1f..3378a49 100644
      m_default_pixel_shader = g_gfx->CreateShaderFromSource(
          ShaderStage::Pixel, GetHeader(false) + default_pixel_shader_code + GetFooter(), nullptr,
 diff --git a/Source/Core/VideoCommon/Present.cpp b/Source/Core/VideoCommon/Present.cpp
-index 41d05f3..2bc67f6 100644
+index 41d05f3..48018e8 100644
 --- a/Source/Core/VideoCommon/Present.cpp
 +++ b/Source/Core/VideoCommon/Present.cpp
 @@ -3,6 +3,11 @@
@@ -12807,7 +13726,37 @@ index 41d05f3..2bc67f6 100644
    ReleaseXFBContentLock();
    u64 old_xfb_id = m_last_xfb_id;
  
-@@ -431,8 +459,23 @@ Presenter::ConvertStereoRectangle(const MathUtil::Rectangle<int>& rc) const
+@@ -165,10 +193,29 @@ bool Presenter::FetchXFB(u32 xfb_addr, u32 fb_width, u32 fb_stride, u32 fb_heigh
+   return old_xfb_id == m_last_xfb_id;
+ }
+ 
++#ifdef __ORBIS__
++// Menu setting fps_limit (DolphinNoGUI/PS4Settings.cpp): frames that come sooner than
++// 1/limit after the last shown one are not presented (0 = no limit).
++extern "C" int ps4_fps_limit;
++int ps4_fps_limit = 0;
++#endif
++
+ void Presenter::ViSwap(u32 xfb_addr, u32 fb_width, u32 fb_stride, u32 fb_height, u64 ticks,
+                        TimePoint presentation_time)
+ {
+   bool is_duplicate = FetchXFB(xfb_addr, fb_width, fb_stride, fb_height, ticks);
++#ifdef __ORBIS__
++  if (ps4_fps_limit > 0)
++  {
++    static Clock::time_point s_next;
++    const auto now = Clock::now();
++    const auto interval = std::chrono::duration_cast<Clock::duration>(
++        std::chrono::duration<double>(1.0 / ps4_fps_limit));
++    if (now + std::chrono::milliseconds(2) < s_next)
++      return;
++    s_next = (now - s_next > interval) ? now + interval : s_next + interval;
++  }
++#endif
+ 
+   PresentInfo present_info{
+       .present_count = m_present_count++,
+@@ -431,8 +478,23 @@ Presenter::ConvertStereoRectangle(const MathUtil::Rectangle<int>& rc) const
    return std::make_tuple(left_rc, right_rc);
  }
  
@@ -12831,7 +13780,7 @@ index 41d05f3..2bc67f6 100644
    if (!g_ActiveConfig.bCropCustom)
      return MathUtil::Rectangle<int>(0, 0, 0, 0);
  
-@@ -464,7 +507,11 @@ MathUtil::Rectangle<int> Presenter::AdjustForCustomCrop(const MathUtil::Rectangl
+@@ -464,7 +526,11 @@ MathUtil::Rectangle<int> Presenter::AdjustForCustomCrop(const MathUtil::Rectangl
  
  float Presenter::AdjustAspectRatioForCustomCrop(float input_aspect_ratio) const
  {
@@ -12843,7 +13792,7 @@ index 41d05f3..2bc67f6 100644
      return input_aspect_ratio;
  
    const MathUtil::Rectangle<int> rect = m_xfb_rect;
-@@ -903,10 +950,131 @@ void Presenter::RenderXFBToScreen(const MathUtil::Rectangle<int>& target_rc,
+@@ -903,10 +969,131 @@ void Presenter::RenderXFBToScreen(const MathUtil::Rectangle<int>& target_rc,
    }
  }
  
@@ -12975,7 +13924,7 @@ index 41d05f3..2bc67f6 100644
    if (g_gfx->IsHeadless() || (!m_onscreen_ui && !m_xfb_entry))
      return;
  
-@@ -934,7 +1102,18 @@ void Presenter::Present(PresentInfo* present_info)
+@@ -934,7 +1121,18 @@ void Presenter::Present(PresentInfo* present_info)
    UpdateDrawRectangle();
  
    g_gfx->BeginUtilityDrawing();
@@ -12994,7 +13943,7 @@ index 41d05f3..2bc67f6 100644
  
    // Render the XFB to the screen.
    if (backbuffer_bound && m_xfb_entry)
-@@ -945,7 +1124,52 @@ void Presenter::Present(PresentInfo* present_info)
+@@ -945,7 +1143,52 @@ void Presenter::Present(PresentInfo* present_info)
      AdjustRectanglesToFitBounds(&render_target_rc, &render_source_rc, m_backbuffer_width,
                                  m_backbuffer_height);
      RenderXFBToScreen(render_target_rc, m_xfb_entry->texture.get(), render_source_rc);
