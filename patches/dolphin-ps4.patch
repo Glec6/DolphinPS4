@@ -7431,10 +7431,10 @@ index 0000000..dbf7077
 +}  // namespace PS4Updater
 diff --git a/Source/Core/DolphinNoGUI/PS4XMB.cpp b/Source/Core/DolphinNoGUI/PS4XMB.cpp
 new file mode 100755
-index 0000000..b90eb72
+index 0000000..79a154e
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4XMB.cpp
-@@ -0,0 +1,2422 @@
+@@ -0,0 +1,2606 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -7814,6 +7814,7 @@ index 0000000..b90eb72
 +  int volume = 80;
 +  bool clock = true;
 +  bool auto_update = true;  // look for a new version on GitHub when the app opens
++  std::string games_dir;    // Settings -> Game Folder; empty = data_dir/games
 +  std::string last_game;
 +
 +  void Load(const std::string& path)
@@ -7840,6 +7841,8 @@ index 0000000..b90eb72
 +        clock = value == "on";
 +      else if (key == "auto_update")
 +        auto_update = value == "on";
++      else if (key == "games_dir")
++        games_dir = value;
 +      else if (key == "last_game")
 +        last_game = value;
 +    }
@@ -7851,7 +7854,7 @@ index 0000000..b90eb72
 +    file << "theme=" << theme << "\nwallpaper=" << wallpaper << "\nsounds="
 +         << (sounds ? "on" : "off") << "\nvolume=" << volume << "\nclock="
 +         << (clock ? "on" : "off") << "\nauto_update=" << (auto_update ? "on" : "off")
-+         << "\nlast_game=" << last_game << "\n";
++         << "\ngames_dir=" << games_dir << "\nlast_game=" << last_game << "\n";
 +  }
 +};
 +
@@ -7902,6 +7905,7 @@ index 0000000..b90eb72
 +  SET_UPDATE_CHECK,  // Check for Updates
 +  SET_AUTO_UPDATE,   // Automatic Updates on/off
 +  SET_UPDATE,        // the update panel: prompt, progress, result
++  SET_GAMES_DIR,     // Game Folder: a folder browser
 +  SET_GROUP = 100,  // + index into PS4Settings::Categories(): an emulation settings list
 +};
 +
@@ -7937,12 +7941,12 @@ index 0000000..b90eb72
 +class Menu
 +{
 +public:
-+  Menu(const std::vector<LibraryDisc>& library, const std::string& data_dir,
-+       const std::string& assets_dir, const std::string& version)
-+      : m_data_dir(data_dir), m_assets_dir(assets_dir), m_version(version)
++  Menu(const ScanFunction& scan, const std::string& data_dir, const std::string& assets_dir,
++       const std::string& version)
++      : m_data_dir(data_dir), m_assets_dir(assets_dir), m_version(version), m_scan(scan)
 +  {
 +    m_prefs.Load(m_data_dir + "/xmb.ini");
-+    BuildGames(library);
++    BuildGames(m_scan(GamesFolder()));
 +  }
 +
 +  std::string Run();
@@ -7965,6 +7969,13 @@ index 0000000..b90eb72
 +  void BuildCheatRows();
 +  void StartCoverDownload();
 +  void UpdateCoverDownload();
++  std::string GamesFolder() const
++  {
++    return m_prefs.games_dir.empty() ? m_data_dir + "/games" : m_prefs.games_dir;
++  }
++  void RefreshGames();
++  void LoadBanners();
++  void OpenFolderBrowser(const std::string& path);
 +  void StartUpdateCheck(bool manual);
 +  void StartUpdateDownload();
 +  void UpdateUpdater(float dt);
@@ -8026,6 +8037,8 @@ index 0000000..b90eb72
 +  std::mutex m_cover_mutex;
 +  std::string m_cover_status;
 +  PS4Covers::Result m_cover_result;
++  ScanFunction m_scan;
++  std::string m_browse_dir;  // Game Folder browser: the folder shown ("" = the drives)
 +  // Updates from GitHub (PS4Updater): checked in the background when the app opens.
 +  enum class UpdateState
 +  {
@@ -8157,8 +8170,24 @@ index 0000000..b90eb72
 +      LoadPngTexture(m_assets_dir + "/xmb/intro-dolphin.png", &m_intro_dolphin_aspect);
 +  m_intro_title = LoadPngTexture(m_assets_dir + "/xmb/intro-title.png", &m_intro_title_aspect);
 +  LoadCovers();
++  LoadBanners();
 +
-+  // Banners from the discs (GameCube; Wii discs carry none Dolphin can read without a NAND).
++  std::error_code error;
++  for (const auto& entry :
++       std::filesystem::directory_iterator(m_data_dir + "/themes", error))
++  {
++    std::string name = entry.path().filename().string();
++    std::string lower = name;
++    std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
++    if (lower.size() > 4 && lower.compare(lower.size() - 4, 4, ".png") == 0)
++      m_wallpapers.push_back(name);
++  }
++  std::sort(m_wallpapers.begin(), m_wallpapers.end());
++}
++
++// Banners from the discs (GameCube; Wii discs carry none Dolphin can read without a NAND).
++void Menu::LoadBanners()
++{
 +  for (Game& game : m_games)
 +  {
 +    std::unique_ptr<DiscIO::VolumeDisc> disc = DiscIO::CreateDisc(game.path);
@@ -8183,18 +8212,130 @@ index 0000000..b90eb72
 +    game.banner = m_display.CreateTexture(rgba.data(), width, height);
 +    game.banner_aspect = static_cast<float>(width) / static_cast<float>(height);
 +  }
++}
 +
-+  std::error_code error;
-+  for (const auto& entry :
-+       std::filesystem::directory_iterator(m_data_dir + "/themes", error))
++// Square in the Games column, or a new Game Folder: the folder is read again.
++void Menu::RefreshGames()
++{
++  const int games_index = static_cast<int>(Category::Games);
++  std::string selected_path;
++  const auto& items = m_items[games_index];
++  if (!items.empty() && items[m_selected[games_index]].game >= 0)
++    selected_path = m_games[items[m_selected[games_index]].game].path;
++  for (Game& game : m_games)
 +  {
-+    std::string name = entry.path().filename().string();
++    if (game.banner != ImTextureID{})
++      m_display.DestroyTexture(game.banner);
++    if (game.cover != ImTextureID{})
++      m_display.DestroyTexture(game.cover);
++  }
++  m_games.clear();
++  BuildGames(m_scan(GamesFolder()));
++  LoadBanners();
++  LoadCovers();
++  BuildItems();
++  m_selected[games_index] = 0;
++  m_item_pos[games_index] = 0.0f;
++  const auto& refreshed = m_items[games_index];
++  for (size_t i = 0; i < refreshed.size(); i++)
++  {
++    if (refreshed[i].game >= 0 && m_games[refreshed[i].game].path == selected_path)
++    {
++      m_selected[games_index] = static_cast<int>(i);
++      m_item_pos[games_index] = static_cast<float>(i);
++    }
++  }
++  Log("games: " + std::to_string(m_games.size()) + " in " + GamesFolder());
++  for (const Game& game : m_games)
++  {
++    if (!game.id.empty() && game.cover == ImTextureID{})
++    {
++      StartCoverDownload();
++      break;
++    }
++  }
++}
++
++// Game Folder: a folder browser. "" shows the places games can be (the console's storage and
++// USB drives); a folder shows "Use This Folder" (with how many games it holds), ".." and its
++// subfolders.
++void Menu::OpenFolderBrowser(const std::string& path)
++{
++  auto is_game = [](const std::string& name) {
 +    std::string lower = name;
 +    std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
-+    if (lower.size() > 4 && lower.compare(lower.size() - 4, 4, ".png") == 0)
-+      m_wallpapers.push_back(name);
++    for (const char* extension :
++         {".iso", ".gcm", ".ciso", ".gcz", ".wbfs", ".wia", ".rvz", ".nkit.iso"})
++    {
++      const size_t length = std::strlen(extension);
++      if (lower.size() > length && lower.compare(lower.size() - length, length, extension) == 0)
++        return true;
++    }
++    return false;
++  };
++  const bool reopen = m_panel.open && m_panel.setting == SET_GAMES_DIR;
++  m_panel = {};
++  m_panel.open = true;
++  m_panel.setting = SET_GAMES_DIR;
++  m_panel.title = "Game Folder";
++  m_browse_dir = path;
++  std::vector<SettingRow> rows;
++  std::error_code ec;
++  if (path.empty())
++  {
++    rows.push_back({"Places", "", "", true});
++    std::vector<std::string> places = {"/data", m_data_dir + "/games"};
++    for (int i = 0; i < 8; i++)
++      places.push_back("/mnt/usb" + std::to_string(i));
++    places.push_back("/mnt/ext0");
++    places.push_back("/mnt/ext1");
++    for (const std::string& place : places)
++    {
++      if (std::filesystem::is_directory(place, ec))
++        rows.push_back({place, "", "dir:" + place});
++    }
 +  }
-+  std::sort(m_wallpapers.begin(), m_wallpapers.end());
++  else
++  {
++    rows.push_back({path, "", "", true});
++    std::vector<std::string> folders;
++    int games = 0;
++    bool readable = false;
++    for (const auto& entry : std::filesystem::directory_iterator(path, ec))
++    {
++      readable = true;
++      const std::string name = entry.path().filename().string();
++      std::error_code type_error;
++      if (entry.is_directory(type_error))
++      {
++        if (name.empty() || name[0] != '.')
++          folders.push_back(name);
++      }
++      else if (is_game(name))
++      {
++        games++;
++      }
++    }
++    std::sort(folders.begin(), folders.end());
++    rows.push_back({"Use This Folder", std::to_string(games) + (games == 1 ? " game" : " games"),
++                    "usedir"});
++    const std::filesystem::path parent = std::filesystem::path(path).parent_path();
++    const bool top = path == "/data" || (path.rfind("/mnt/", 0) == 0 &&
++                                             std::count(path.begin(), path.end(), '/') == 2);
++    rows.push_back({"..", top ? "Places" : "", top ? "dir:" : "dir:" + parent.string()});
++    if (!readable && ec)
++      rows.push_back({"(this folder can't be opened)", "", "", true});
++    for (const std::string& folder : folders)
++    {
++      const std::string full = path == "/" ? "/" + folder : path + "/" + folder;
++      rows.push_back({folder + "/", "", "dir:" + full});
++    }
++  }
++  m_panel.rows = std::move(rows);
++  m_panel.selected = 0;
++  MoveSettingRow(0);
++  if (!reopen)
++    Play("menu");
 +}
 +
 +ImTextureID Menu::LoadPngTexture(const std::string& path, float* aspect)
@@ -8259,6 +8400,7 @@ index 0000000..b90eb72
 +  settings.push_back({"Volume", std::to_string(m_prefs.volume), -1, -1, SET_VOLUME});
 +  settings.push_back({"Clock", m_prefs.clock ? "On" : "Off", -1, -1, SET_CLOCK});
 +  settings.push_back({"Controls", "Remap the GameCube and Wii buttons", -1, -1, SET_CONTROLS});
++  settings.push_back({"Game Folder", GamesFolder(), -1, -1, SET_GAMES_DIR});
 +  settings.push_back({"Download Covers", "Box art from GameTDB for your games", -1, -1,
 +                      SET_COVERS});
 +  settings.push_back({"Check for Updates", "Installed: v" + m_version, -1, -1, SET_UPDATE_CHECK});
@@ -8278,7 +8420,7 @@ index 0000000..b90eb72
 +    games.push_back({game.title, detail, static_cast<int>(i), -1, -1});
 +  }
 +  if (games.empty())
-+    games.push_back({"No games found", "Copy .iso / .rvz files to " + m_data_dir + "/games"});
++    games.push_back({"No games found", "Copy games to " + GamesFolder() + ", then press Square"});
 +
 +  auto& themes = m_items[static_cast<int>(Category::Themes)];
 +  for (size_t i = 0; i < std::size(THEMES); i++)
@@ -8326,6 +8468,9 @@ index 0000000..b90eb72
 +    m_panel.title = "Download Covers";
 +    StartCoverDownload();
 +    break;
++  case SET_GAMES_DIR:
++    OpenFolderBrowser(GamesFolder());
++    return;
 +  case SET_UPDATE_CHECK:
 +    m_panel.setting = SET_UPDATE;
 +    StartUpdateCheck(true);
@@ -8429,6 +8574,24 @@ index 0000000..b90eb72
 +    return;
 +  const SettingRow& row = m_panel.rows[m_panel.selected];
 +  const std::string& game = m_panel.game_id;
++  if (m_panel.setting == SET_GAMES_DIR)
++  {
++    if (direction <= 0)
++      return;  // Cross only (Left / Right do nothing here)
++    if (row.key.rfind("dir:", 0) == 0)
++    {
++      OpenFolderBrowser(row.key.substr(4));
++    }
++    else if (row.key == "usedir")
++    {
++      m_prefs.games_dir = m_browse_dir == m_data_dir + "/games" ? "" : m_browse_dir;
++      m_prefs.Save(m_data_dir + "/xmb.ini");
++      m_panel.open = false;
++      RefreshGames();
++      Play("confirm");
++    }
++    return;
++  }
 +  if (row.key.rfind("ctl:", 0) == 0 || row.key == "__ctlreset__")
 +  {
 +    const auto device = static_cast<PS4Controls::Device>(m_controls_device);
@@ -8943,6 +9106,11 @@ index 0000000..b90eb72
 +      Play("error");
 +    }
 +  }
++  else if ((pressed & BTN_SQUARE) && m_category == static_cast<int>(Category::Games))
++  {
++    RefreshGames();
++    Play("confirm");
++  }
 +  else if (pressed & BTN_TRIANGLE)
 +  {
 +    if (!items.empty() && items[selected].game >= 0)
@@ -9282,6 +9450,10 @@ index 0000000..b90eb72
 +        help = "Cross: press a new button for it. Sticks: Left/Right to choose.";
 +      else if (row.key == "__ctlreset__")
 +        help = "Back to the default layout.";
++      else if (row.key.rfind("dir:", 0) == 0)
++        help = "Cross: open this folder.";
++      else if (row.key == "usedir")
++        help = "Cross: look for games in this folder.";
 +      else if (row.key.rfind("cheat:", 0) == 0 || row.key.rfind("cheatall:", 0) == 0)
 +        help = "Applies the next time the game starts, or now from the in-game menu (L3+R3).";
 +      else if (row.scope)
@@ -9321,6 +9493,9 @@ index 0000000..b90eb72
 +      dl->AddTriangle(ImVec2(c.x, c.y - 9), ImVec2(c.x + 9, c.y + 7), ImVec2(c.x - 9, c.y + 7), g,
 +                      3.0f);
 +      break;
++    case 3:  // square
++      dl->AddRect(ImVec2(c.x - 7.5f, c.y - 7.5f), ImVec2(c.x + 7.5f, c.y + 7.5f), g, 0.0f, 0, 3.0f);
++      break;
 +    }
 +    x -= 50;
 +  };
@@ -9336,6 +9511,8 @@ index 0000000..b90eb72
 +  {
 +    const auto& items = m_items[m_category];
 +    const bool game = !items.empty() && items[m_selected[m_category]].game >= 0;
++    if (m_category == static_cast<int>(Category::Games))
++      hint("Refresh", 3);
 +    if (game)
 +      hint("Options", 2);
 +    hint(game ? "Play" : "Select", 0);
@@ -9850,19 +10027,26 @@ index 0000000..b90eb72
 +}
 +}  // namespace
 +
-+std::string Run(const std::vector<LibraryDisc>& library, const std::string& data_dir,
++std::string GamesDir(const std::string& data_dir)
++{
++  Preferences prefs;
++  prefs.Load(data_dir + "/xmb.ini");
++  return prefs.games_dir.empty() ? data_dir + "/games" : prefs.games_dir;
++}
++
++std::string Run(const ScanFunction& scan, const std::string& data_dir,
 +                const std::string& assets_dir, const std::string& version)
 +{
-+  Menu menu(library, data_dir, assets_dir, version);
++  Menu menu(scan, data_dir, assets_dir, version);
 +  return menu.Run();
 +}
 +}  // namespace PS4XMB
 diff --git a/Source/Core/DolphinNoGUI/PS4XMB.h b/Source/Core/DolphinNoGUI/PS4XMB.h
 new file mode 100755
-index 0000000..a97fb9b
+index 0000000..a4eae16
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4XMB.h
-@@ -0,0 +1,33 @@
+@@ -0,0 +1,41 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -9873,6 +10057,7 @@ index 0000000..a97fb9b
 +#pragma once
 +
 +#include <cstdint>
++#include <functional>
 +#include <string>
 +#include <vector>
 +
@@ -9891,9 +10076,16 @@ index 0000000..a97fb9b
 +// Returned by Run when the app should close (an update is being installed).
 +inline constexpr const char* EXIT_APP = "\x01exit";
 +
++// Finds the disc images in a folder (the game process's library scan).
++using ScanFunction = std::function<std::vector<LibraryDisc>(const std::string& games_dir)>;
++
++// The folder games are looked for in: Settings -> Game Folder (xmb.ini games_dir), by default
++// data_dir/games.
++std::string GamesDir(const std::string& data_dir);
++
 +// Shows the XMB until a game is picked (returns its first disc) or the user quits (empty).
 +// data_dir: /data/DolphinPS4 (xmb.ini, themes/); assets_dir: /app0 (xmb/, Sys/).
-+std::string Run(const std::vector<LibraryDisc>& library, const std::string& data_dir,
++std::string Run(const ScanFunction& scan, const std::string& data_dir,
 +                const std::string& assets_dir, const std::string& version);
 +}  // namespace PS4XMB
 diff --git a/Source/Core/DolphinNoGUI/PS4XMBDisplay.cpp b/Source/Core/DolphinNoGUI/PS4XMBDisplay.cpp
@@ -10544,10 +10736,10 @@ index f4dc8a9..121376e 100644
  
 diff --git a/Source/Core/DolphinNoGUI/PlatformPS4.cpp b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
 new file mode 100644
-index 0000000..041399f
+index 0000000..96d7e82
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
-@@ -0,0 +1,1182 @@
+@@ -0,0 +1,1189 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -11285,7 +11477,8 @@ index 0000000..041399f
 +  return false;
 +}
 +
-+// The game library: every disc image in /data/DolphinPS4/games, identified by its own header
++// The game library: every disc image in the games folder (Settings -> Game Folder, by default
++// /data/DolphinPS4/games), identified by its own header
 +// (game ID, revision, disc number, internal title) rather than its file name.
 +struct LibraryEntry
 +{
@@ -11311,16 +11504,11 @@ index 0000000..041399f
 +  return false;
 +}
 +
-+const std::vector<LibraryEntry>& GameLibrary()
++std::vector<LibraryEntry> ScanLibrary(const std::string& games_dir)
 +{
-+  static std::vector<LibraryEntry> s_library;
-+  static bool s_scanned = false;
-+  if (s_scanned)
-+    return s_library;
-+  s_scanned = true;
++  std::vector<LibraryEntry> s_library;
 +  std::error_code error;
-+  for (const auto& entry :
-+       std::filesystem::directory_iterator(std::string(PS4_DATA_DIR_PATH) + "/games", error))
++  for (const auto& entry : std::filesystem::directory_iterator(games_dir, error))
 +  {
 +    const std::string name = entry.path().filename().string();
 +    if (!IsDiscImage(name))
@@ -11348,6 +11536,13 @@ index 0000000..041399f
 +             game.title.c_str(), std::filesystem::path(game.path).filename().string().c_str());
 +    Platform::BootTrace(line);
 +  }
++  return s_library;
++}
++
++const std::vector<LibraryEntry>& GameLibrary()
++{
++  static const std::vector<LibraryEntry> s_library =
++      ScanLibrary(PS4XMB::GamesDir(PS4_DATA_DIR_PATH));
 +  return s_library;
 +}
 +
@@ -11451,14 +11646,14 @@ index 0000000..041399f
 +      return game.path;
 +  }
 +
-+  // Otherwise the first game in /data/DolphinPS4/games, in name order.
++  // Otherwise the first game in the games folder, in name order.
 +  const std::array<std::string, 12> extensions = {".iso", ".gcm", ".ciso", ".gcz", ".wbfs",
 +                                                  ".wia", ".rvz", ".dol", ".elf", ".wad", ".nkit.iso",
 +                                                  ".m3u"};
 +  std::vector<std::string> games;
 +  std::error_code error;
 +  for (const auto& entry :
-+       std::filesystem::directory_iterator(std::string(PS4_DATA_DIR_PATH) + "/games", error))
++       std::filesystem::directory_iterator(PS4XMB::GamesDir(PS4_DATA_DIR_PATH), error))
 +  {
 +    std::string name = entry.path().filename().string();
 +    // Only the first disc of a multi-disc game is a game to start (the others come with it).
@@ -11636,10 +11831,14 @@ index 0000000..041399f
 +  else if (GetPS4Option("xmb", "on") == "on")
 +  {
 +    LoadSystemModules();
-+    std::vector<PS4XMB::LibraryDisc> library;
-+    for (const LibraryEntry& entry : GameLibrary())
-+      library.push_back({entry.path, entry.game_id, entry.revision, entry.disc, entry.title});
-+    game = PS4XMB::Run(library, PS4_DATA_DIR_PATH, "/app0", AppVersion());
++    // The XMB scans the games folder itself (again on a refresh or a new folder).
++    const PS4XMB::ScanFunction scan = [](const std::string& games_dir) {
++      std::vector<PS4XMB::LibraryDisc> library;
++      for (const LibraryEntry& entry : ScanLibrary(games_dir))
++        library.push_back({entry.path, entry.game_id, entry.revision, entry.disc, entry.title});
++      return library;
++    };
++    game = PS4XMB::Run(scan, PS4_DATA_DIR_PATH, "/app0", AppVersion());
 +    if (game == PS4XMB::EXIT_APP)
 +    {
 +      // An update is installing in the background: the app closes so it can be replaced.
