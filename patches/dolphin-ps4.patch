@@ -3101,7 +3101,7 @@ index 612161b..fbee84f 100644
      PPCAnalyst::BlockStats st;
      PPCAnalyst::BlockRegStats gpa;
 diff --git a/Source/Core/Core/PowerPC/MMU.cpp b/Source/Core/Core/PowerPC/MMU.cpp
-index 940e93c..4c0917a 100644
+index 940e93c..76ff3b9 100644
 --- a/Source/Core/Core/PowerPC/MMU.cpp
 +++ b/Source/Core/Core/PowerPC/MMU.cpp
 @@ -25,6 +25,14 @@
@@ -3260,18 +3260,29 @@ index 940e93c..4c0917a 100644
  
    if (!never_translate && m_ppc_state.msr.DR)
    {
-@@ -395,6 +483,10 @@ void MMU::WriteToHardware(u32 em_address, const u32 data, const u32 size)
+@@ -395,6 +483,21 @@ void MMU::WriteToHardware(u32 em_address, const u32 data, const u32 size)
  
    if (flag == XCheckTLBFlag::Write && (em_address & 0xF8000000) == 0x08000000)
    {
 +#ifdef __ORBIS__
 +    if (ps4_fifo_defer)  // e.g. FIFO pointer changes: pending bursts belong to the old FIFO
-+      m_system.GetGPFifo().FastCheckGatherPipe();
++    {
++      // Except a FIFO reset (PI_FIFO_RESET bit 0, from GXAbortFrame): it throws away what is
++      // queued, and on hardware these commands would have gone out 32 bytes at a time long
++      // before. Flushed now, up to 128 bytes landed in the FIFO just as it was being reset, while
++      // the video thread was reading it: the stream lost its place ("Unknown Opcode") and
++      // Spider-Man 2 froze. They're dropped instead.
++      constexpr u32 PI_FIFO_RESET_ADDRESS = 0x0C003018;
++      if ((em_address & 0x0FFFFFFF) == PI_FIFO_RESET_ADDRESS && (data & 1) != 0)
++        m_system.GetGPFifo().ResetGatherPipe();
++      else
++        m_system.GetGPFifo().FastCheckGatherPipe();
++    }
 +#endif
      if (em_address < 0x0c000000)
      {
        EFB_Write(data, em_address);
-@@ -465,6 +557,11 @@ void MMU::WriteToHardware(u32 em_address, const u32 data, const u32 size)
+@@ -465,6 +568,11 @@ void MMU::WriteToHardware(u32 em_address, const u32 data, const u32 size)
      // mirrors of memory).
      em_address &= m_memory.GetRamMask();
  
@@ -3283,7 +3294,7 @@ index 940e93c..4c0917a 100644
      if (m_ppc_state.m_enable_dcache && !wi)
        m_ppc_state.dCache.Write(m_memory, em_address, &swapped_data, size, HID0(m_ppc_state).DLOCK);
  
-@@ -479,6 +576,11 @@ void MMU::WriteToHardware(u32 em_address, const u32 data, const u32 size)
+@@ -479,6 +587,11 @@ void MMU::WriteToHardware(u32 em_address, const u32 data, const u32 size)
    {
      em_address &= 0x0FFFFFFF;
  
@@ -3295,7 +3306,7 @@ index 940e93c..4c0917a 100644
      if (m_ppc_state.m_enable_dcache && !wi)
      {
        m_ppc_state.dCache.Write(m_memory, em_address + 0x10000000, &swapped_data, size,
-@@ -1151,6 +1253,11 @@ void MMU::TouchDCacheLine(u32 address, bool store)
+@@ -1151,6 +1264,11 @@ void MMU::TouchDCacheLine(u32 address, bool store)
  
  u32 MMU::IsOptimizableMMIOAccess(u32 address, u32 access_size) const
  {
@@ -3307,7 +3318,7 @@ index 940e93c..4c0917a 100644
    if (m_power_pc.GetMemChecks().HasAny())
      return 0;
  
-@@ -1175,6 +1282,23 @@ u32 MMU::IsOptimizableMMIOAccess(u32 address, u32 access_size) const
+@@ -1175,6 +1293,23 @@ u32 MMU::IsOptimizableMMIOAccess(u32 address, u32 access_size) const
    return address;
  }
  
@@ -3331,7 +3342,7 @@ index 940e93c..4c0917a 100644
  bool MMU::IsOptimizableGatherPipeWrite(u32 address) const
  {
    if (m_power_pc.GetMemChecks().HasAny())
-@@ -1275,12 +1399,18 @@ void MMU::SDRUpdated()
+@@ -1275,12 +1410,18 @@ void MMU::SDRUpdated()
  
    m_ppc_state.pagetable_base = htaborg << 16;
    m_ppc_state.pagetable_mask = (htabmask << 16) | 0xffc0;
@@ -3350,7 +3361,7 @@ index 940e93c..4c0917a 100644
    // Our incremental handling of page table updates can't handle SR changing, so throw away all
    // existing mappings and then reparse the whole page table.
    m_memory.RemoveAllPageTableMappings();
-@@ -1374,7 +1504,22 @@ void MMU::InvalidateTLBEntry(u32 address)
+@@ -1374,7 +1515,22 @@ void MMU::InvalidateTLBEntry(u32 address)
  
    m_ppc_state.tlb[PowerPC::DATA_TLB_INDEX][entry_index].Invalidate();
    m_ppc_state.tlb[PowerPC::INST_TLB_INDEX][entry_index].Invalidate();
@@ -3373,7 +3384,7 @@ index 940e93c..4c0917a 100644
    if (m_ppc_state.msr.DR)
      PageTableUpdated();
    else
-@@ -1383,6 +1528,9 @@ void MMU::InvalidateTLBEntry(u32 address)
+@@ -1383,6 +1539,9 @@ void MMU::InvalidateTLBEntry(u32 address)
  
  void MMU::ClearPageTable()
  {
@@ -3383,7 +3394,7 @@ index 940e93c..4c0917a 100644
    // If we've skipped processing any update to the page table, we need to remove all host mappings,
    // because we don't know which of them are still valid.
    m_memory.RemoveAllPageTableMappings();
-@@ -1408,6 +1556,10 @@ void MMU::ReloadPageTable()
+@@ -1408,6 +1567,10 @@ void MMU::ReloadPageTable()
  
  void MMU::PageTableUpdated()
  {
@@ -3394,7 +3405,7 @@ index 940e93c..4c0917a 100644
    m_ppc_state.pagetable_update_pending = false;
  
    if (!m_system.GetJitInterface().WantsPageTableMappings())
-@@ -2000,6 +2152,9 @@ void MMU::UpdateFakeMMUBat(BatTable& bat_table, u32 start_addr)
+@@ -2000,6 +2163,9 @@ void MMU::UpdateFakeMMUBat(BatTable& bat_table, u32 start_addr)
  
  void MMU::DBATUpdated()
  {
@@ -3404,7 +3415,7 @@ index 940e93c..4c0917a 100644
    m_dbat_table = {};
    UpdateBATs(m_dbat_table, SPR_DBAT0U);
    bool extended_bats = m_system.IsWii() && HID4(m_ppc_state).SBE;
-@@ -2028,6 +2183,9 @@ void MMU::DBATUpdated()
+@@ -2028,6 +2194,9 @@ void MMU::DBATUpdated()
  
  void MMU::IBATUpdated()
  {
@@ -3414,7 +3425,7 @@ index 940e93c..4c0917a 100644
    m_ibat_table = {};
    UpdateBATs(m_ibat_table, SPR_IBAT0U);
    bool extended_bats = m_system.IsWii() && HID4(m_ppc_state).SBE;
-@@ -2074,6 +2232,14 @@ void ClearDCacheLineFromJit(MMU& mmu, u32 address)
+@@ -2074,6 +2243,14 @@ void ClearDCacheLineFromJit(MMU& mmu, u32 address)
  template <std::unsigned_integral T>
  Common::MakeAtLeastU32<T> ReadFromJit(MMU& mmu, u32 address)
  {
@@ -3429,7 +3440,7 @@ index 940e93c..4c0917a 100644
    return mmu.Read<T>(address);
  }
  template u32 ReadFromJit<u8>(MMU& mmu, u32 address);
-@@ -2084,6 +2250,29 @@ template u64 ReadFromJit<u64>(MMU& mmu, u32 address);
+@@ -2084,6 +2261,29 @@ template u64 ReadFromJit<u64>(MMU& mmu, u32 address);
  template <std::unsigned_integral T>
  void WriteFromJit(MMU& mmu, Common::MakeAtLeastU32<T> var, u32 address)
  {
@@ -3459,7 +3470,7 @@ index 940e93c..4c0917a 100644
    mmu.Write<T>(var, address);
  }
  template void WriteFromJit<u8>(MMU& mmu, u32 var, u32 address);
-@@ -2092,14 +2281,52 @@ template void WriteFromJit<u32>(MMU& mmu, u32 var, u32 address);
+@@ -2092,14 +2292,52 @@ template void WriteFromJit<u32>(MMU& mmu, u32 var, u32 address);
  template void WriteFromJit<u64>(MMU& mmu, u64 var, u32 address);
  void WriteU16SwapFromJit(MMU& mmu, u32 var, u32 address)
  {
