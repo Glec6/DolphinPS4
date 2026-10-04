@@ -4000,10 +4000,10 @@ index 3bf40ea..d7e2dad 100644
      fprintf(stderr, "Could not boot the specified file\n");
 diff --git a/Source/Core/DolphinNoGUI/PS4Cheats.cpp b/Source/Core/DolphinNoGUI/PS4Cheats.cpp
 new file mode 100755
-index 0000000..9f71d51
+index 0000000..f21328e
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4Cheats.cpp
-@@ -0,0 +1,70 @@
+@@ -0,0 +1,85 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -4061,6 +4061,21 @@ index 0000000..9f71d51
 +    m_codes->gecko[i - m_codes->ar.size()].enabled = !m_codes->gecko[i - m_codes->ar.size()].enabled;
 +  else
 +    return;
++  Save();
++}
++
++void List::SetAll(bool enabled)
++{
++  for (auto& code : m_codes->ar)
++    code.enabled = enabled;
++  for (auto& code : m_codes->gecko)
++    code.enabled = enabled;
++  Save();
++}
++
++// The choices go to the game's own INI (User/GameSettings/<ID>.ini), as in Dolphin.
++void List::Save() const
++{
 +  Common::IniFile local = SConfig::LoadLocalGameIni(m_game_id, m_revision);
 +  ActionReplay::SaveCodes(&local, m_codes->ar);
 +  Gecko::SaveCodes(local, m_codes->gecko);
@@ -4076,10 +4091,10 @@ index 0000000..9f71d51
 +}  // namespace PS4Cheats
 diff --git a/Source/Core/DolphinNoGUI/PS4Cheats.h b/Source/Core/DolphinNoGUI/PS4Cheats.h
 new file mode 100755
-index 0000000..1ec7543
+index 0000000..3771619
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4Cheats.h
-@@ -0,0 +1,45 @@
+@@ -0,0 +1,49 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -4115,10 +4130,14 @@ index 0000000..1ec7543
 +  std::vector<Entry> Entries() const;
 +  // Switches entry i on/off and saves the choice.
 +  void Toggle(size_t i);
++  // Switches every code on or off and saves the choice.
++  void SetAll(bool enabled);
 +  // Game process: makes the current choices active in the running game.
 +  void ApplyToRunningGame() const;
 +
 +private:
++  void Save() const;
++
 +  struct Codes;
 +  Codes* m_codes;
 +  std::string m_game_id;
@@ -5187,10 +5206,10 @@ index 0000000..5157e21
 +}  // namespace PS4Glyphs
 diff --git a/Source/Core/DolphinNoGUI/PS4IngameMenu.cpp b/Source/Core/DolphinNoGUI/PS4IngameMenu.cpp
 new file mode 100755
-index 0000000..5546538
+index 0000000..1debb78
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4IngameMenu.cpp
-@@ -0,0 +1,843 @@
+@@ -0,0 +1,874 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -5278,6 +5297,7 @@ index 0000000..5546538
 +  std::string value;
 +  bool header = false;  // category title, not selectable
 +  bool note = false;    // value takes effect at the next start (shown in amber)
++  int tag = 0;          // cheats: 1 = an ON tag (green), -1 = an OFF tag (red)
 +};
 +
 +// Hint glyphs for the bottom bar.
@@ -5347,7 +5367,7 @@ index 0000000..5546538
 +  std::string subtitle;
 +  if (s_page == Page::Main)
 +  {
-+    const std::string slot = "< Slot " + std::to_string(s_slot) + " >";
++    const std::string slot = "Slot " + std::to_string(s_slot);
 +    for (const int item : s_main_items)
 +    {
 +      switch (item)
@@ -5363,18 +5383,18 @@ index 0000000..5546538
 +        break;
 +      case MAIN_WII_EXTENSION:
 +        rows.push_back({"Wii Extension",
-+                        PS4Settings::Get("wii_extension", s_game_id) == "none" ? "< None >" :
-+                                                                                 "< Nunchuk >"});
++                        PS4Settings::Get("wii_extension", s_game_id) == "none" ? "None" :
++                                                                                 "Nunchuk"});
 +        break;
 +      case MAIN_WII_SIDEWAYS:
 +        rows.push_back({"Sideways Wii Remote",
-+                        PS4Settings::Get("wii_sideways", s_game_id) == "on" ? "< On >" : "< Off >"});
++                        PS4Settings::Get("wii_sideways", s_game_id) == "on" ? "On" : "Off"});
 +        break;
 +      case MAIN_SETTINGS:
-+        rows.push_back({"Settings", ">"});
++        rows.push_back({"Settings"});
 +        break;
 +      case MAIN_CHEATS:
-+        rows.push_back({"Cheats", ">"});
++        rows.push_back({"Cheats"});
 +        break;
 +      case MAIN_QUIT:
 +        rows.push_back({"Quit Game"});
@@ -5395,6 +5415,13 @@ index 0000000..5546538
 +  else if (s_page == Page::Cheats)
 +  {
 +    const auto entries = s_cheats.Entries();
++    if (!entries.empty())
++    {
++      rows.push_back({"Enable All"});
++      keys.push_back("cheatall:on");
++      rows.push_back({"Disable All"});
++      keys.push_back("cheatall:off");
++    }
 +    bool last_gecko = false;
 +    for (size_t i = 0; i < entries.size(); i++)
 +    {
@@ -5404,7 +5431,9 @@ index 0000000..5546538
 +        keys.push_back("");
 +      }
 +      last_gecko = entries[i].gecko;
-+      rows.push_back({entries[i].name, entries[i].enabled ? "< On >" : "< Off >"});
++      Row row{entries[i].name};
++      row.tag = entries[i].enabled ? 1 : -1;
++      rows.push_back(row);
 +      keys.push_back("cheat:" + std::to_string(i));
 +    }
 +    if (entries.empty())
@@ -5419,7 +5448,7 @@ index 0000000..5546538
 +  else
 +  {
 +    const bool custom = Custom();
-+    rows.push_back({"Apply To", custom ? "< This Game >" : "< All Games >"});
++    rows.push_back({"Apply To", custom ? "This Game" : "All Games"});
 +    keys.push_back("");
 +    for (const char* category : PS4Settings::Categories())
 +    {
@@ -5430,7 +5459,7 @@ index 0000000..5546538
 +        if (std::string(setting.category) != category)
 +          continue;
 +        const std::string value = PS4Settings::Get(setting.key, s_game_id);
-+        rows.push_back({setting.label, "< " + PS4Settings::LabelOf(setting, value) + " >", false,
++        rows.push_back({setting.label, PS4Settings::LabelOf(setting, value), false,
 +                        !setting.live});
 +        keys.push_back(setting.key);
 +      }
@@ -5507,6 +5536,15 @@ index 0000000..5546538
 +  if (s_page == Page::Cheats)
 +  {
 +    const std::string& key = s_row_keys[row];
++    if (key.rfind("cheatall:", 0) == 0)
++    {
++      const bool on = key == "cheatall:on";
++      s_cheats.SetAll(on);
++      s_cheats.ApplyToRunningGame();
++      Toast(on ? "All cheats on" : "All cheats off");
++      Log(on ? "cheats: all on" : "cheats: all off");
++      return;
++    }
 +    if (key.rfind("cheat:", 0) != 0)
 +      return;
 +    const size_t index = static_cast<size_t>(std::atoi(key.c_str() + 6));
@@ -5813,7 +5851,19 @@ index 0000000..5546538
 +      }
 +      dl->AddText(sel ? bold : regular, (sel ? 36 : 32) * s, ImVec2(x0 + 70 * s, y + 4 * s),
 +                  sel ? white : dim, row.label.c_str());
-+      if (!row.value.empty())
++      if (row.tag != 0)
++      {
++        // Cheats: a green ON or red OFF tag.
++        const char* label = row.tag > 0 ? "ON" : "OFF";
++        const float ts = 24 * s;
++        const float tw = bold->CalcTextSizeA(ts, FLT_MAX, 0, label).x;
++        const float right = x0 + panel_w - 80 * s, w = tw + 30 * s;
++        const ImU32 fill = row.tag > 0 ? IM_COL32(40, 170, 90, static_cast<int>(230 * a)) :
++                                         IM_COL32(210, 55, 70, static_cast<int>(230 * a));
++        dl->AddRectFilled(ImVec2(right - w, y + 8 * s), ImVec2(right, y + 44 * s), fill, 18 * s);
++        dl->AddText(bold, ts, ImVec2(right - w + 15 * s, y + 13 * s), white, label);
++      }
++      else if (!row.value.empty())
 +      {
 +        const float vs = 30 * s;
 +        const float tw = regular->CalcTextSizeA(vs, FLT_MAX, 0, row.value.c_str()).x;
@@ -6675,10 +6725,10 @@ index 0000000..41d2bb2
 +}  // namespace PS4Settings
 diff --git a/Source/Core/DolphinNoGUI/PS4XMB.cpp b/Source/Core/DolphinNoGUI/PS4XMB.cpp
 new file mode 100755
-index 0000000..eac4174
+index 0000000..2cd7e11
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4XMB.cpp
-@@ -0,0 +1,2090 @@
+@@ -0,0 +1,2102 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -7150,6 +7200,7 @@ index 0000000..eac4174
 +  bool scope = false;   // "Apply To: All Games / This Game" (game settings)
 +  bool note = false;    // takes effect at the next game start
 +  std::string glyph;    // Controls: the DualShock 4 control, drawn as its icon
++  int tag = 0;          // cheats: 1 = an ON tag (green), -1 = an OFF tag (red)
 +};
 +
 +// A PSP-style panel on the right: options to pick from, information text, or a settings list.
@@ -7663,6 +7714,12 @@ index 0000000..eac4174
 +    BuildCheatRows();
 +    return;
 +  }
++  if (row.key.rfind("cheatall:", 0) == 0)
++  {
++    m_cheats.SetAll(row.key == "cheatall:on");
++    BuildCheatRows();
++    return;
++  }
 +  if (row.scope)
 +  {
 +    PS4Settings::SetCustom(game, !PS4Settings::IsCustom(game));
@@ -7748,14 +7805,20 @@ index 0000000..eac4174
 +{
 +  std::vector<SettingRow> rows;
 +  const auto entries = m_cheats.Entries();
++  if (!entries.empty())
++  {
++    rows.push_back({"Enable All", "", "cheatall:on"});
++    rows.push_back({"Disable All", "", "cheatall:off"});
++  }
 +  bool last_gecko = false;
 +  for (size_t i = 0; i < entries.size(); i++)
 +  {
 +    if (i == 0 || entries[i].gecko != last_gecko)
 +      rows.push_back({entries[i].gecko ? "Gecko Codes" : "Action Replay Codes", "", "", true});
 +    last_gecko = entries[i].gecko;
-+    rows.push_back({entries[i].name, entries[i].enabled ? "On" : "Off",
-+                    "cheat:" + std::to_string(i)});
++    SettingRow row{entries[i].name, "", "cheat:" + std::to_string(i)};
++    row.tag = entries[i].enabled ? 1 : -1;
++    rows.push_back(std::move(row));
 +  }
 +  m_panel.rows = std::move(rows);
 +}
@@ -8395,28 +8458,27 @@ index 0000000..eac4174
 +      const float gw = row.glyph.empty() || (sel && m_capture) ?
 +                           0.0f :
 +                           PS4Glyphs::Width(row.glyph, GLYPH_H);
-+      if (gw > 0.0f)
++      if (row.tag != 0)
 +      {
-+        float right = W - 70;
-+        if (sel)
-+        {
-+          const float aw = TextWidth(m_font, 28, " >");
-+          Text(dl, m_font, 28, ImVec2(right - aw, ry + 7), text, " >");
-+          right -= aw;
-+        }
-+        PS4Glyphs::Draw(dl, m_bold, row.glyph, right - gw, ry + 23, GLYPH_H, m_panel.slide);
-+        if (sel)
-+        {
-+          const float lw = TextWidth(m_font, 28, "< ");
-+          Text(dl, m_font, 28, ImVec2(right - gw - lw, ry + 7), text, "< ");
-+        }
++        // Cheats: a green ON or red OFF tag.
++        const char* label = row.tag > 0 ? "ON" : "OFF";
++        const float tw = TextWidth(m_bold, 24, label);
++        const float right = W - 70, w = tw + 30;
++        const ImU32 fill = row.tag > 0 ? Rgba(0x28AA5A, 0.9f * m_panel.slide) :
++                                         Rgba(0xD23746, 0.9f * m_panel.slide);
++        dl->AddRectFilled(ImVec2(right - w, ry + 6), ImVec2(right, ry + 42), fill, 18.0f);
++        Text(dl, m_bold, 24, ImVec2(right - w + 15, ry + 11), Rgba(0xFFFFFF, m_panel.slide),
++             label);
++      }
++      else if (gw > 0.0f)
++      {
++        PS4Glyphs::Draw(dl, m_bold, row.glyph, W - 70 - gw, ry + 23, GLYPH_H, m_panel.slide);
 +      }
 +      else
 +      {
-+        const std::string value = sel ? "< " + row.value + " >" : row.value;
-+        const float tw = TextWidth(m_font, 28, value);
++        const float tw = TextWidth(m_font, 28, row.value);
 +        const ImU32 colour = row.note ? Rgba(0xFFC870, m_panel.slide) : text;
-+        Text(dl, m_font, 28, ImVec2(W - 70 - tw, ry + 7), colour, value);
++        Text(dl, m_font, 28, ImVec2(W - 70 - tw, ry + 7), colour, row.value);
 +      }
 +    }
 +    dl->PopClipRect();
@@ -8430,7 +8492,7 @@ index 0000000..eac4174
 +        help = "Cross: press a new button for it. Sticks: Left/Right to choose.";
 +      else if (row.key == "__ctlreset__")
 +        help = "Back to the default layout.";
-+      else if (row.key.rfind("cheat:", 0) == 0)
++      else if (row.key.rfind("cheat:", 0) == 0 || row.key.rfind("cheatall:", 0) == 0)
 +        help = "Applies the next time the game starts, or now from the in-game menu (L3+R3).";
 +      else if (row.scope)
 +        help = "All Games: this game follows the global settings. This Game: its own.";
