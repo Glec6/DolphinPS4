@@ -392,3 +392,5 @@ Manette dans les jeux Wii
 Les deux
 Wii Remote
 Ce que voit un jeu Wii : une Wii Remote, une manette GameCube (Mario Kart Wii, Super Smash Bros. Brawl et d'autres la prennent en charge) ou les deux.
+# --- Restart
+Redémarrer le jeu

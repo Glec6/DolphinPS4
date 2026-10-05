@@ -392,3 +392,5 @@ Controller in Wii-Spielen
 Beide
 Wii Remote
 Was ein Wii-Spiel sieht: eine Wii Remote, einen GameCube-Controller (Mario Kart Wii, Super Smash Bros. Brawl und andere unterstützen ihn) oder beide.
+# --- Restart
+Spiel neu starten

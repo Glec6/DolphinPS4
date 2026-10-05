@@ -392,3 +392,5 @@ Wii 游戏中的手柄
 两者
 Wii 遥控器
 Wii 游戏识别到的手柄：Wii 遥控器、GameCube 手柄（Mario Kart Wii、Super Smash Bros. Brawl 等支持），或两者。
+# --- Restart
+重新开始游戏

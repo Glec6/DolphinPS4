@@ -392,3 +392,5 @@ Wii oyunlarında kontrolcü
 İkisi de
 Wii Remote
 Bir Wii oyununun gördüğü: Wii Remote, GameCube kontrolcüsü (Mario Kart Wii, Super Smash Bros. Brawl ve diğerleri destekler) ya da ikisi birden.
+# --- Restart
+Oyunu yeniden başlat

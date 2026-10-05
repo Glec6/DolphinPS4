@@ -392,3 +392,5 @@ Kontroler w grach Wii
 Oba
 Wii Remote
 Co widzi gra Wii: Wii Remote, kontroler GameCube (obsługują go m.in. Mario Kart Wii i Super Smash Bros. Brawl) lub oba.
+# --- Restart
+Uruchom grę ponownie

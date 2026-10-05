@@ -6117,10 +6117,10 @@ index 0000000..5157e21
 +}  // namespace PS4Glyphs
 diff --git a/Source/Core/DolphinNoGUI/PS4IngameMenu.cpp b/Source/Core/DolphinNoGUI/PS4IngameMenu.cpp
 new file mode 100755
-index 0000000..add6acf
+index 0000000..dfea98f
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4IngameMenu.cpp
-@@ -0,0 +1,1058 @@
+@@ -0,0 +1,1079 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -6177,6 +6177,7 @@ index 0000000..add6acf
 +extern std::atomic<int> ps4_state_busy;  // Core/State.cpp
 +extern "C" const char* ps4_self_path();  // PlatformPS4.cpp: the running program
 +extern "C" void ps4_return_to_menu();    // PlatformPS4.cpp: the restart shows the menu
++extern "C" void ps4_relaunch_game();     // PlatformPS4.cpp: the restart boots this game again
 +extern "C" int ps4_jit_unavailable;      // PlatformPS4.cpp: no JIT on this console
 +
 +namespace PS4IngameMenu
@@ -6194,6 +6195,7 @@ index 0000000..add6acf
 +  MAIN_WII_SIDEWAYS,
 +  MAIN_SETTINGS,
 +  MAIN_CHEATS,
++  MAIN_RESTART,
 +  MAIN_QUIT,
 +  MAIN_COUNT,
 +};
@@ -6252,6 +6254,7 @@ index 0000000..add6acf
 +uint32_t s_held = 0;
 +float s_repeat = 0.0f;
 +bool s_quit = false;
++bool s_restart = false;  // the quit is a Restart Game
 +Clock::time_point s_quit_time;
 +// A game asked for the Wii Menu (IOS ES), which the port doesn't have: quit to the XMB instead.
 +std::atomic<bool> s_quit_requested{false};
@@ -6372,6 +6375,9 @@ index 0000000..add6acf
 +      case MAIN_CHEATS:
 +        rows.push_back({"Cheats"});
 +        break;
++      case MAIN_RESTART:
++        rows.push_back({"Restart Game"});
++        break;
 +      case MAIN_QUIT:
 +        rows.push_back({"Quit Game"});
 +        break;
@@ -6491,7 +6497,7 @@ index 0000000..add6acf
 +    s_main_items.push_back(MAIN_WII_EXTENSION);
 +    s_main_items.push_back(MAIN_WII_SIDEWAYS);
 +  }
-+  s_main_items.insert(s_main_items.end(), {MAIN_SETTINGS, MAIN_CHEATS, MAIN_QUIT});
++  s_main_items.insert(s_main_items.end(), {MAIN_SETTINGS, MAIN_CHEATS, MAIN_RESTART, MAIN_QUIT});
 +  BuildRows();
 +  {
 +    std::lock_guard lock(s_mutex);
@@ -6716,6 +6722,12 @@ index 0000000..add6acf
 +    SelectableMove(1);
 +    if (!s_row_keys.empty() && s_row_keys[s_settings_selected].empty())
 +      s_settings_selected = 0;
++    break;
++  case MAIN_RESTART:
++    // The same clean stop as Quit Game (memory cards and the NAND are written as the game saves);
++    // the app then restarts into this game instead of the menu: a fresh boot, like a console reset.
++    s_restart = true;
++    QuitToXMB(system, "restart the game");
 +    break;
 +  case MAIN_QUIT:
 +    QuitToXMB(system, "quit to the XMB");
@@ -6988,6 +7000,11 @@ index 0000000..add6acf
 +{
 +  return s_quit;
 +}
++
++bool RestartGame()
++{
++  return s_quit && s_restart;
++}
 +}  // namespace PS4IngameMenu
 +
 +// IOS ES (Core/IOS/ES/ES.cpp), any thread: a game chose "Wii Menu" in its HOME Menu.
@@ -7053,8 +7070,12 @@ index 0000000..add6acf
 +    // The clean stop normally ends the main loop quickly; don't wait forever on it.
 +    if (Clock::now() - s_quit_time > std::chrono::seconds(6))
 +    {
-+      Log("stop took too long, restarting into the XMB");
-+      ps4_return_to_menu();
++      Log(s_restart ? "stop took too long, restarting the game" :
++                      "stop took too long, restarting into the XMB");
++      if (s_restart)
++        ps4_relaunch_game();
++      else
++        ps4_return_to_menu();
 +      sceSystemServiceLoadExec(ps4_self_path(), nullptr);
 +    }
 +    return;
@@ -7181,10 +7202,10 @@ index 0000000..add6acf
 +}  // namespace PS4IngameMenu
 diff --git a/Source/Core/DolphinNoGUI/PS4IngameMenu.h b/Source/Core/DolphinNoGUI/PS4IngameMenu.h
 new file mode 100755
-index 0000000..4af50c8
+index 0000000..b9b11df
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4IngameMenu.h
-@@ -0,0 +1,24 @@
+@@ -0,0 +1,26 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -7208,6 +7229,8 @@ index 0000000..4af50c8
 +void Install();
 +// "Quit Game" was chosen: the app restarts into the XMB instead of closing.
 +bool ReturnToXMB();
++// "Restart Game" stopped the emulation: the app restarts straight into the same game.
++bool RestartGame();
 +}  // namespace PS4IngameMenu
 diff --git a/Source/Core/DolphinNoGUI/PS4Lang.cpp b/Source/Core/DolphinNoGUI/PS4Lang.cpp
 new file mode 100644
@@ -13947,10 +13970,10 @@ index f4dc8a9..0c37736 100644
  
 diff --git a/Source/Core/DolphinNoGUI/PlatformPS4.cpp b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
 new file mode 100644
-index 0000000..2b5d90c
+index 0000000..82b478f
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
-@@ -0,0 +1,1618 @@
+@@ -0,0 +1,1642 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -14056,6 +14079,7 @@ index 0000000..2b5d90c
 +extern "C" const char* ps4_self_path();
 +extern "C" void ps4_update_started_ok();
 +extern "C" void ps4_return_to_menu();
++extern "C" void ps4_relaunch_game();
 +// The version this program was packaged as: scripts/package-dolphin.sh writes it over the
 +// "00.00" (a downloaded update must know it isn't the installed program).
 +extern "C" const char ps4_built_version[];
@@ -15050,6 +15074,11 @@ index 0000000..2b5d90c
 +  // The raw exit syscall isn't allowed for apps: ask the system to close us, or restart into the
 +  // XMB when the in-game menu's "Quit Game" stopped the emulation.
 +  fflush(stderr);
++  if (PS4IngameMenu::RestartGame())
++  {
++    ps4_relaunch_game();
++    sceSystemServiceLoadExec(ps4_self_path(), nullptr);
++  }
 +  if (PS4IngameMenu::ReturnToXMB())
 +  {
 +    ps4_return_to_menu();
@@ -15097,6 +15126,23 @@ index 0000000..2b5d90c
 +{
 +  if (FILE* file = fopen(TO_MENU.c_str(), "w"))
 +    fclose(file);
++}
++
++// The game this process booted (its first disc). The in-game menu's Restart Game: launch.txt
++// names it again, so the restarted app boots it the way the menu starts games.
++std::string s_booted_game;
++extern "C" void ps4_relaunch_game()
++{
++  if (s_booted_game.empty())
++  {
++    ps4_return_to_menu();
++    return;
++  }
++  if (FILE* file = fopen((std::string(PS4_DATA_DIR_PATH) + "/launch.txt").c_str(), "w"))
++  {
++    fprintf(file, "%s\n", s_booted_game.c_str());
++    fclose(file);
++  }
 +}
 +
 +// Set when the console won't run code from memory Dolphin writes (no JIT): PS4IngameMenu tells
@@ -15476,6 +15522,7 @@ index 0000000..2b5d90c
 +  }
 +  else
 +  {
++    s_booted_game = game;
 +    for (const std::string& disc : FindAllDiscs(game))
 +    {
 +      fprintf(stderr, "[dolphin] booting %s\n", disc.c_str());
