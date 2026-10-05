@@ -358,3 +358,6 @@ Agitar (giro)
 Puntero
 Stick del Nunchuk
 Personalizado
+# --- Homebrew
+Homebrew (GameCube)
+Homebrew (Wii)

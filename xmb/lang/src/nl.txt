@@ -358,3 +358,6 @@ Schudden (draaien)
 Aanwijzer
 Nunchuk-stick
 Aangepast
+# --- Homebrew
+Homebrew (GameCube)
+Homebrew (Wii)

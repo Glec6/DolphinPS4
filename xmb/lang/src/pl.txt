@@ -358,3 +358,6 @@ Potrząśnij (obrót)
 Wskaźnik
 Gałka Nunchuka
 Własne
+# --- Homebrew
+Homebrew (GameCube)
+Homebrew (Wii)

@@ -358,3 +358,6 @@ Sacudir (giro)
 Ponteiro
 Analógico do Nunchuk
 Personalizado
+# --- Homebrew
+Homebrew (GameCube)
+Homebrew (Wii)

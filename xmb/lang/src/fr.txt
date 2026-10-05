@@ -358,3 +358,6 @@ Secouer (rotation)
 Pointeur
 Stick du Nunchuk
 Personnalisé
+# --- Homebrew
+Homebrew (GameCube)
+Homebrew (Wii)

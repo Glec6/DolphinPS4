@@ -360,3 +360,6 @@ Shake (spin)
 Pointer
 Nunchuk Stick
 Custom
+# --- Homebrew
+Homebrew (GameCube)
+Homebrew (Wii)

@@ -358,3 +358,6 @@ Schütteln (Drehung)
 Zeiger
 Nunchuk-Stick
 Benutzerdefiniert
+# --- Homebrew
+Homebrew (GameCube)
+Homebrew (Wii)

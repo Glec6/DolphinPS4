@@ -358,3 +358,6 @@ Salla (döndür)
 İşaretçi
 Nunchuk çubuğu
 Özel
+# --- Homebrew
+Homebrew (GameCube)
+Homebrew (Wii)

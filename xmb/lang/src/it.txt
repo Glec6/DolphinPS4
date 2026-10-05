@@ -358,3 +358,6 @@ Scuoti (rotazione)
 Puntatore
 Levetta del Nunchuk
 Personalizzato
+# --- Homebrew
+Homebrew (GameCube)
+Homebrew (Wii)
