@@ -4850,10 +4850,10 @@ index 0000000..3771619
 +}  // namespace PS4Cheats
 diff --git a/Source/Core/DolphinNoGUI/PS4Controls.cpp b/Source/Core/DolphinNoGUI/PS4Controls.cpp
 new file mode 100755
-index 0000000..3b2bdbf
+index 0000000..01bac28
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4Controls.cpp
-@@ -0,0 +1,460 @@
+@@ -0,0 +1,502 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -4863,6 +4863,8 @@ index 0000000..3b2bdbf
 +#include <string>
 +#include <tuple>
 +#include <sys/stat.h>
++#include <fcntl.h>
++#include <unistd.h>
 +
 +#include <orbis/Pad.h>
 +
@@ -4995,15 +4997,55 @@ index 0000000..3b2bdbf
 +    {"D-Pad", "`Pad N`", "`Pad S`", "`Pad W`", "`Pad E`"},
 +};
 +
++std::string ReadAll(const std::string& path)
++{
++  std::string text;
++  if (FILE* file = fopen(path.c_str(), "rb"))
++  {
++    char buffer[4096];
++    size_t got;
++    while ((got = fread(buffer, 1, sizeof(buffer), file)) > 0)
++      text.append(buffer, got);
++    fclose(file);
++  }
++  return text;
++}
++
++// Writes path only when its text changes, through path.new flushed to disk first: a power cut
++// (holding the power button on a frozen console) left GCPadNew.ini empty - no game input at all.
++void SaveIni(Common::IniFile& ini, const std::string& path)
++{
++  const std::string temp = path + ".new";
++  if (!ini.Save(temp))
++    return;
++  if (ReadAll(temp) == ReadAll(path))
++  {
++    std::remove(temp.c_str());
++    return;
++  }
++  const int fd = open(temp.c_str(), O_RDWR);
++  if (fd >= 0)
++  {
++    fsync(fd);
++    close(fd);
++  }
++  std::rename(temp.c_str(), path.c_str());
++}
++
++// Missing, empty or without its first controller (cut short): the defaults.
 +void WriteIfMissing(const std::string& path, const char* contents)
 +{
-+  struct stat st;
-+  if (stat(path.c_str(), &st) == 0)
++  const std::string text = ReadAll(path);
++  if (text.find("Device") != std::string::npos)
 +    return;
-+  if (FILE* file = fopen(path.c_str(), "w"))
++  const std::string temp = path + ".new";
++  if (FILE* file = fopen(temp.c_str(), "w"))
 +  {
 +    fputs(contents, file);
++    fflush(file);
++    fsync(fileno(file));
 +    fclose(file);
++    std::rename(temp.c_str(), path.c_str());
 +  }
 +}
 +
@@ -5066,7 +5108,7 @@ index 0000000..3b2bdbf
 +      }
 +    }
 +    if (changed)
-+      ini.Save(Path(Device::GameCube));
++      SaveIni(ini, Path(Device::GameCube));
 +  }
 +  SyncPlayers(Device::GameCube);
 +  SyncPlayers(Device::Wii);
@@ -5126,7 +5168,7 @@ index 0000000..3b2bdbf
 +    section->Set("IMUIR/Enabled", std::string(move ? "True" : "False"));
 +    section->Set("IMUIR/Recenter", move ? from_move("Start") + " & " + from_move("Select") : std::string());
 +  }
-+  ini.Save(Path(Device::Wii));
++  SaveIni(ini, Path(Device::Wii));
 +}
 +
 +std::string Get(Device device, const Binding& binding)
@@ -5208,7 +5250,7 @@ index 0000000..3b2bdbf
 +  {
 +    section->Set(binding.key, expression);
 +  }
-+  ini.Save(Path(device));
++  SaveIni(ini, Path(device));
 +  SyncPlayers(device);
 +}
 +
@@ -5237,7 +5279,7 @@ index 0000000..3b2bdbf
 +  Common::IniFile::Section* section = ini.GetOrCreateSection(Section(Device::Wii));
 +  section->Set("Extension", std::string(extension == "none" ? "None" : "Nunchuk"));
 +  section->Set("Options/Sideways Wiimote", std::string(sideways ? "True" : "False"));
-+  ini.Save(Path(Device::Wii));
++  SaveIni(ini, Path(Device::Wii));
 +  SyncPlayers(Device::Wii);
 +}
 +
@@ -5259,7 +5301,7 @@ index 0000000..3b2bdbf
 +      section->Set(key, value);
 +    section->Set("Device", "PS4/" + std::to_string(player - 1) + "/DualShock 4");
 +  }
-+  ini.Save(Path(device));
++  SaveIni(ini, Path(device));
 +}
 +
 +bool IsAtRest(const OrbisPadData& now)
@@ -9050,15 +9092,16 @@ index 0000000..914dbb5
 +}  // namespace PS4Updater
 diff --git a/Source/Core/DolphinNoGUI/PS4XMB.cpp b/Source/Core/DolphinNoGUI/PS4XMB.cpp
 new file mode 100755
-index 0000000..dad2f0e
+index 0000000..8194a12
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4XMB.cpp
-@@ -0,0 +1,4048 @@
+@@ -0,0 +1,4064 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
 +#include "DolphinNoGUI/PS4XMB.h"
 +
++#include <set>
 +#include <algorithm>
 +#include <atomic>
 +#include <chrono>
@@ -10420,6 +10463,19 @@ index 0000000..dad2f0e
 +    rows.push_back({"Apply To", PS4Settings::IsCustom(game) ? "This Game" : "All Games", "", false,
 +                    true});
 +  }
++  // A GameCube game's own settings leave out the Wii ones (they don't apply to it).
++  bool gamecube_game = false;
++  for (const Game& entry : m_games)
++  {
++    if (!game.empty() && entry.id == game)
++    {
++      gamecube_game = !entry.wii && !entry.wad;
++      break;
++    }
++  }
++  static const std::set<std::string> WII_ONLY = {
++      "wii_extension", "wii_sideways", "motion_controls", "wii_controller", "wii_input",
++      "sd_card",       "sd_sync",      "sd_writes",       "sd_size"};
 +  for (const char* category : PS4Settings::Categories())
 +  {
 +    if (!m_panel.category.empty() && m_panel.category != category)
@@ -10429,6 +10485,8 @@ index 0000000..dad2f0e
 +    for (const PS4Settings::Setting& setting : PS4Settings::All())
 +    {
 +      if (std::string(setting.category) != category)
++        continue;
++      if (gamecube_game && WII_ONLY.count(setting.key))
 +        continue;
 +      rows.push_back({setting.label,
 +                      PS4Settings::LabelOf(setting, PS4Settings::Get(setting.key, game)),
@@ -13808,10 +13866,10 @@ index f4dc8a9..0c37736 100644
  
 diff --git a/Source/Core/DolphinNoGUI/PlatformPS4.cpp b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
 new file mode 100644
-index 0000000..0771c50
+index 0000000..ef616e8
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
-@@ -0,0 +1,1611 @@
+@@ -0,0 +1,1617 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -15371,26 +15429,32 @@ index 0000000..0771c50
 +      break;
 +    }
 +  }
++  // A Wii game (a Wii disc, a .wad or Wii homebrew)? The Wii settings apply only to those.
++  for (const LibraryEntry& entry : GameLibrary())
++  {
++    if (std::filesystem::path(entry.path) != std::filesystem::path(game))
++      continue;
++    s_wii_game = entry.wad || (entry.homebrew ? entry.wii :
++                                                !entry.game_id.empty() &&
++                                                    (entry.game_id[0] == 'R' || entry.game_id[0] == 'S'));
++    break;
++  }
++  BootTrace(s_wii_game ? "Wii game: Wii controller settings applied" :
++                         "GameCube game: Wii settings left alone");
 +  // The Wii Remote's attachment and orientation for this game (WiimoteNew.ini, read by Dolphin
 +  // when it starts).
-+  PS4Controls::SetWiiAttachment(GetPS4Option("wii_extension", "nunchuk"),
-+                                GetPS4Option("wii_sideways", "off") == "on");
++  if (s_wii_game)
++  {
++    PS4Controls::SetWiiAttachment(GetPS4Option("wii_extension", "nunchuk"),
++                                  GetPS4Option("wii_sideways", "off") == "on");
++  }
 +  // PS Move controllers (players in the order PS4Pad uses: the user who started the app, then
 +  // the others) and motion controls for the Wii Remote. The Move is looked for only in Wii games
 +  // with Wii Remote Controller on Auto.
++  if (s_wii_game)
 +  {
 +    std::array<bool, 4> moves{};
-+    bool& wii_game = s_wii_game;
-+    for (const LibraryEntry& entry : GameLibrary())
-+    {
-+      if (std::filesystem::path(entry.path) != std::filesystem::path(game))
-+        continue;
-+      wii_game = entry.wad || (entry.homebrew ? entry.wii :
-+                                                !entry.game_id.empty() &&
-+                                                    (entry.game_id[0] == 'R' || entry.game_id[0] == 'S'));
-+      break;
-+    }
-+    ps4_move_enabled = wii_game && GetPS4Option("wii_controller", "ds4") == "auto";
++    ps4_move_enabled = GetPS4Option("wii_controller", "ds4") == "auto";
 +    int32_t initial = -1;
 +    sceUserServiceGetInitialUser(&initial);
 +    std::vector<int32_t> players;
