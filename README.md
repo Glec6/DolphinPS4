@@ -59,7 +59,7 @@ You bring your own game backups. Nothing copyrighted is bundled: no games, BIOS 
 - Games only see the controllers that are really there, so nobody gets an empty extra port.
 
 **A pause menu on L3 + R3**
-- Eight save state slots, with a message while a state is being written.
+- Eight save state slots, each marked Empty or Other Version when it can't be loaded.
 - All settings, applied immediately.
 - For Wii games, plug the Nunchuk in or out, or turn the Wii Remote sideways, without leaving
   the game.
@@ -232,7 +232,8 @@ one, and mention the game, its region and the app version.
 ## Good to know
 
 - Games built around Wii Remote pointing or motion are hard to play on a DualShock 4.
-- Save states belong to the version that made them, so an update may not load older ones.
+- Save states carry over to new versions unless a release says otherwise. A state an update can't load is
+  marked "Other Version" in the menu and is never loaded halfway, but in-game saves are the safe place for progress.
   In-game saves are never affected.
 - Netplay, achievements and texture packs aren't supported on the PS4.
 - Only the original PS4 has been tested so far. PS4 Pro reports are welcome.

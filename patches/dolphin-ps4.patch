@@ -3655,7 +3655,7 @@ index 8d84ed1..d1377b7 100644
  
  #ifdef _M_X86_64
 diff --git a/Source/Core/Core/State.cpp b/Source/Core/Core/State.cpp
-index 2dcd2ca..f6a75df 100644
+index 2dcd2ca..ea713fb 100644
 --- a/Source/Core/Core/State.cpp
 +++ b/Source/Core/Core/State.cpp
 @@ -54,6 +54,13 @@
@@ -3672,7 +3672,47 @@ index 2dcd2ca..f6a75df 100644
  namespace State
  {
  #if defined(__LZO_STRICT_16BIT)
-@@ -391,6 +398,16 @@ static void WriteHeadersToFile(size_t uncompressed_size, File::IOFile& f)
+@@ -107,6 +114,24 @@ constexpr u32 COMPRESSED_DATA_OFFSET = 0;
+ 
+ constexpr u32 COOKIE_BASE = 0xBAADBABE;
+ 
++#ifdef __ORBIS__
++// PS4 port: increase this whenever a port change alters what a state stores (any DoState), and
++// reset it to 0 when STATE_VERSION changes. It goes into the version cookie, so states of another
++// format are refused before anything is loaded: without the undo copy (see LoadAsFromCore) a state
++// that fails halfway through would leave the game half overwritten.
++// 0: the upstream format of STATE_VERSION (cookie COOKIE_BASE + STATE_VERSION, as before v03.03).
++constexpr u32 PS4_STATE_REVISION = 0;
++constexpr u32 STATE_COOKIE_VERSION = STATE_VERSION + (PS4_STATE_REVISION << 16);
++
++extern "C" const char* ps4_app_version();  // DolphinNoGUI/PlatformPS4.cpp
++
++static PS4LoadResultFunc s_ps4_load_result_callback;
++static PS4Slot s_ps4_load_result = PS4Slot::Ready;  // CPU thread, during LoadAsFromCore
++static std::string s_ps4_made_by;
++#else
++constexpr u32 STATE_COOKIE_VERSION = STATE_VERSION;
++#endif
++
+ // Maps savestate versions to Dolphin versions.
+ // Versions after 42 don't need to be added to this list,
+ // because they save the exact Dolphin version to savestates.
+@@ -374,8 +399,13 @@ static void WriteHeadersToFile(size_t uncompressed_size, File::IOFile& f)
+                                           std::size(header.legacy_header.game_id));
+   header.legacy_header.time = GetSystemTimeAsDouble();
+ 
+-  header.version_header.version_cookie = COOKIE_BASE + STATE_VERSION;
++  header.version_header.version_cookie = COOKIE_BASE + STATE_COOKIE_VERSION;
++#ifdef __ORBIS__
++  // Names the app version in "made by another version" messages.
++  header.version_string = fmt::format("Dolphin for PS4 v{}", ps4_app_version());
++#else
+   header.version_string = Common::GetScmRevStr();
++#endif
+   header.version_header.version_string_length = static_cast<u32>(header.version_string.length());
+ 
+   StateExtendedHeader extended_header{};
+@@ -391,6 +421,16 @@ static void WriteHeadersToFile(size_t uncompressed_size, File::IOFile& f)
  
  static void CompressAndDumpState(Core::System& system, const CompressAndDumpStateArgs& save_args)
  {
@@ -3689,7 +3729,7 @@ index 2dcd2ca..f6a75df 100644
    const auto& buffer = save_args.buffer;
    const std::string& filename = save_args.filename;
  
-@@ -493,11 +510,18 @@ static void SaveAsFromCore(Core::System& system, std::string filename)
+@@ -493,11 +533,18 @@ static void SaveAsFromCore(Core::System& system, std::string filename)
    else
    {
      Core::DisplayMessage("Unable to save: Internal DoState Error", 4000);
@@ -3708,7 +3748,62 @@ index 2dcd2ca..f6a75df 100644
    Core::RunOnCPUThread(
        system, [&system, filename = std::move(filename), lock = GetStateSaveTaskLock()]() mutable {
          SaveAsFromCore(system, std::move(filename));
-@@ -816,7 +840,10 @@ static void LoadAsFromCore(Core::System& system, std::string filename)
+@@ -559,7 +606,11 @@ static bool ReadStateHeaderFromFile(StateHeader& header, File::IOFile& f,
+ {
+   if (!f.IsOpen())
+   {
++#ifdef __ORBIS__
++    s_ps4_load_result = PS4Slot::Empty;
++#else
+     Core::DisplayMessage("State not found", 2000);
++#endif
+     return false;
+   }
+ 
+@@ -700,6 +751,10 @@ static bool ValidateHeaders(const StateHeader& header)
+   // Game ID
+   if (strncmp(SConfig::GetInstance().GetGameID().c_str(), header.legacy_header.game_id, 6) != 0)
+   {
++#ifdef __ORBIS__
++    s_ps4_load_result = PS4Slot::OtherGame;
++    return false;
++#endif
+     Core::DisplayMessage(fmt::format("State belongs to a different game (ID {})",
+                                      std::string_view{header.legacy_header.game_id,
+                                                       std::size(header.legacy_header.game_id)}),
+@@ -723,11 +778,20 @@ static bool ValidateHeaders(const StateHeader& header)
+ 
+     loaded_str = "Dolphin " + oldest_version + " - " + newest_version;
+   }
+-  else if (loaded_version != STATE_VERSION)
++  else if (loaded_version != STATE_COOKIE_VERSION)
+   {
+     success = false;
+   }
+ 
++#ifdef __ORBIS__
++  if (!success)
++  {
++    s_ps4_load_result = PS4Slot::OtherVersion;
++    s_ps4_made_by = loaded_str;
++    return false;
++  }
++#endif
++
+   if (!success)
+   {
+     const std::string message =
+@@ -811,12 +875,20 @@ static void LoadAsFromCore(Core::System& system, std::string filename)
+ {
+   // Ensure all data has reached the filesystem before trying to use it.
+   s_compress_and_dump_thread.WaitForCompletion();
++#ifdef __ORBIS__
++  // Refusals below say why; anything else that leaves no data means the file is unreadable.
++  s_ps4_load_result = PS4Slot::Damaged;
++  s_ps4_made_by.clear();
++#endif
+ 
+   // Save temp buffer for undo load state
    auto& movie = system.GetMovie();
    if (!movie.IsJustStartingRecordingInputFromSaveState())
    {
@@ -3719,6 +3814,120 @@ index 2dcd2ca..f6a75df 100644
      const std::string dtmpath = File::GetUserPath(D_STATESAVES_IDX) + "undo.dtm";
      if (movie.IsMovieActive())
        movie.SaveRecording(dtmpath);
+@@ -843,9 +915,11 @@ static void LoadAsFromCore(Core::System& system, std::string filename)
+   {
+     if (loaded_successfully)
+     {
++#ifndef __ORBIS__  // PS4: the in-game menu says so
+       const std::filesystem::path temp_filename(StringToPath(filename));
+       Core::DisplayMessage(
+           fmt::format("Loaded State from {}", PathToString(temp_filename.filename())), 2000);
++#endif
+       if (File::Exists(filename + ".dtm"))
+       {
+         movie.LoadInput(filename + ".dtm");
+@@ -858,13 +932,34 @@ static void LoadAsFromCore(Core::System& system, std::string filename)
+     }
+     else
+     {
++#ifdef __ORBIS__
++      // No undo copy on PS4: the game is half overwritten and must not run again. Report it and
++      // stop the CPU thread here for good; the in-game menu explains and restarts into the XMB.
++      // (Memory cards and the NAND are written as the game saves, so nothing is lost.)
++      ERROR_LOG_FMT(CORE, "State {} failed halfway through loading", filename);
++      if (s_ps4_load_result_callback)
++        s_ps4_load_result_callback(PS4Slot::Broken, s_ps4_made_by);
++      if (Core::IsCPUThread())
++      {
++        while (true)
++          Common::SleepCurrentThread(1000);
++      }
++      return;
++#else
+       Core::DisplayMessage("The savestate could not be loaded", OSD::Duration::NORMAL);
+ 
+       // since we could be in an inconsistent state now (and might crash or whatever), undo.
+       UndoLoadState(system);
++#endif
+     }
+   }
+ 
++#ifdef __ORBIS__
++  if (s_ps4_load_result_callback)
++    s_ps4_load_result_callback(loaded_successfully ? PS4Slot::Ready : s_ps4_load_result,
++                               s_ps4_made_by);
++#endif
++
+   if (s_on_after_load_callback)
+     s_on_after_load_callback();
+ }
+@@ -884,6 +979,38 @@ void SetOnAfterLoadCallback(AfterLoadCallbackFunc callback)
+   s_on_after_load_callback = std::move(callback);
+ }
+ 
++#ifdef __ORBIS__
++void PS4SetLoadResultCallback(PS4LoadResultFunc callback)
++{
++  s_ps4_load_result_callback = std::move(callback);
++}
++
++PS4Slot PS4CheckSlot(u32 slot, std::string* made_by)
++{
++  File::IOFile f(MakeStateFilename(slot), "rb");
++  if (!f.IsOpen())
++    return PS4Slot::Empty;
++  StateHeader header;
++  if (!f.ReadArray(&header.legacy_header, 1))
++    return PS4Slot::Damaged;
++  if (strncmp(SConfig::GetInstance().GetGameID().c_str(), header.legacy_header.game_id, 6) != 0)
++    return PS4Slot::OtherGame;
++  // LZO states are from Dolphin 5.0 and older.
++  if (header.legacy_header.lzo_size != 0 || !f.ReadArray(&header.version_header, 1))
++    return PS4Slot::OtherVersion;
++  const u32 length = header.version_header.version_string_length;
++  if (made_by != nullptr && length < 256)
++  {
++    made_by->assign(length, '\0');
++    if (!f.ReadBytes(made_by->data(), length))
++      made_by->clear();
++  }
++  if (header.version_header.version_cookie != COOKIE_BASE + STATE_COOKIE_VERSION)
++    return PS4Slot::OtherVersion;
++  return PS4Slot::Ready;
++}
++#endif
++
+ void Init(Core::System& system)
+ {
+   s_compress_and_dump_thread.Reset("Savestate Worker",
+diff --git a/Source/Core/Core/State.h b/Source/Core/Core/State.h
+index cd35ea1..aecce41 100644
+--- a/Source/Core/Core/State.h
++++ b/Source/Core/Core/State.h
+@@ -106,4 +106,23 @@ void UndoLoadState(Core::System& system);
+ // for calling back into UI code without introducing a dependency on it in core
+ using AfterLoadCallbackFunc = std::function<void()>;
+ void SetOnAfterLoadCallback(AfterLoadCallbackFunc callback);
++
++#ifdef __ORBIS__
++// PS4 (DolphinNoGUI/PS4IngameMenu.cpp): what a slot holds, and how a load ended.
++enum class PS4Slot
++{
++  Ready,         // this game, this state format
++  Empty,         // no state in the slot
++  OtherGame,     // made by another game
++  OtherVersion,  // made by a version with another state format: refused before loading
++  Damaged,       // unreadable: refused before loading
++  Broken,        // (load only) failed halfway through: the game can't go on
++};
++// Reads the slot's header only: no lock, no on-screen messages. made_by gets the version string.
++PS4Slot PS4CheckSlot(u32 slot, std::string* made_by = nullptr);
++// Called on the CPU thread after every load, with the result and the state's version string.
++// After Broken the CPU thread stops for good; the caller restarts the app.
++using PS4LoadResultFunc = std::function<void(PS4Slot result, const std::string& made_by)>;
++void PS4SetLoadResultCallback(PS4LoadResultFunc callback);
++#endif
+ }  // namespace State
 diff --git a/Source/Core/DolphinNoGUI/CMakeLists.txt b/Source/Core/DolphinNoGUI/CMakeLists.txt
 index 51c3fff..9358eb8 100644
 --- a/Source/Core/DolphinNoGUI/CMakeLists.txt
@@ -5439,10 +5648,10 @@ index 0000000..5157e21
 +}  // namespace PS4Glyphs
 diff --git a/Source/Core/DolphinNoGUI/PS4IngameMenu.cpp b/Source/Core/DolphinNoGUI/PS4IngameMenu.cpp
 new file mode 100755
-index 0000000..5cccd7d
+index 0000000..27adbea
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4IngameMenu.cpp
-@@ -0,0 +1,937 @@
+@@ -0,0 +1,1046 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -5577,6 +5786,16 @@ index 0000000..5cccd7d
 +bool s_hint_started = false;
 +Clock::time_point s_hint_start;
 +int s_saving_slot = 0;  // a save to this slot is being written
++int s_loading_slot = 0;  // a load of this slot was requested
++// A load failed halfway (State::PS4Slot::Broken): the CPU thread has stopped for good, and the app
++// restarts into the XMB once the message has been shown.
++bool s_broken = false;
++Clock::time_point s_broken_time;
++
++// ---- Set on the CPU thread when a state load ends (State::PS4SetLoadResultCallback). ----
++std::atomic<bool> s_load_done{false};
++std::atomic<State::PS4Slot> s_load_result{State::PS4Slot::Ready};
++std::string s_load_made_by;  // under s_mutex
 +
 +// Watchdog (menu-hang.txt).
 +std::atomic<unsigned> s_draws{0};
@@ -5595,6 +5814,52 @@ index 0000000..5cccd7d
 +  return PS4Settings::IsCustom(s_game_id);
 +}
 +
++// "Slot 2 was saved by ..." for a state that this version can't load.
++std::string SlotProblem(int slot, State::PS4Slot status, const std::string& made_by)
++{
++  const std::string name = "Slot " + std::to_string(slot);
++  switch (status)
++  {
++  case State::PS4Slot::Empty:
++    return name + " is empty";
++  case State::PS4Slot::OtherGame:
++    return name + " belongs to another game";
++  case State::PS4Slot::OtherVersion:
++    if (made_by.starts_with("Dolphin for PS4 v"))
++      return name + " was saved by " + made_by + " and can't be loaded by this version";
++    if (made_by.find("[ps4]") != std::string::npos)
++      return name + " was saved by an older Dolphin for PS4 and can't be loaded";
++    return name + " was saved by another Dolphin version and can't be loaded";
++  case State::PS4Slot::Damaged:
++    return name + " is damaged and can't be loaded";
++  case State::PS4Slot::Broken:
++    return name + " couldn't be loaded - back to the game list";
++  case State::PS4Slot::Ready:
++    break;
++  }
++  return "Loaded slot " + std::to_string(slot);
++}
++
++// The slot as shown on the Save State and Load State rows.
++std::string SlotLabel(int slot)
++{
++  std::string label = "Slot " + std::to_string(slot);
++  switch (State::PS4CheckSlot(static_cast<u32>(slot)))
++  {
++  case State::PS4Slot::Empty:
++    return label + " (Empty)";
++  case State::PS4Slot::OtherGame:
++  case State::PS4Slot::OtherVersion:
++    return label + " (Other Version)";
++  case State::PS4Slot::Damaged:
++  case State::PS4Slot::Broken:
++    return label + " (Damaged)";
++  case State::PS4Slot::Ready:
++    break;
++  }
++  return label;
++}
++
 +// Rebuilds the rows for the current page (host thread, s_mutex not held while computing).
 +void BuildRows()
 +{
@@ -5605,7 +5870,7 @@ index 0000000..5cccd7d
 +  std::string subtitle;
 +  if (s_page == Page::Main)
 +  {
-+    const std::string slot = "Slot " + std::to_string(s_slot);
++    const std::string slot = SlotLabel(s_slot);
 +    for (const int item : s_main_items)
 +    {
 +      switch (item)
@@ -5718,11 +5983,11 @@ index 0000000..5cccd7d
 +  s_hints = std::move(hints);
 +}
 +
-+void Toast(const std::string& text)
++void Toast(const std::string& text, int ms = 2200)
 +{
 +  std::lock_guard lock(s_mutex);
 +  s_toast = text;
-+  s_toast_until = Clock::now() + std::chrono::milliseconds(2200);
++  s_toast_until = Clock::now() + std::chrono::milliseconds(ms);
 +}
 +
 +// Host thread, s_mutex not held (Core calls wait for the video thread, which takes s_mutex).
@@ -5946,11 +6211,25 @@ index 0000000..5cccd7d
 +      Toast("Still saving, please wait...");
 +      break;
 +    }
-+    Log("loading state " + std::to_string(s_slot));
-+    State::Load(system, static_cast<u32>(s_slot));
-+    Log("load requested " + std::to_string(s_slot));
-+    Close(system);
-+    break;
++    {
++      // Only states this version can load: a refused one leaves the game as it was, and the menu
++      // stays open with the reason.
++      std::string made_by;
++      const State::PS4Slot status = State::PS4CheckSlot(static_cast<u32>(s_slot), &made_by);
++      if (status != State::PS4Slot::Ready)
++      {
++        Log("slot " + std::to_string(s_slot) + " not loadable (" + std::to_string(int(status)) +
++            ", made by \"" + made_by + "\")");
++        Toast(SlotProblem(s_slot, status, made_by), 4500);
++        break;
++      }
++      Log("loading state " + std::to_string(s_slot) + " (made by " + made_by + ")");
++      s_loading_slot = s_slot;
++      State::Load(system, static_cast<u32>(s_slot));
++      Log("load requested " + std::to_string(s_slot));
++      Close(system);
++      break;
++    }
 +  case MAIN_SETTINGS:
 +    s_page = Page::Settings;
 +    s_settings_selected = 0;
@@ -6221,6 +6500,14 @@ index 0000000..5cccd7d
 +void Install()
 +{
 +  ps4_overlay_draw = Draw;
++  State::PS4SetLoadResultCallback([](State::PS4Slot result, const std::string& made_by) {
++    {
++      std::lock_guard lock(s_mutex);
++      s_load_made_by = made_by;
++    }
++    s_load_result = result;
++    s_load_done = true;
++  });
 +  std::thread(Watchdog).detach();
 +}
 +
@@ -6247,6 +6534,37 @@ index 0000000..5cccd7d
 +    Toast("Saved to slot " + std::to_string(s_saving_slot));
 +    Log("saved state " + std::to_string(s_saving_slot));
 +    s_saving_slot = 0;
++  }
++  if (s_load_done.exchange(false))
++  {
++    const State::PS4Slot result = s_load_result;
++    std::string made_by;
++    {
++      std::lock_guard lock(s_mutex);
++      made_by = s_load_made_by;
++    }
++    Log("state " + std::to_string(s_loading_slot) + " load result " +
++        std::to_string(int(result)));
++    Toast(SlotProblem(s_loading_slot, result, made_by),
++          result == State::PS4Slot::Ready ? 2200 : 6000);
++    if (result == State::PS4Slot::Broken && !s_broken)
++    {
++      s_broken = true;
++      s_broken_time = Clock::now();
++    }
++  }
++  if (s_broken)
++  {
++    // The game can't go on (its CPU thread has stopped): show why, then restart into the XMB.
++    // No Core::Stop: it would wait for that thread forever.
++    if (Clock::now() - s_broken_time > std::chrono::seconds(5))
++    {
++      Log("state load failed halfway: restarting into the XMB");
++      sceSystemServiceLoadExec("/app0/eboot.bin", nullptr);
++    }
++    ps4_overlay_repaint = 1;
++    system.GetFifo().PS4WakeGpu();
++    return;
 +  }
 +  if (s_quit_requested.exchange(false) && !s_quit)
 +    QuitToXMB(system, "the game asked for the Wii Menu: quit to the XMB");
@@ -11002,10 +11320,10 @@ index f4dc8a9..121376e 100644
  
 diff --git a/Source/Core/DolphinNoGUI/PlatformPS4.cpp b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
 new file mode 100644
-index 0000000..c9a33a1
+index 0000000..1beba90
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
-@@ -0,0 +1,1218 @@
+@@ -0,0 +1,1225 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -12007,6 +12325,13 @@ index 0000000..c9a33a1
 +}
 +
 +}  // namespace
++
++// Core/State.cpp: save states name the app version that made them.
++extern "C" const char* ps4_app_version()
++{
++  static const std::string version = AppVersion();
++  return version.c_str();
++}
 +
 +std::unique_ptr<Platform> Platform::CreatePS4Platform()
 +{
