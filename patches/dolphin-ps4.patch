@@ -3337,7 +3337,7 @@ index 612161b..fbee84f 100644
      PPCAnalyst::BlockStats st;
      PPCAnalyst::BlockRegStats gpa;
 diff --git a/Source/Core/Core/PowerPC/MMU.cpp b/Source/Core/Core/PowerPC/MMU.cpp
-index 940e93c..76ff3b9 100644
+index 940e93c..2a8781d 100644
 --- a/Source/Core/Core/PowerPC/MMU.cpp
 +++ b/Source/Core/Core/PowerPC/MMU.cpp
 @@ -25,6 +25,14 @@
@@ -3385,7 +3385,7 @@ index 940e93c..76ff3b9 100644
    // Instead of storing m_page_table in savestates, we *could* refetch it from memory
    // here in DoState, but this could lead to us getting a more up-to-date set of page mappings
    // than we had when the savestate was created, which could be a problem for TAS determinism.
-@@ -189,6 +208,59 @@ static void EFB_Write(u32 data, u32 addr)
+@@ -189,6 +208,75 @@ static void EFB_Write(u32 data, u32 addr)
    }
  }
  
@@ -3402,7 +3402,13 @@ index 940e93c..76ff3b9 100644
 +  return (address >> HW_PAGE_INDEX_SHIFT) | (ppc_state.msr.DR ? 0x100000u : 0u) | 0x200000u;
 +}
 +
-+// Lookups that hit / fell back to the full path (DolphinNoGUI monitor).
++// ps4.ini soft_tlb=flush: every tlbie and page table update empties the whole soft TLB (the old
++// behaviour). Default: a tlbie removes only that page's entries.
++extern "C" int ps4_soft_tlb_precise;
++int ps4_soft_tlb_precise = 1;
++
++// Lookups that hit / fell back to the full path (DolphinNoGUI monitor). Lookups the JIT does
++// inline (Jit64Common/EmuCodeBlock.cpp) aren't counted: with it, every C lookup is a miss.
 +extern "C" unsigned long long ps4_soft_tlb_hits, ps4_soft_tlb_misses;
 +unsigned long long ps4_soft_tlb_hits = 0, ps4_soft_tlb_misses = 0;
 +
@@ -3440,12 +3446,22 @@ index 940e93c..76ff3b9 100644
 +  m_soft_tlb_read.fill({});
 +  m_soft_tlb_write.fill({});
 +}
++
++// tlbie: the game changed that page's page table entry (the architecture requires a tlbie for
++// it), so only that page's entries can be stale. Games such as Spider-Man 2 issue ~1000 tlbie a
++// second; emptying the whole table each time made ~350k lookups a second miss.
++void MMU::SoftTlbInvalidatePage(u32 logical_address)
++{
++  const u32 index = (logical_address >> HW_PAGE_INDEX_SHIFT) & (SOFT_TLB_SIZE - 1);
++  m_soft_tlb_read[index] = {};
++  m_soft_tlb_write[index] = {};
++}
 +#endif
 +
  template <XCheckTLBFlag flag, std::unsigned_integral T, bool never_translate>
  T MMU::ReadFromHardware(u32 em_address)
  {
-@@ -215,6 +287,7 @@ T MMU::ReadFromHardware(u32 em_address)
+@@ -215,6 +303,7 @@ T MMU::ReadFromHardware(u32 em_address)
    }
  
    bool wi = false;
@@ -3453,7 +3469,7 @@ index 940e93c..76ff3b9 100644
  
    if (!never_translate &&
        (IsOpcodeFlag(flag) ? m_ppc_state.msr.IR.Value() : m_ppc_state.msr.DR.Value()))
-@@ -232,6 +305,10 @@ T MMU::ReadFromHardware(u32 em_address)
+@@ -232,6 +321,10 @@ T MMU::ReadFromHardware(u32 em_address)
  
    if (flag == XCheckTLBFlag::Read && (em_address & 0xF8000000) == 0x08000000)
    {
@@ -3464,7 +3480,7 @@ index 940e93c..76ff3b9 100644
      if (em_address < 0x0c000000)
      {
        return EFB_Read(em_address);
-@@ -259,6 +336,11 @@ T MMU::ReadFromHardware(u32 em_address)
+@@ -259,6 +352,11 @@ T MMU::ReadFromHardware(u32 em_address)
      T value;
      em_address &= m_memory.GetRamMask();
  
@@ -3476,7 +3492,7 @@ index 940e93c..76ff3b9 100644
      if (!m_ppc_state.m_enable_dcache || wi)
      {
        std::memcpy(&value, &m_memory.GetRAM()[em_address], sizeof(T));
-@@ -278,6 +360,11 @@ T MMU::ReadFromHardware(u32 em_address)
+@@ -278,6 +376,11 @@ T MMU::ReadFromHardware(u32 em_address)
      T value;
      em_address &= 0x0FFFFFFF;
  
@@ -3488,7 +3504,7 @@ index 940e93c..76ff3b9 100644
      if (!m_ppc_state.m_enable_dcache || wi)
      {
        std::memcpy(&value, &m_memory.GetEXRAM()[em_address], sizeof(T));
-@@ -343,6 +430,7 @@ void MMU::WriteToHardware(u32 em_address, const u32 data, const u32 size)
+@@ -343,6 +446,7 @@ void MMU::WriteToHardware(u32 em_address, const u32 data, const u32 size)
    }
  
    bool wi = false;
@@ -3496,7 +3512,7 @@ index 940e93c..76ff3b9 100644
  
    if (!never_translate && m_ppc_state.msr.DR)
    {
-@@ -395,6 +483,21 @@ void MMU::WriteToHardware(u32 em_address, const u32 data, const u32 size)
+@@ -395,6 +499,21 @@ void MMU::WriteToHardware(u32 em_address, const u32 data, const u32 size)
  
    if (flag == XCheckTLBFlag::Write && (em_address & 0xF8000000) == 0x08000000)
    {
@@ -3518,7 +3534,7 @@ index 940e93c..76ff3b9 100644
      if (em_address < 0x0c000000)
      {
        EFB_Write(data, em_address);
-@@ -465,6 +568,11 @@ void MMU::WriteToHardware(u32 em_address, const u32 data, const u32 size)
+@@ -465,6 +584,11 @@ void MMU::WriteToHardware(u32 em_address, const u32 data, const u32 size)
      // mirrors of memory).
      em_address &= m_memory.GetRamMask();
  
@@ -3530,7 +3546,7 @@ index 940e93c..76ff3b9 100644
      if (m_ppc_state.m_enable_dcache && !wi)
        m_ppc_state.dCache.Write(m_memory, em_address, &swapped_data, size, HID0(m_ppc_state).DLOCK);
  
-@@ -479,6 +587,11 @@ void MMU::WriteToHardware(u32 em_address, const u32 data, const u32 size)
+@@ -479,6 +603,11 @@ void MMU::WriteToHardware(u32 em_address, const u32 data, const u32 size)
    {
      em_address &= 0x0FFFFFFF;
  
@@ -3542,7 +3558,7 @@ index 940e93c..76ff3b9 100644
      if (m_ppc_state.m_enable_dcache && !wi)
      {
        m_ppc_state.dCache.Write(m_memory, em_address + 0x10000000, &swapped_data, size,
-@@ -1151,6 +1264,11 @@ void MMU::TouchDCacheLine(u32 address, bool store)
+@@ -1151,6 +1280,11 @@ void MMU::TouchDCacheLine(u32 address, bool store)
  
  u32 MMU::IsOptimizableMMIOAccess(u32 address, u32 access_size) const
  {
@@ -3554,7 +3570,7 @@ index 940e93c..76ff3b9 100644
    if (m_power_pc.GetMemChecks().HasAny())
      return 0;
  
-@@ -1175,6 +1293,23 @@ u32 MMU::IsOptimizableMMIOAccess(u32 address, u32 access_size) const
+@@ -1175,6 +1309,23 @@ u32 MMU::IsOptimizableMMIOAccess(u32 address, u32 access_size) const
    return address;
  }
  
@@ -3578,7 +3594,7 @@ index 940e93c..76ff3b9 100644
  bool MMU::IsOptimizableGatherPipeWrite(u32 address) const
  {
    if (m_power_pc.GetMemChecks().HasAny())
-@@ -1275,12 +1410,18 @@ void MMU::SDRUpdated()
+@@ -1275,12 +1426,18 @@ void MMU::SDRUpdated()
  
    m_ppc_state.pagetable_base = htaborg << 16;
    m_ppc_state.pagetable_mask = (htabmask << 16) | 0xffc0;
@@ -3597,12 +3613,15 @@ index 940e93c..76ff3b9 100644
    // Our incremental handling of page table updates can't handle SR changing, so throw away all
    // existing mappings and then reparse the whole page table.
    m_memory.RemoveAllPageTableMappings();
-@@ -1374,7 +1515,22 @@ void MMU::InvalidateTLBEntry(u32 address)
+@@ -1374,7 +1531,25 @@ void MMU::InvalidateTLBEntry(u32 address)
  
    m_ppc_state.tlb[PowerPC::DATA_TLB_INDEX][entry_index].Invalidate();
    m_ppc_state.tlb[PowerPC::INST_TLB_INDEX][entry_index].Invalidate();
 +#ifdef __ORBIS__
-+  SoftTlbFlush();
++  if (ps4_soft_tlb_precise)
++    SoftTlbInvalidatePage(address);
++  else
++    SoftTlbFlush();
 +#endif
  
 +#ifdef __ORBIS__
@@ -3620,28 +3639,32 @@ index 940e93c..76ff3b9 100644
    if (m_ppc_state.msr.DR)
      PageTableUpdated();
    else
-@@ -1383,6 +1539,9 @@ void MMU::InvalidateTLBEntry(u32 address)
+@@ -1383,6 +1558,11 @@ void MMU::InvalidateTLBEntry(u32 address)
  
  void MMU::ClearPageTable()
  {
 +#ifdef __ORBIS__
-+  SoftTlbFlush();
++  // (Reset, state loads, SDR1 and segment register changes flush the soft TLB themselves.)
++  if (!ps4_soft_tlb_precise)
++    SoftTlbFlush();
 +#endif
    // If we've skipped processing any update to the page table, we need to remove all host mappings,
    // because we don't know which of them are still valid.
    m_memory.RemoveAllPageTableMappings();
-@@ -1408,6 +1567,10 @@ void MMU::ReloadPageTable()
+@@ -1408,6 +1588,12 @@ void MMU::ReloadPageTable()
  
  void MMU::PageTableUpdated()
  {
 +#ifdef __ORBIS__
-+  SoftTlbFlush();
++  // After a tlbie its page was invalidated already (InvalidateTLBEntry).
++  if (!ps4_soft_tlb_precise)
++    SoftTlbFlush();
 +#endif
 +  PS4_PROFILE(PS4_PROF_PAGETABLE);
    m_ppc_state.pagetable_update_pending = false;
  
    if (!m_system.GetJitInterface().WantsPageTableMappings())
-@@ -2000,6 +2163,9 @@ void MMU::UpdateFakeMMUBat(BatTable& bat_table, u32 start_addr)
+@@ -2000,6 +2186,9 @@ void MMU::UpdateFakeMMUBat(BatTable& bat_table, u32 start_addr)
  
  void MMU::DBATUpdated()
  {
@@ -3651,7 +3674,7 @@ index 940e93c..76ff3b9 100644
    m_dbat_table = {};
    UpdateBATs(m_dbat_table, SPR_DBAT0U);
    bool extended_bats = m_system.IsWii() && HID4(m_ppc_state).SBE;
-@@ -2028,6 +2194,9 @@ void MMU::DBATUpdated()
+@@ -2028,6 +2217,9 @@ void MMU::DBATUpdated()
  
  void MMU::IBATUpdated()
  {
@@ -3661,7 +3684,7 @@ index 940e93c..76ff3b9 100644
    m_ibat_table = {};
    UpdateBATs(m_ibat_table, SPR_IBAT0U);
    bool extended_bats = m_system.IsWii() && HID4(m_ppc_state).SBE;
-@@ -2074,6 +2243,14 @@ void ClearDCacheLineFromJit(MMU& mmu, u32 address)
+@@ -2074,6 +2266,14 @@ void ClearDCacheLineFromJit(MMU& mmu, u32 address)
  template <std::unsigned_integral T>
  Common::MakeAtLeastU32<T> ReadFromJit(MMU& mmu, u32 address)
  {
@@ -3676,7 +3699,7 @@ index 940e93c..76ff3b9 100644
    return mmu.Read<T>(address);
  }
  template u32 ReadFromJit<u8>(MMU& mmu, u32 address);
-@@ -2084,6 +2261,29 @@ template u64 ReadFromJit<u64>(MMU& mmu, u32 address);
+@@ -2084,6 +2284,29 @@ template u64 ReadFromJit<u64>(MMU& mmu, u32 address);
  template <std::unsigned_integral T>
  void WriteFromJit(MMU& mmu, Common::MakeAtLeastU32<T> var, u32 address)
  {
@@ -3706,7 +3729,7 @@ index 940e93c..76ff3b9 100644
    mmu.Write<T>(var, address);
  }
  template void WriteFromJit<u8>(MMU& mmu, u32 var, u32 address);
-@@ -2092,14 +2292,52 @@ template void WriteFromJit<u32>(MMU& mmu, u32 var, u32 address);
+@@ -2092,14 +2315,52 @@ template void WriteFromJit<u32>(MMU& mmu, u32 var, u32 address);
  template void WriteFromJit<u64>(MMU& mmu, u64 var, u32 address);
  void WriteU16SwapFromJit(MMU& mmu, u32 var, u32 address)
  {
@@ -3760,7 +3783,7 @@ index 940e93c..76ff3b9 100644
  }
  }  // namespace PowerPC
 diff --git a/Source/Core/Core/PowerPC/MMU.h b/Source/Core/Core/PowerPC/MMU.h
-index 8c12ead..cfdd2f4 100644
+index 8c12ead..866e893 100644
 --- a/Source/Core/Core/PowerPC/MMU.h
 +++ b/Source/Core/Core/PowerPC/MMU.h
 @@ -28,6 +28,11 @@ namespace Memory
@@ -3788,7 +3811,7 @@ index 8c12ead..cfdd2f4 100644
    bool IsOptimizableGatherPipeWrite(u32 address) const;
  
    TranslateResult JitCache_TranslateAddress(u32 address);
-@@ -269,7 +280,32 @@ public:
+@@ -269,7 +280,33 @@ public:
    BatTable& GetIBATTable() { return m_ibat_table; }
    BatTable& GetDBATTable() { return m_dbat_table; }
  
@@ -3806,6 +3829,7 @@ index 8c12ead..cfdd2f4 100644
 +  u8* SoftTlbLookup(bool write, u32 address, u32 size);
 +  void SoftTlbFill(bool write, u32 logical_address, u8* host_page);
 +  void SoftTlbFlush();
++  void SoftTlbInvalidatePage(u32 logical_address);
 +  // For the JIT's inline lookup (Jit64Common/EmuCodeBlock.cpp, PS4SoftTlbProbe).
 +  const SoftTlbEntry* PS4SoftTlbData(bool write) const
 +  {
@@ -4193,7 +4217,7 @@ index 51c3fff..4571299 100644
 +  ps4_add_eboot(dolphin-nogui)
 +endif()
 diff --git a/Source/Core/DolphinNoGUI/MainNoGUI.cpp b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
-index 3bf40ea..f62dca2 100644
+index 3bf40ea..53baca2 100644
 --- a/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 +++ b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 @@ -2,10 +2,17 @@
@@ -4236,7 +4260,7 @@ index 3bf40ea..f62dca2 100644
  #include "UICommon/CommandLineParse.h"
  #ifdef USE_DISCORD_PRESENCE
  #include "UICommon/DiscordPresence.h"
-@@ -31,6 +45,41 @@
+@@ -31,6 +45,42 @@
  
  static std::unique_ptr<Platform> s_platform;
  
@@ -4254,6 +4278,7 @@ index 3bf40ea..f62dca2 100644
 +extern "C" int ps4_tex_hash_once;  // VideoCommon/TextureCacheBase.cpp
 +extern "C" int ps4_lazy_lfs;       // Core/PowerPC/Jit64/Jit.cpp
 +extern "C" int ps4_jit_tlb_inline;  // Core/PowerPC/Jit64/Jit.cpp
++extern "C" int ps4_soft_tlb_precise;  // Core/PowerPC/MMU.cpp
 +extern "C" int ps4_lfs_forward;    // Core/PowerPC/Jit64/Jit.cpp
 +// libkernel: console model and CPU clock (startup log).
 +extern "C" uint64_t sceKernelGetCpuFrequency(void);
@@ -4278,7 +4303,7 @@ index 3bf40ea..f62dca2 100644
  static void signal_handler(int)
  {
    constexpr char message[] = "A signal was received. A second signal will force Dolphin to stop.\n";
-@@ -173,6 +222,10 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
+@@ -173,6 +223,10 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
    if (platform_name == "macos" || platform_name.empty())
      return Platform::CreateMacOSPlatform();
  #endif
@@ -4289,7 +4314,7 @@ index 3bf40ea..f62dca2 100644
  
    if (platform_name == "headless" || platform_name.empty())
      return Platform::CreateHeadlessPlatform();
-@@ -184,8 +237,17 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
+@@ -184,8 +238,17 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
  #define main app_main
  #endif
  
@@ -4308,7 +4333,7 @@ index 3bf40ea..f62dca2 100644
    const auto parser =
        CommandLineParse::CreateParser(CommandLineParse::ParserOptions::OmitGUIOptions);
    parser->add_option("-p", "--platform")
-@@ -207,6 +269,10 @@ int main(const int argc, char* argv[])
+@@ -207,6 +270,10 @@ int main(const int argc, char* argv[])
  #ifdef __APPLE__
                  ,
                  "macos"
@@ -4319,7 +4344,7 @@ index 3bf40ea..f62dca2 100644
  #endif
        });
  
-@@ -270,7 +336,302 @@ int main(const int argc, char* argv[])
+@@ -270,7 +337,304 @@ int main(const int argc, char* argv[])
  
    UICommon::SetUserDirectory(user_directory);
    UICommon::Init();
@@ -4478,6 +4503,8 @@ index 3bf40ea..f62dca2 100644
 +    ps4_lazy_lfs = Platform::GetPS4Option("jit_lazy_lfs", "on") == "on";
 +    // jit_tlb_inline=off: the soft TLB is looked up in C only (Jit64Common/EmuCodeBlock.cpp).
 +    ps4_jit_tlb_inline = Platform::GetPS4Option("jit_tlb_inline", "on") == "on";
++    // soft_tlb=flush: every tlbie empties the whole soft TLB (MMU.cpp), as before v03.10.
++    ps4_soft_tlb_precise = Platform::GetPS4Option("soft_tlb", "precise") != "flush";
 +    // jit_lfs_forward=off: stfs always converts its register again instead of storing the bits an
 +    // lfs in the same block loaded (Jit64 PS4AnalyzeRawSingles; also turns lazy lfs off).
 +    ps4_lfs_forward = Platform::GetPS4Option("jit_lfs_forward", "on") == "on";
@@ -4622,7 +4649,7 @@ index 3bf40ea..f62dca2 100644
  
    Common::ScopeGuard ui_common_guard([] {
      UICommon::ShutdownControllers();
-@@ -284,6 +645,12 @@ int main(const int argc, char* argv[])
+@@ -284,6 +648,12 @@ int main(const int argc, char* argv[])
    }
  
    auto core_state_changed_hook = Core::AddOnStateChangedCallback([](const Core::State state) {
@@ -4635,7 +4662,7 @@ index 3bf40ea..f62dca2 100644
      if (state == Core::State::Uninitialized)
        s_platform->Stop();
    });
-@@ -303,6 +670,9 @@ int main(const int argc, char* argv[])
+@@ -303,6 +673,9 @@ int main(const int argc, char* argv[])
  
    DolphinAnalytics::Instance().ReportDolphinStart("nogui");
  
@@ -8551,10 +8578,10 @@ index 0000000..914dbb5
 +}  // namespace PS4Updater
 diff --git a/Source/Core/DolphinNoGUI/PS4XMB.cpp b/Source/Core/DolphinNoGUI/PS4XMB.cpp
 new file mode 100755
-index 0000000..bc34aa2
+index 0000000..e7b5dbd
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4XMB.cpp
-@@ -0,0 +1,3756 @@
+@@ -0,0 +1,3768 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -9176,6 +9203,7 @@ index 0000000..bc34aa2
 +
 +  void HandleInput(uint32_t pressed);
 +  void OpenSettingPanel(int setting);
++  std::string InstalledPackageNote() const;
 +  void ApplySettingOption(int setting, int option);
 +  void OpenSettingsList(const std::string& category, const std::string& game_id);
 +  void OpenControlsList(PS4Controls::Device device);
@@ -9726,6 +9754,17 @@ index 0000000..bc34aa2
 +  }
 +}
 +
++// " (installed package v03.08)" when a downloaded update runs (the PS4 shows the package's version).
++std::string Menu::InstalledPackageNote() const
++{
++  std::ifstream file("/app0/xmb/version.txt");
++  std::string installed;
++  std::getline(file, installed);
++  while (!installed.empty() && (installed.back() == '\r' || installed.back() == ' '))
++    installed.pop_back();
++  return installed.empty() || installed == m_version ? "" : " (installed package " + installed + ")";
++}
++
 +void Menu::OpenSettingPanel(int setting)
 +{
 +  m_panel = {};
@@ -9790,7 +9829,7 @@ index 0000000..bc34aa2
 +    m_panel.lines = {"Dolphin for PS4",
 +                     "GameCube and Wii emulator",
 +                     "Ported to PS4 by ShiroKlein",
-+                     "Version " + m_version,
++                     "Version " + m_version + InstalledPackageNote(),
 +                     "",
 +                     "Games: " + m_data_dir + "/games",
 +                     "Wallpapers (PNG): " + m_data_dir + "/themes",
