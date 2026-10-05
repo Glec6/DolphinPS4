@@ -98,10 +98,11 @@ You bring your own game backups. Nothing copyrighted is bundled: no games, BIOS 
 **You need:** a jailbroken PS4 that runs homebrew packages (developed on a launch-model "fat"
 PS4), an FTP connection to it, and backups of games you own.
 
-1. Grab **`DolphinPS4-v02.99.pkg`** from the [releases page](https://github.com/iHaiDeeZ/DolphinPS4/releases/latest)
+1. Grab **`DolphinPS4-v03.33.pkg`** from the [releases page](https://github.com/iHaiDeeZ/DolphinPS4/releases/latest)
    and install it with your package installer.
 2. Put your games in **`/data/DolphinPS4/games/`**. Accepted formats are `.rvz`, `.iso`,
-   `.nkit.iso`, `.gcm`, `.gcz`, `.ciso`, `.wia` and `.wbfs`. Multi-disc games just need
+   `.nkit.iso`, `.gcm`, `.gcz`, `.ciso`, `.wia`, `.wbfs` and `.tgc` (discs), `.wad` (WiiWare,
+   Virtual Console, channels), and `.dol` / `.elf` (homebrew). Multi-disc games just need
    `(Disc 1)` / `(Disc 2)` in their names.
 3. Launch **Dolphin** from the home screen.
 
