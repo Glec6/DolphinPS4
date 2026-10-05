@@ -361,3 +361,11 @@ Benutzerdefiniert
 # --- Homebrew
 Homebrew (GameCube)
 Homebrew (Wii)
+# --- Default game
+Als Standard-ISO festlegen
+Standard-ISO entfernen
+Kein Spiel startet mehr von selbst.
+startet beim Öffnen von Dolphin.
+Halte L1 beim Start von Dolphin,
+um stattdessen das Menü zu öffnen.
+Startet beim Öffnen von Dolphin

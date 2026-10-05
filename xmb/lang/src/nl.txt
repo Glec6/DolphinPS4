@@ -361,3 +361,11 @@ Aangepast
 # --- Homebrew
 Homebrew (GameCube)
 Homebrew (Wii)
+# --- Default game
+Instellen als standaard-ISO
+Standaard-ISO verwijderen
+Er start geen spel meer vanzelf.
+start bij het openen van Dolphin.
+Houd L1 ingedrukt tijdens het starten
+om in plaats daarvan het menu te openen.
+Start bij het openen van Dolphin

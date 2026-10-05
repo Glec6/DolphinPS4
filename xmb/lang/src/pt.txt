@@ -361,3 +361,11 @@ Personalizado
 # --- Homebrew
 Homebrew (GameCube)
 Homebrew (Wii)
+# --- Default game
+Definir como ISO padrão
+Remover ISO padrão
+Nenhum jogo inicia sozinho agora.
+inicia ao abrir o Dolphin.
+Segure L1 enquanto o Dolphin inicia
+para abrir o menu no lugar.
+Inicia ao abrir o Dolphin

@@ -361,3 +361,11 @@ Nunchuk çubuğu
 # --- Homebrew
 Homebrew (GameCube)
 Homebrew (Wii)
+# --- Default game
+Varsayılan ISO yap
+Varsayılan ISO'yu kaldır
+Artık hiçbir oyun kendiliğinden başlamaz.
+Dolphin açılınca başlar.
+Bunun yerine menüyü açmak için
+Dolphin açılırken L1'i basılı tut.
+Dolphin açılınca başlar

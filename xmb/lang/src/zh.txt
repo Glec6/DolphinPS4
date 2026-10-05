@@ -361,3 +361,11 @@ R2（模拟）
 # --- Homebrew
 自制软件（GameCube）
 自制软件（Wii）
+# --- Default game
+设为默认 ISO
+取消默认 ISO
+不再自动启动任何游戏。
+会在打开 Dolphin 时启动。
+启动 Dolphin 时按住 L1
+即可改为打开菜单。
+打开 Dolphin 时启动

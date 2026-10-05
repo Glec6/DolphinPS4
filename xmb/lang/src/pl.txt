@@ -361,3 +361,11 @@ Własne
 # --- Homebrew
 Homebrew (GameCube)
 Homebrew (Wii)
+# --- Default game
+Ustaw jako domyślne ISO
+Usuń domyślne ISO
+Żadna gra nie uruchamia się już sama.
+uruchamia się po otwarciu Dolphin.
+Przytrzymaj L1 podczas uruchamiania Dolphin,
+aby zamiast tego otworzyć menu.
+Uruchamia się po otwarciu Dolphin

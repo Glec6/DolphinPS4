@@ -5921,10 +5921,10 @@ index 0000000..5157e21
 +}  // namespace PS4Glyphs
 diff --git a/Source/Core/DolphinNoGUI/PS4IngameMenu.cpp b/Source/Core/DolphinNoGUI/PS4IngameMenu.cpp
 new file mode 100755
-index 0000000..6bbb3f4
+index 0000000..c5c0acb
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4IngameMenu.cpp
-@@ -0,0 +1,1048 @@
+@@ -0,0 +1,1051 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -5980,6 +5980,7 @@ index 0000000..6bbb3f4
 +using VideoCommon::ps4_overlay_font_regular;
 +extern std::atomic<int> ps4_state_busy;  // Core/State.cpp
 +extern "C" const char* ps4_self_path();  // PlatformPS4.cpp: the running program
++extern "C" void ps4_return_to_menu();    // PlatformPS4.cpp: the restart shows the menu
 +
 +namespace PS4IngameMenu
 +{
@@ -6835,6 +6836,7 @@ index 0000000..6bbb3f4
 +    if (Clock::now() - s_broken_time > std::chrono::seconds(5))
 +    {
 +      Log("state load failed halfway: restarting into the XMB");
++      ps4_return_to_menu();
 +      sceSystemServiceLoadExec(ps4_self_path(), nullptr);
 +    }
 +    ps4_overlay_repaint = 1;
@@ -6849,6 +6851,7 @@ index 0000000..6bbb3f4
 +    if (Clock::now() - s_quit_time > std::chrono::seconds(6))
 +    {
 +      Log("stop took too long, restarting into the XMB");
++      ps4_return_to_menu();
 +      sceSystemServiceLoadExec(ps4_self_path(), nullptr);
 +    }
 +    return;
@@ -8941,10 +8944,10 @@ index 0000000..914dbb5
 +}  // namespace PS4Updater
 diff --git a/Source/Core/DolphinNoGUI/PS4XMB.cpp b/Source/Core/DolphinNoGUI/PS4XMB.cpp
 new file mode 100755
-index 0000000..440f0df
+index 0000000..293b86e
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4XMB.cpp
-@@ -0,0 +1,3886 @@
+@@ -0,0 +1,3923 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -9405,6 +9408,7 @@ index 0000000..440f0df
 +  std::string last_game;
 +  std::string style = "library";  // Settings -> Menu Style: "library" (covers) or "xmb"
 +  std::string sort = "title";     // game order: "title", "recent" (last played first), "platform"
++  std::string default_game;       // starts by itself when the app opens (Set as Default ISO)
 +
 +  void Load(const std::string& path)
 +  {
@@ -9438,6 +9442,8 @@ index 0000000..440f0df
 +        style = value == "xmb" ? "xmb" : "library";
 +      else if (key == "sort")
 +        sort = value;
++      else if (key == "default_game")
++        default_game = value;
 +    }
 +  }
 +  void Save(const std::string& path) const
@@ -9448,7 +9454,7 @@ index 0000000..440f0df
 +         << (sounds ? "on" : "off") << "\nvolume=" << volume << "\nclock="
 +         << (clock ? "on" : "off") << "\nauto_update=" << (auto_update ? "on" : "off")
 +         << "\ngames_dir=" << games_dir << "\nlast_game=" << last_game << "\nstyle=" << style
-+         << "\nsort=" << sort << "\n";
++         << "\nsort=" << sort << "\ndefault_game=" << default_game << "\n";
 +  }
 +};
 +
@@ -10107,6 +10113,8 @@ index 0000000..440f0df
 +    std::string detail = game.id;
 +    if (game.discs > 1)
 +      detail += "  -  " + std::to_string(game.discs) + " discs";
++    if (!m_prefs.default_game.empty() && game.path == m_prefs.default_game)
++      detail += "  -  Starts when Dolphin opens";
 +    games.push_back({game.title, detail, i, -1, -1});
 +  }
 +  if (games.empty())
@@ -10780,6 +10788,26 @@ index 0000000..440f0df
 +        Play("confirm");
 +        return;
 +      }
++      else if (m_panel.title == "Game" && m_panel.selected == 4)
++      {
++        // One default game: setting another replaces it, the same game again removes it.
++        const Item& item = m_items[m_category][m_selected[m_category]];
++        const Game& game = m_games[item.game];
++        const bool remove = m_prefs.default_game == game.path;
++        m_prefs.default_game = remove ? "" : game.path;
++        m_prefs.Save(m_data_dir + "/xmb.ini");
++        Log(remove ? "default game removed" : "default game: " + game.path);
++        BuildItems();
++        m_panel.title = remove ? "Remove Default ISO" : "Set as Default ISO";
++        m_panel.options.clear();
++        if (remove)
++          m_panel.lines = {"", "No game starts by itself anymore."};
++        else
++          m_panel.lines = {"", game.title, "", "starts when Dolphin opens.", "",
++                           "Hold L1 while Dolphin starts", "to open the menu instead."};
++        Play("confirm");
++        return;
++      }
 +      else if (m_panel.title == "Game" && m_panel.selected == 3)
 +      {
 +        const Item& item = m_items[m_category][m_selected[m_category]];
@@ -10893,7 +10921,10 @@ index 0000000..440f0df
 +      m_panel = {};
 +      m_panel.open = true;
 +      m_panel.title = "Game";
-+      m_panel.options = {"Start", "Game Settings", "Cheats", "Information"};
++      m_panel.options = {"Start", "Game Settings", "Cheats", "Information",
++                         m_prefs.default_game == m_games[items[selected].game].path ?
++                             "Remove Default ISO" :
++                             "Set as Default ISO"};
 +      Play("menu");
 +    }
 +  }
@@ -12111,6 +12142,8 @@ index 0000000..440f0df
 +  std::string info = std::string(game.wii ? "Wii" : "GameCube") + "  -  " + PlayedText(Played(game.path));
 +  if (game.discs > 1)
 +    info += "  -  " + std::to_string(game.discs) + " discs";
++  if (!m_prefs.default_game.empty() && game.path == m_prefs.default_game)
++    info += "  -  Starts when Dolphin opens";
 +  const float iw = TextWidth(m_font, 26, info);
 +  Text(dl, m_font, 26, ImVec2(W * 0.5f - iw * 0.5f, 860), Rgba(theme.text, alpha * 0.72f), info);
 +  const float bw = 210.0f, bh = 62.0f, by = 908.0f;
@@ -12817,6 +12850,13 @@ index 0000000..440f0df
 +}
 +}  // namespace
 +
++std::string DefaultGame(const std::string& data_dir)
++{
++  Preferences prefs;
++  prefs.Load(data_dir + "/xmb.ini");
++  return prefs.default_game;
++}
++
 +std::string GamesDir(const std::string& data_dir)
 +{
 +  Preferences prefs;
@@ -12833,10 +12873,10 @@ index 0000000..440f0df
 +}  // namespace PS4XMB
 diff --git a/Source/Core/DolphinNoGUI/PS4XMB.h b/Source/Core/DolphinNoGUI/PS4XMB.h
 new file mode 100755
-index 0000000..d6d6011
+index 0000000..ae13e6a
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4XMB.h
-@@ -0,0 +1,46 @@
+@@ -0,0 +1,50 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -12877,6 +12917,10 @@ index 0000000..d6d6011
 +// The folder games are looked for in: Settings -> Game Folder (xmb.ini games_dir), by default
 +// data_dir/games.
 +std::string GamesDir(const std::string& data_dir);
++
++// The game that starts by itself when the app is opened (Triangle on a game -> Set as Default
++// ISO; xmb.ini default_game), or empty.
++std::string DefaultGame(const std::string& data_dir);
 +
 +// Shows the XMB until a game is picked (returns its first disc) or the user quits (empty).
 +// data_dir: /data/DolphinPS4 (xmb.ini, themes/); assets_dir: /app0 (xmb/, Sys/).
@@ -13533,10 +13577,10 @@ index f4dc8a9..0c37736 100644
  
 diff --git a/Source/Core/DolphinNoGUI/PlatformPS4.cpp b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
 new file mode 100644
-index 0000000..3281af0
+index 0000000..256a914
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
-@@ -0,0 +1,1437 @@
+@@ -0,0 +1,1498 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -13560,6 +13604,7 @@ index 0000000..3281af0
 +#include <vector>
 +
 +#include <orbis/Sysmodule.h>
++#include <orbis/Pad.h>
 +#include <orbis/UserService.h>
 +#include <orbis/libkernel.h>
 +#include <fcntl.h>
@@ -13636,6 +13681,7 @@ index 0000000..3281af0
 +// Defined below, at file scope (Common/FileUtil.cpp and PS4XMB.cpp use them too).
 +extern "C" const char* ps4_self_path();
 +extern "C" void ps4_update_started_ok();
++extern "C" void ps4_return_to_menu();
 +// The version this program was packaged as: scripts/package-dolphin.sh writes it over the
 +// "00.00" (a downloaded update must know it isn't the installed program).
 +extern "C" const char ps4_built_version[];
@@ -14628,7 +14674,10 @@ index 0000000..3281af0
 +  // XMB when the in-game menu's "Quit Game" stopped the emulation.
 +  fflush(stderr);
 +  if (PS4IngameMenu::ReturnToXMB())
++  {
++    ps4_return_to_menu();
 +    sceSystemServiceLoadExec(ps4_self_path(), nullptr);
++  }
 +  sceSystemServiceLoadExec("exit", nullptr);
 +  for (;;)
 +    sceKernelUsleep(100000);
@@ -14662,6 +14711,15 @@ index 0000000..3281af0
 +  s_fonts[bold != 0] = PS4Lang::ExtraFonts(AssetsDir(), bold != 0);
 +  return index < static_cast<int>(s_fonts[bold != 0].size()) ? s_fonts[bold != 0][index].c_str() :
 +                                                                 nullptr;
++}
++
++// Restarts that should show the menu (a game quit to it, the menu restarted itself) leave this
++// note; without it the app was opened from the home screen, and the default game starts.
++const std::string TO_MENU = std::string(PS4_DATA_DIR_PATH) + "/to-menu.txt";
++extern "C" void ps4_return_to_menu()
++{
++  if (FILE* file = fopen(TO_MENU.c_str(), "w"))
++    fclose(file);
 +}
 +
 +// PS4XMB.cpp, at its first frame, and before a game starts: a downloaded update works.
@@ -14740,6 +14798,30 @@ index 0000000..3281af0
 +// removed once the update shows its menu (or starts a game); still there at the next start, the
 +// update didn't work: it's set aside and the installed version runs. An installed package as new
 +// as the update replaces it.
++// L1 held while the app starts: the menu instead of the default game (player 1's DualShock 4).
++static bool MenuButtonHeld()
++{
++  int32_t user = -1;
++  sceUserServiceInitialize(nullptr);
++  if (sceUserServiceGetInitialUser(&user) != 0 || user < 0)
++    return false;
++  scePadInit();
++  const int pad = scePadOpen(user, ORBIS_PAD_PORT_TYPE_STANDARD, 0, nullptr);
++  if (pad < 0)
++    return false;
++  bool held = false;
++  // The first reads can come back empty right after opening: a few tries over ~0.2 s.
++  for (int i = 0; i < 10 && !held; i++)
++  {
++    OrbisPadData data = {};
++    if (scePadReadState(pad, &data) == 0 && data.connected)
++      held = (data.buttons & ORBIS_PAD_BUTTON_L1) != 0;
++    sceKernelUsleep(20000);
++  }
++  scePadClose(pad);
++  return held;
++}
++
 +static void StartDownloadedUpdate()
 +{
 +  const std::string update = FirstLine(UPDATE_DIR + "/xmb/version.txt");
@@ -14866,52 +14948,75 @@ index 0000000..3281af0
 +  else if (GetPS4Option("xmb", "on") == "on")
 +  {
 +    LoadSystemModules();
-+    // The XMB scans the games folder itself (again on a refresh or a new folder).
-+    const PS4XMB::ScanFunction scan = [](const std::string& games_dir) {
-+      std::vector<PS4XMB::LibraryDisc> library;
-+      for (const LibraryEntry& entry : ScanLibrary(games_dir))
-+        library.push_back({entry.path, entry.game_id, entry.revision, entry.disc, entry.title,
-+                           entry.wad, entry.homebrew, entry.wii});
-+      return library;
-+    };
-+    game = PS4XMB::Run(scan, PS4_DATA_DIR_PATH, AssetsDir(), AppVersion());
-+    if (game == PS4XMB::RESTART_APP)
++    // Set as Default ISO: opened from the home screen, the app starts that game instead of the
++    // menu. L1 held while it starts: the menu after all.
++    const bool to_menu = std::remove(TO_MENU.c_str()) == 0;
++    const std::string default_game = PS4XMB::DefaultGame(PS4_DATA_DIR_PATH);
++    if (!to_menu && !default_game.empty())
 +    {
-+      // An update was unpacked: the installed program starts it (StartDownloadedUpdate).
-+      BootTrace("xmb: restarting for the update");
-+      fflush(stderr);
-+      sceSystemServiceLoadExec("/app0/eboot.bin", nullptr);
-+      for (;;)
-+        sceKernelUsleep(100000);
-+    }
-+    if (game == PS4XMB::EXIT_APP)
-+    {
-+      // An update is installing in the background: the app closes so it can be replaced.
-+      BootTrace("xmb: closing the app for an update");
-+      fflush(stderr);
-+      sceSystemServiceLoadExec("exit", nullptr);
-+      for (;;)
-+        sceKernelUsleep(100000);
++      std::error_code ec;
++      if (!std::filesystem::exists(default_game, ec))
++        BootTrace(("default game not found: " + default_game).c_str());
++      else if (MenuButtonHeld())
++        BootTrace("default game skipped (L1 held): the menu");
++      else
++      {
++        BootTrace(("default game: " + default_game).c_str());
++        game = default_game;
++        ps4_update_started_ok();  // a downloaded update got as far as starting a game
++      }
 +    }
 +    if (game.empty())
 +    {
-+      // The menu couldn't start: the old automatic start, so the app stays usable.
-+      BootTrace("xmb: unavailable, starting boot.txt / the first game");
-+      game = FindGame();
-+    }
-+    else if (FILE* file = fopen(launch_path.c_str(), "w"))
-+    {
-+      fprintf(file, "%s\n", game.c_str());
-+      fclose(file);
-+      BootTrace("xmb: restarting into the game");
-+      fflush(stderr);
-+      const int result = sceSystemServiceLoadExec(ps4_self_path(), nullptr);
-+      // Still here: the restart failed. Start the game in this process instead.
-+      char text[96];
-+      snprintf(text, sizeof(text), "xmb: sceSystemServiceLoadExec failed (%#x), booting here",
-+               static_cast<unsigned>(result));
-+      BootTrace(text);
-+      std::remove(launch_path.c_str());
++      // The XMB scans the games folder itself (again on a refresh or a new folder).
++      const PS4XMB::ScanFunction scan = [](const std::string& games_dir) {
++        std::vector<PS4XMB::LibraryDisc> library;
++        for (const LibraryEntry& entry : ScanLibrary(games_dir))
++          library.push_back({entry.path, entry.game_id, entry.revision, entry.disc, entry.title,
++                             entry.wad, entry.homebrew, entry.wii});
++        return library;
++      };
++      game = PS4XMB::Run(scan, PS4_DATA_DIR_PATH, AssetsDir(), AppVersion());
++      if (game == PS4XMB::RESTART_APP)
++      {
++        // An update was unpacked (the installed program starts it, StartDownloadedUpdate) or the
++        // language changed: back to the menu.
++        BootTrace("xmb: restarting");
++        fflush(stderr);
++        ps4_return_to_menu();
++        sceSystemServiceLoadExec("/app0/eboot.bin", nullptr);
++        for (;;)
++          sceKernelUsleep(100000);
++      }
++      if (game == PS4XMB::EXIT_APP)
++      {
++        // An update is installing in the background: the app closes so it can be replaced.
++        BootTrace("xmb: closing the app for an update");
++        fflush(stderr);
++        sceSystemServiceLoadExec("exit", nullptr);
++        for (;;)
++          sceKernelUsleep(100000);
++      }
++      if (game.empty())
++      {
++        // The menu couldn't start: the old automatic start, so the app stays usable.
++        BootTrace("xmb: unavailable, starting boot.txt / the first game");
++        game = FindGame();
++      }
++      else if (FILE* file = fopen(launch_path.c_str(), "w"))
++      {
++        fprintf(file, "%s\n", game.c_str());
++        fclose(file);
++        BootTrace("xmb: restarting into the game");
++        fflush(stderr);
++        const int result = sceSystemServiceLoadExec(ps4_self_path(), nullptr);
++        // Still here: the restart failed. Start the game in this process instead.
++        char text[96];
++        snprintf(text, sizeof(text), "xmb: sceSystemServiceLoadExec failed (%#x), booting here",
++                 static_cast<unsigned>(result));
++        BootTrace(text);
++        std::remove(launch_path.c_str());
++      }
 +    }
 +  }
 +  else

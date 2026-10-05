@@ -363,3 +363,11 @@ Custom
 # --- Homebrew
 Homebrew (GameCube)
 Homebrew (Wii)
+# --- Default game
+Set as Default ISO
+Remove Default ISO
+No game starts by itself anymore.
+starts when Dolphin opens.
+Hold L1 while Dolphin starts
+to open the menu instead.
+Starts when Dolphin opens

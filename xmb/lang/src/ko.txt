@@ -361,3 +361,11 @@ R2 (아날로그)
 # --- Homebrew
 홈브루 (게임큐브)
 홈브루 (Wii)
+# --- Default game
+기본 ISO로 설정
+기본 ISO 해제
+이제 자동으로 시작되는 게임이 없습니다.
+Dolphin을 열면 시작됩니다.
+메뉴를 열려면 Dolphin이 시작될 때
+L1을 누르고 있으세요.
+Dolphin을 열면 시작

@@ -361,3 +361,11 @@ Personalizzato
 # --- Homebrew
 Homebrew (GameCube)
 Homebrew (Wii)
+# --- Default game
+Imposta come ISO predefinita
+Rimuovi ISO predefinita
+Nessun gioco si avvia più da solo.
+si avvia all'apertura di Dolphin.
+Tieni premuto L1 all'avvio di Dolphin
+per aprire invece il menu.
+Si avvia all'apertura di Dolphin
