@@ -118,7 +118,7 @@ Assíncrona
 Ubershaders híbridos
 Síncrona
 Assíncrona: sem travadas, objetos podem aparecer um instante depois. Ubershaders híbridos: sem travadas e nada faltando, usa a GPU. Síncrona: espera cada shader novo.
-Clock da CPU emulada
+Frequência da CPU emulada
 Automático reduz o clock só quando a CPU é o limite.
 Recursos de velocidade
 Rápido
@@ -141,7 +141,7 @@ O que está conectado ao Wii Remote. Wii Sports e jogos parecidos precisam de Ne
 Para jogos jogados com o Wii Remote na horizontal (NSMB Wii, Mario Kart Wii).
 Buffer de áudio
 Maior fica mais suave quando o jogo roda abaixo da velocidade total; menor tem menos atraso.
-Todo o diagnóstico
+Todos os diagnósticos
 Todas as opções abaixo de uma vez. Desligado: nada é registrado enquanto você joga.
 Registro de desempenho
 Velocidade, FPS e travadas a cada 2 segundos (boot-trace.log).
@@ -151,10 +151,10 @@ Registro do emulador
 As mensagens do próprio Dolphin (dolphin.log).
 Profiler
 Registra onde o tempo é gasto (samples.log). Custa velocidade - só para analisar jogos lentos.
-{} (Na próxima vez que o jogo iniciar.)
+{} (na próxima vez que o jogo iniciar.)
 # --- Launcher: categories, tabs, items
 Jogos
-Memory Cards
+Cartões de memória
 Temas
 Biblioteca
 A-Z
@@ -183,13 +183,13 @@ Sobre
 {} discos
 Nenhum jogo encontrado
 Copie jogos para {} e aperte Quadrado
-{} save
-{} saves
+{} salvamento
+{} salvamentos
 {} blocos
 {} bloco
 No Slot A
-Um cartão vazio para saves novos
-Novo Memory Card
+Um cartão vazio para novos salvamentos
+Novo cartão de memória
 Em uso
 Tema de cor
 Papel de parede
@@ -207,10 +207,10 @@ Grafite
 Meia-noite
 # --- Launcher: panels
 Biblioteca: suas capas em fileira,
-abas com L1 / R1.
+abas alternadas com L1 / R1.
 XMB: as colunas no estilo do PSP.
-Procura uma versão nova no GitHub
-ao abrir o app e pergunta
+Procura uma nova versão no GitHub
+quando o aplicativo abre e pede confirmação
 antes de instalar.
 Cancelar
 Restaurar tudo
@@ -218,7 +218,7 @@ Todos os jogos, gerais e por jogo,
 voltam às configurações padrão.
 Dolphin para PS4
 Emulador de GameCube e Wii
-Portado para PS4 por ShiroKlein
+Portado para o PS4 por ShiroKlein
 Versão {} (pacote instalado {})
 Versão {}
 Jogos: {}
@@ -238,7 +238,7 @@ Usar esta pasta
 Conectando ao GameTDB...
 Finalizando...
 Baixando {} de {}: {}
-Círculo fecha isto; o download continua.
+Círculo fecha esta tela; o download continua.
 Baixadas: {}
 Já existentes: {}
 Fora do GameTDB: {}
@@ -255,19 +255,19 @@ Arquivo: {}
 Jogo
 Iniciar
 Colocar no Slot A
-{} save
-{} saves
-Ainda não há saves neste cartão
+{} salvamento
+{} salvamentos
+Ainda não há salvamentos neste cartão
 Aperte o botão do DualShock 4 para {}...  (5 s: cancelar)
 X: aperte um botão novo. Analógicos: Esquerda/Direita para escolher.
-Volta ao layout padrão.
+Restaura o layout padrão.
 X: abrir esta pasta.
 X: procurar jogos nesta pasta.
 X: os jogos usam este cartão a partir do próximo início. Seus outros cartões continuam iguais.
 Os jogos salvam neste cartão. Escolha outro e coloque no Slot A para trocar.
 salvo {}
-Vale na próxima vez que o jogo iniciar, ou agora pelo menu do jogo (L3+R3).
-Todos os jogos: este jogo segue as configurações gerais. Este jogo: as próprias.
+É aplicado na próxima vez que o jogo iniciar ou agora pelo menu do jogo (L3+R3).
+Todos os jogos: usa as configurações gerais. Este jogo: usa configurações próprias.
 Atualizar
 Opções
 Jogar
@@ -283,14 +283,14 @@ Copie seus jogos para {}
 e aperte Quadrado para procurar de novo (ou escolha uma pasta em Configurações).
 Slot A: {}
 SLOT A
-Um Memory Card novo e vazio.
-Coloque-o no Slot A para começar saves novos - para uma segunda
+Um novo cartão de memória vazio.
+Coloque-o no Slot A para começar novos salvamentos - para uma segunda
 jogada ou para dividir o console com alguém.
-Seus outros cartões e saves continuam iguais,
+Seus outros cartões e salvamentos continuam iguais,
 e você pode voltar a qualquer momento.
 Aperte X para criá-lo.
-Saves em {}
-Ainda não há saves. Coloque o cartão no Slot A e salve em um jogo.
+Salvamentos em {}
+Ainda não há salvamentos. Coloque o cartão no Slot A e salve em um jogo.
 + {} a mais - aperte X para ver todos
 Cores e papéis de parede (PNG em {})
 Emulação, controles, atualizações e mais
@@ -313,7 +313,7 @@ Mantenha o app aberto até terminar.
 Atualização instalada
 Dolphin v{} está pronta.
 Ela inicia quando o Dolphin reiniciar.
-Jogos, saves e configurações são mantidos.
+Jogos, salvamentos e configurações são mantidos.
 Reiniciar agora
 Depois
 Atualização pronta
@@ -321,7 +321,7 @@ Dolphin v{} foi baixada e verificada.
 Para instalar, feche o Dolphin e abra
 Configurações de depuração > Jogo > Instalador de pacotes
 (ou o do GoldHEN) e escolha Dolphin v{}.
-Salva como {}
+Salvo como {}
 Fechar o Dolphin
 Atualização
 A atualização não funcionou:
@@ -375,7 +375,7 @@ Este console não permite o modo rápido de CPU do Dolphin (JIT): os jogos ficam
 Cartão SD do Wii
 Inserido
 Removido
-Um cartão SD virtual para jogos e canais do Wii (saves, fotos, músicas, homebrew).
+Um cartão SD virtual para jogos e canais do Wii (salvamentos, fotos, músicas, homebrew).
 Pasta do cartão SD
 O cartão contém os arquivos de /data/DolphinPS4/User/Load/WiiSDSync (copie-os para lá por FTP); o que os jogos gravam volta para lá ao terminar.
 Gravação no cartão SD
