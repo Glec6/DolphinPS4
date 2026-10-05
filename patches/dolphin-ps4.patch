@@ -8202,10 +8202,10 @@ index 0000000..9bfcde3
 +}  // namespace PS4Updater
 diff --git a/Source/Core/DolphinNoGUI/PS4XMB.cpp b/Source/Core/DolphinNoGUI/PS4XMB.cpp
 new file mode 100755
-index 0000000..8603a8c
+index 0000000..e614465
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4XMB.cpp
-@@ -0,0 +1,3627 @@
+@@ -0,0 +1,3671 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -10942,30 +10942,74 @@ index 0000000..8603a8c
 +  const float horizon = 600.0f;
 +  dl->AddRectFilledMultiColor(ImVec2(0, 0), ImVec2(W, horizon), bottom, bottom, top, top);
 +  dl->AddRectFilledMultiColor(ImVec2(0, horizon), ImVec2(W, H), top, top, bottom, bottom);
-+  // A soft light behind the covers.
-+  for (int i = 0; i < 7; i++)
++  // Light ribbons drifting slowly across the sky, very faint.
++  for (int r = 0; r < 3; r++)
 +  {
-+    dl->AddEllipseFilled(ImVec2(W * 0.5f, horizon), ImVec2(260.0f + i * 120.0f, 90.0f + i * 34.0f),
-+                         Rgba(theme.wave, 0.035f), 0.0f, 64);
++    const float base = 210.0f + r * 95.0f, amplitude = 50.0f + r * 18.0f;
++    const float k = 2.0f * 3.14159265f / (1500.0f + r * 400.0f);
++    const float speed = (r % 2 == 0 ? 0.12f : -0.09f), phase = r * 2.1f;
++    constexpr float STEP = 32.0f;
++    ImVec2 prev_top, prev_bottom;
++    for (float x = -STEP; x <= W + STEP; x += STEP)
++    {
++      const float y = base + amplitude * std::sin(x * k + m_time * speed + phase);
++      const float thick = 70.0f + 40.0f * std::sin(x * k * 0.7f + m_time * 0.2f + phase);
++      const ImVec2 p_top(x, y), p_bottom(x, y + thick);
++      if (x > -STEP)
++      {
++        // Brightest in the middle of the screen.
++        const float mid = 1.0f - std::min(1.0f, std::abs(x - W * 0.5f) / (W * 0.62f));
++        const float a = 0.055f * mid;
++        QuadMultiColor(dl, prev_top, p_top, p_bottom, prev_bottom, Rgba(theme.wave, 0.0f),
++                       Rgba(theme.wave, 0.0f), Rgba(theme.wave, a), Rgba(theme.wave, a));
++      }
++      prev_top = p_top;
++      prev_bottom = p_bottom;
++    }
 +  }
-+  // The floor: lines towards a vanishing point, and rows that get closer near the horizon; the
-+  // rows drift slowly towards the viewer.
-+  const ImVec2 vanish(W * 0.5f, horizon - 120.0f);
-+  for (int i = -14; i <= 14; i++)
++
++  // The floor: glossy, lit from the horizon, with a pool of light under the covers.
++  dl->AddRectFilledMultiColor(ImVec2(0, horizon), ImVec2(W, H), Rgba(theme.wave, 0.10f),
++                              Rgba(theme.wave, 0.10f), Rgba(theme.wave, 0.0f), Rgba(theme.wave, 0.0f));
++  for (int i = 0; i < 8; i++)
 +  {
-+    const float x = W * 0.5f + i * 190.0f;
-+    const float t = (horizon - vanish.y) / (H - vanish.y);
-+    const ImVec2 start(vanish.x + (x - vanish.x) * t, horizon);
-+    dl->AddLine(start, ImVec2(x, H), Rgba(theme.wave, 0.10f), 1.5f);
++    dl->AddEllipseFilled(ImVec2(W * 0.5f, 728.0f), ImVec2(160.0f + i * 70.0f, 26.0f + i * 9.0f),
++                         Rgba(theme.wave, 0.028f), 0.0f, 64);
 +  }
-+  const float drift = std::fmod(m_time * 0.08f, 1.0f);
-+  for (int i = 0; i < 14; i++)
++  for (int i = 0; i < 6; i++)
 +  {
-+    const float k = (static_cast<float>(i) + drift) / 14.0f;
-+    const float y = horizon + (H - horizon) * k * k;
-+    dl->AddLine(ImVec2(0, y), ImVec2(W, y), Rgba(theme.wave, 0.03f + 0.10f * k), 1.5f);
++    dl->AddEllipseFilled(ImVec2(W * 0.5f, horizon), ImVec2(300.0f + i * 140.0f, 110.0f + i * 40.0f),
++                         Rgba(theme.wave, 0.022f), 0.0f, 64);
 +  }
-+  dl->AddLine(ImVec2(0, horizon), ImVec2(W, horizon), Rgba(theme.wave, 0.22f), 2.0f);
++  // The horizon: a thin line of light, fading out towards the edges.
++  {
++    const ImU32 clear = Rgba(theme.wave, 0.0f), bright = Rgba(theme.wave, 0.55f);
++    QuadMultiColor(dl, ImVec2(0, horizon - 1), ImVec2(W * 0.5f, horizon - 1), ImVec2(W * 0.5f, horizon + 1),
++                   ImVec2(0, horizon + 1), clear, bright, bright, clear);
++    QuadMultiColor(dl, ImVec2(W * 0.5f, horizon - 1), ImVec2(W, horizon - 1), ImVec2(W, horizon + 1),
++                   ImVec2(W * 0.5f, horizon + 1), bright, clear, clear, bright);
++    const ImU32 haze = Rgba(theme.wave, 0.12f);
++    QuadMultiColor(dl, ImVec2(W * 0.15f, horizon - 18), ImVec2(W * 0.5f, horizon - 18),
++                   ImVec2(W * 0.5f, horizon), ImVec2(W * 0.15f, horizon), clear, clear, haze, clear);
++    QuadMultiColor(dl, ImVec2(W * 0.5f, horizon - 18), ImVec2(W * 0.85f, horizon - 18),
++                   ImVec2(W * 0.85f, horizon), ImVec2(W * 0.5f, horizon), clear, clear, clear, haze);
++  }
++
++  // Specks of light rising slowly and twinkling (fixed positions from a hash, so no state).
++  for (int i = 0; i < 46; i++)
++  {
++    const float h1 = std::fmod(std::sin(i * 12.9898f) * 43758.5453f, 1.0f);
++    const float h2 = std::fmod(std::sin(i * 78.233f) * 12345.6789f, 1.0f);
++    const float fx = std::abs(h1), fy = std::abs(h2);
++    const float speed = 8.0f + fx * 14.0f;
++    const float y = H - std::fmod(fy * H + m_time * speed, H + 40.0f);
++    const float x = fx * W + std::sin(m_time * 0.3f + i) * 18.0f;
++    const float twinkle = 0.5f + 0.5f * std::sin(m_time * (0.8f + fy) + i * 1.7f);
++    const float radius = 1.5f + fy * 3.0f;
++    const float a = (0.10f + 0.25f * twinkle) * std::clamp(y / H * 1.4f, 0.0f, 1.0f);
++    dl->AddCircleFilled(ImVec2(x, y), radius * 3.0f, Rgba(theme.wave, a * 0.18f), 16);
++    dl->AddCircleFilled(ImVec2(x, y), radius, Rgba(0xFFFFFF, a), 12);
++  }
 +}
 +
 +// A cover (or, without one, a tile with the platform and the title) on the quad a-b-c-d

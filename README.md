@@ -26,8 +26,8 @@
 ## Overview
 
 Dolphin for PS4 brings the [Dolphin](https://dolphin-emu.org) emulator to jailbroken PS4 consoles
-as an app you launch from the home screen like any other. You browse your games in a menu
-inspired by the PSP's XMB, press **Cross**, and play with a DualShock 4. Pressing **L3 + R3**
+as an app you launch from the home screen like any other. You browse your box art in a
+cover-flow library (or a PSP-style XMB, if you prefer), press **Cross**, and play with a DualShock 4. Pressing **L3 + R3**
 during a game pauses it and opens a menu for save states, settings and cheats.
 
 Under the hood, Dolphin's JIT recompiler runs on the PS4's CPU, and rendering goes through
@@ -38,8 +38,11 @@ You bring your own game backups. Nothing copyrighted is bundled: no games, BIOS 
 ## Highlights
 
 **A launcher made for the couch**
-- Three columns, Settings, Games and Themes, navigated with the D-pad or left stick.
-- Purple badges mark GameCube games and white badges mark Wii games.
+- Your games as a row of covers, with the selected one up front, its title, platform and when you
+  last played it. Tabs for Library, Memory Cards, Settings and Themes switch with **L1 / R1**.
+- **OPTIONS** sorts the games A-Z, by Recently Played or by Platform; **Square** looks for new games.
+- Prefer the PSP look? **Settings → Menu Style → XMB** brings back the columns, with purple badges
+  for GameCube games and white ones for Wii games.
 - Box art is fetched from GameTDB on its own each time the app starts, only for the games that
   are still missing a cover. GameCube discs without art show their built-in banner.
 - It remembers the last game you played and starts there. A short animated intro plays at
@@ -54,6 +57,11 @@ You bring your own game backups. Nothing copyrighted is bundled: no games, BIOS 
 - Cheat codes (Action Replay and Gecko) can be switched on per game, from the launcher or the
   pause menu. Each code shows a green ON or red OFF tag, and *Enable All* / *Disable All* flip
   them in one go.
+
+**Memory cards you can see**
+- Every GameCube save shows up with its own icon, title, size and date, in both menu styles.
+- Make a new, empty memory card for a fresh playthrough or a second player, and choose which card
+  sits in Slot A. Your other cards keep their saves.
 
 **Play together**
 - Up to four players, each on their own DualShock 4. Turn on another controller, pick a PS4 user
