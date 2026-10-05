@@ -1630,7 +1630,7 @@ index 1fa39d7..92334cb 100644
  
    MoveEvents();
 diff --git a/Source/Core/Core/HLE/HLE.cpp b/Source/Core/Core/HLE/HLE.cpp
-index 31b6c2d..b581034 100644
+index 31b6c2d..f31ddbd 100644
 --- a/Source/Core/Core/HLE/HLE.cpp
 +++ b/Source/Core/Core/HLE/HLE.cpp
 @@ -14,6 +14,9 @@
@@ -1649,7 +1649,7 @@ index 31b6c2d..b581034 100644
  // clang-format off
 -constexpr std::array<Hook, 23> os_patches{{
 +#ifdef __ORBIS__
-+constexpr size_t PS4_GAME_HOOKS = 3;  // HLE_PS4Games::HOOKS
++constexpr size_t PS4_GAME_HOOKS = 4;  // HLE_PS4Games::HOOKS
 +#else
 +constexpr size_t PS4_GAME_HOOKS = 0;
 +#endif
@@ -1657,7 +1657,7 @@ index 31b6c2d..b581034 100644
      // Placeholder, os_patches[0] is the "non-existent function" index
      {"FAKE_TO_SKIP_0",               HLE_Misc::UnimplementedFunction,       HookType::Replace, HookFlag::Generic},
  
-@@ -58,7 +66,13 @@ constexpr std::array<Hook, 23> os_patches{{
+@@ -58,7 +66,14 @@ constexpr std::array<Hook, 23> os_patches{{
  
      {"GeckoCodehandler",             HLE_Misc::GeckoCodeHandlerICacheFlush, HookType::Start,   HookFlag::Fixed},
      {"GeckoHandlerReturnTrampoline", HLE_Misc::GeckoReturnTrampoline,       HookType::Replace, HookFlag::Fixed},
@@ -1668,11 +1668,12 @@ index 31b6c2d..b581034 100644
 +    {"PS4_Crash_cb5c4",              HLE_PS4Games::CrashLoopCB5C4,          HookType::Replace, HookFlag::Fixed},
 +    {"PS4_Crash_cb694",              HLE_PS4Games::CrashLoopCB694,          HookType::Replace, HookFlag::Fixed},
 +    {"PS4_Crash_caf2c",              HLE_PS4Games::CrashLoopCAF2C,          HookType::Replace, HookFlag::Fixed},
++    {"PS4_fdlibm_sqrt",              HLE_PS4Games::FdlibmSqrt,              HookType::Replace, HookFlag::Fixed},
 +#endif
  }};
  // clang-format on
  
-@@ -104,6 +118,10 @@ void PatchFixedFunctions(Core::System& system)
+@@ -104,6 +119,10 @@ void PatchFixedFunctions(Core::System& system)
    // This has to always be installed even if cheats are not enabled because of the possibility of
    // loading a savestate where PC is inside the code handler while cheats are disabled.
    Patch(system, Gecko::HLE_TRAMPOLINE_ADDRESS, "GeckoHandlerReturnTrampoline");
@@ -1685,10 +1686,10 @@ index 31b6c2d..b581034 100644
  void PatchFunctions(Core::System& system)
 diff --git a/Source/Core/Core/HLE/HLE_PS4Games.cpp b/Source/Core/Core/HLE/HLE_PS4Games.cpp
 new file mode 100755
-index 0000000..ffcbdde
+index 0000000..2a224a0
 --- /dev/null
 +++ b/Source/Core/Core/HLE/HLE_PS4Games.cpp
-@@ -0,0 +1,568 @@
+@@ -0,0 +1,785 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -1707,6 +1708,9 @@ index 0000000..ffcbdde
 +
 +#include <cstring>
 +#include <span>
++#include <vector>
++
++#include <immintrin.h>
 +
 +#include "Common/CommonTypes.h"
 +#include "Common/Logging/Log.h"
@@ -2202,6 +2206,190 @@ index 0000000..ffcbdde
 +
 +namespace
 +{
++
++// --- fdlibm's software square root (most GameCube / Wii games) ---------------------------------
++// CodeWarrior's MSL math library computes sqrt() with fdlibm's __ieee754_sqrt: bit by bit, ~54
++// loop passes, well over a thousand emulated instructions per call (the Gekko has no exact
++// square-root instruction). Crash of the Titans spends ~6.5% of its CPU thread there. The result
++// is the correctly rounded square root, which the host's sqrtsd gives directly (round to nearest,
++// no flush-to-zero: the library's own rounding step folds to nearest). Found by its code in any
++// game's memory; only the errno and NaN-constant addresses differ between games.
++
++// {word, mask} for each of the 146 instructions.
++constexpr u32 FDLIBM_SQRT_CODE[146 * 2] = {
++    0x9421ffe0, 0xFFFFFFFF, 0xd8210008, 0xFFFFFFFF,
++    0x80c10008, 0xFFFFFFFF, 0x8001000c, 0xFFFFFFFF,
++    0x54c30056, 0xFFFFFFFF, 0x3c638010, 0xFFFFFFFF,
++    0x28030000, 0xFFFFFFFF, 0x40820018, 0xFFFFFFFF,
++    0xfc010072, 0xFFFFFFFF, 0x38000021, 0xFFFFFFFF,
++    0x900dd4e8, 0xFFFF0000, 0xfc21002a, 0xFFFFFFFF,
++    0x48000210, 0xFFFFFFFF, 0x2c860000, 0xFFFFFFFF,
++    0x4185002c, 0xFFFFFFFF, 0x54c3007e, 0xFFFFFFFF,
++    0x7c031b79, 0xFFFFFFFF, 0x40820008, 0xFFFFFFFF,
++    0x480001f8, 0xFFFFFFFF, 0x40840018, 0xFFFFFFFF,
++    0x38000021, 0xFFFFFFFF, 0x3c608059, 0xFFFF0000,
++    0x900dd4e8, 0xFFFF0000, 0xc0230ec8, 0xFFFF0000,
++    0x480001e0, 0xFFFFFFFF, 0x7cc3a671, 0xFFFFFFFF,
++    0x40820050, 0xFFFFFFFF, 0x48000014, 0xFFFFFFFF,
++    0x5404aafe, 0xFFFFFFFF, 0x5400a814, 0xFFFFFFFF,
++    0x7cc62378, 0xFFFFFFFF, 0x3863ffeb, 0xFFFFFFFF,
++    0x2c060000, 0xFFFFFFFF, 0x4182ffec, 0xFFFFFFFF,
++    0x38e00000, 0xFFFFFFFF, 0x4800000c, 0xFFFFFFFF,
++    0x54c6083c, 0xFFFFFFFF, 0x38e70001, 0xFFFFFFFF,
++    0x54c402d7, 0xFFFFFFFF, 0x4182fff4, 0xFFFFFFFF,
++    0x20870020, 0xFFFFFFFF, 0x38a7ffff, 0xFFFFFFFF,
++    0x7c042430, 0xFFFFFFFF, 0x7c003830, 0xFFFFFFFF,
++    0x7c651850, 0xFFFFFFFF, 0x7cc62378, 0xFFFFFFFF,
++    0x3883fc01, 0xFFFFFFFF, 0x54c5033e, 0xFFFFFFFF,
++    0x548407ff, 0xFFFFFFFF, 0x64a60010, 0xFFFFFFFF,
++    0x41820014, 0xFFFFFFFF, 0x54050ffe, 0xFFFFFFFF,
++    0x7c863214, 0xFFFFFFFF, 0x7cc52214, 0xFFFFFFFF,
++    0x7c000214, 0xFFFFFFFF, 0x54050ffe, 0xFFFFFFFF,
++    0x7c863214, 0xFFFFFFFF, 0x7cc52214, 0xFFFFFFFF,
++    0x7c000214, 0xFFFFFFFF, 0x39200000, 0xFFFFFFFF,
++    0x39600000, 0xFFFFFFFF, 0x39400000, 0xFFFFFFFF,
++    0x39800000, 0xFFFFFFFF, 0x3ce00020, 0xFFFFFFFF,
++    0x48000030, 0xFFFFFFFF, 0x7c8b3a14, 0xFFFFFFFF,
++    0x7c043000, 0xFFFFFFFF, 0x41810010, 0xFFFFFFFF,
++    0x7d643a14, 0xFFFFFFFF, 0x7cc43050, 0xFFFFFFFF,
++    0x7d8c3a14, 0xFFFFFFFF, 0x54050ffe, 0xFFFFFFFF,
++    0x7c863214, 0xFFFFFFFF, 0x7cc52214, 0xFFFFFFFF,
++    0x7c000214, 0xFFFFFFFF, 0x54e7f87e, 0xFFFFFFFF,
++    0x2c070000, 0xFFFFFFFF, 0x4082ffd0, 0xFFFFFFFF,
++    0x3ce08000, 0xFFFFFFFF, 0x4800006c, 0xFFFFFFFF,
++    0x7c0b3000, 0xFFFFFFFF, 0x7d655b78, 0xFFFFFFFF,
++    0x7d093a14, 0xFFFFFFFF, 0x41800010, 0xFFFFFFFF,
++    0x40820044, 0xFFFFFFFF, 0x7c080040, 0xFFFFFFFF,
++    0x4181003c, 0xFFFFFFFF, 0x55040000, 0xFFFFFFFF,
++    0x7d283a14, 0xFFFFFFFF, 0x3c848000, 0xFFFFFFFF,
++    0x28040000, 0xFFFFFFFF, 0x40820010, 0xFFFFFFFF,
++    0x55240001, 0xFFFFFFFF, 0x40820008, 0xFFFFFFFF,
++    0x396b0001, 0xFFFFFFFF, 0x7c004040, 0xFFFFFFFF,
++    0x7cc53050, 0xFFFFFFFF, 0x40800008, 0xFFFFFFFF,
++    0x38c6ffff, 0xFFFFFFFF, 0x7c080050, 0xFFFFFFFF,
++    0x7d4a3a14, 0xFFFFFFFF, 0x54050ffe, 0xFFFFFFFF,
++    0x7c863214, 0xFFFFFFFF, 0x7cc52214, 0xFFFFFFFF,
++    0x7c000214, 0xFFFFFFFF, 0x54e7f87e, 0xFFFFFFFF,
++    0x2c070000, 0xFFFFFFFF, 0x4082ff94, 0xFFFFFFFF,
++    0x7cc00379, 0xFFFFFFFF, 0x41820058, 0xFFFFFFFF,
++    0xc802c548, 0xFFFF0000, 0xfc000040, 0xFFFFFFFF,
++    0xd8010010, 0xFFFFFFFF, 0x4c411382, 0xFFFFFFFF,
++    0x40820044, 0xFFFFFFFF, 0x3c0a0001, 0xFFFFFFFF,
++    0xd8010010, 0xFFFFFFFF, 0x2800ffff, 0xFFFFFFFF,
++    0x40820010, 0xFFFFFFFF, 0x39400000, 0xFFFFFFFF,
++    0x398c0001, 0xFFFFFFFF, 0x48000028, 0xFFFFFFFF,
++    0xfc000040, 0xFFFFFFFF, 0x40810018, 0xFFFFFFFF,
++    0x2800fffe, 0xFFFFFFFF, 0x40820008, 0xFFFFFFFF,
++    0x398c0001, 0xFFFFFFFF, 0x394a0002, 0xFFFFFFFF,
++    0x4800000c, 0xFFFFFFFF, 0x554007fe, 0xFFFFFFFF,
++    0x7d4a0214, 0xFFFFFFFF, 0x558007fe, 0xFFFFFFFF,
++    0x7d840e70, 0xFFFFFFFF, 0x2c000001, 0xFFFFFFFF,
++    0x5545f87e, 0xFFFFFFFF, 0x3c843fe0, 0xFFFFFFFF,
++    0x40820008, 0xFFFFFFFF, 0x64a58000, 0xFFFFFFFF,
++    0x3803fc01, 0xFFFFFFFF, 0x90a10014, 0xFFFFFFFF,
++    0x54009816, 0xFFFFFFFF, 0x7c840214, 0xFFFFFFFF,
++    0x90810010, 0xFFFFFFFF, 0xc8210010, 0xFFFFFFFF,
++    0x38210020, 0xFFFFFFFF, 0x4e800020, 0xFFFFFFFF
++};
++
++u32 s_sqrt_errno_offset = 0;  // errno = r13 + this (s16)
++u32 s_sqrt_nan_address = 0;   // the single-precision NaN returned for negative inputs
++
++void SetErrno(const Core::CPUThreadGuard& guard, u32 value)
++{
++  auto& ppc = guard.GetSystem().GetPPCState();
++  PowerPC::MMU::HostWrite<u32>(guard, value, ppc.gpr[13] + s_sqrt_errno_offset);
++}
++}  // namespace
++
++void FdlibmSqrt(const Core::CPUThreadGuard& guard)
++{
++  auto& ppc = guard.GetSystem().GetPPCState();
++  const u64 bits = ppc.ps[1].PS0AsU64();
++  const u32 hx = static_cast<u32>(bits >> 32);
++  const u32 lx = static_cast<u32>(bits);
++  constexpr u32 GAME_EDOM = 33;  // MSL errno for a domain error
++  if ((hx & 0x7ff00000) == 0x7ff00000)
++  {
++    // Inf or NaN: x*x + x, errno = EDOM. NaN -> the same NaN quieted; +inf -> +inf; -inf ->
++    // inf + -inf = the PowerPC default NaN (positive, unlike x86's).
++    u64 result;
++    if ((bits & 0x000fffffffffffffULL) != 0)
++      result = bits | 0x0008000000000000ULL;
++    else if (static_cast<s32>(hx) > 0)
++      result = bits;
++    else
++      result = 0x7ff8000000000000ULL;
++    SetErrno(guard, GAME_EDOM);
++    ppc.ps[1].SetPS0(result);
++  }
++  else if (static_cast<s32>(hx) <= 0 && (((hx & 0x7fffffff) | lx) == 0))
++  {
++    // +-0: returned as it is.
++  }
++  else if (static_cast<s32>(hx) < 0)
++  {
++    // Negative: errno = EDOM, the NaN constant (lfs: both halves of f1).
++    SetErrno(guard, GAME_EDOM);
++    const u32 single = PowerPC::MMU::HostRead<u32>(guard, s_sqrt_nan_address);
++    float f;
++    std::memcpy(&f, &single, 4);
++    u64 as_double;
++    const double d = static_cast<double>(f);
++    std::memcpy(&as_double, &d, 8);
++    // A float NaN widens with its payload; keep the quiet bit as the conversion does.
++    ppc.ps[1].SetBoth(as_double, as_double);
++  }
++  else
++  {
++    // Positive (normal or denormal): correctly rounded, round to nearest, denormals kept.
++    const unsigned saved = _mm_getcsr();
++    _mm_setcsr((saved & ~0xE040u) | 0x1F80u);  // RC = nearest, FTZ/DAZ off, exceptions masked
++    double x;
++    std::memcpy(&x, &bits, 8);
++    const double r = _mm_cvtsd_f64(_mm_sqrt_sd(_mm_set_sd(x), _mm_set_sd(x)));
++    _mm_setcsr(saved);
++    u64 out;
++    std::memcpy(&out, &r, 8);
++    ppc.ps[1].SetPS0(out);
++  }
++  ppc.npc = ppc.spr[SPR_LR];
++}
++
++namespace
++{
++// Every place in MEM1 and MEM2 that holds the function (normally one).
++std::vector<u32> FindFdlibmSqrt(Core::System& system)
++{
++  std::vector<u32> found;
++  auto& memory = system.GetMemory();
++  auto scan = [&](const u8* base, u32 size, u32 guest_base) {
++    if (!base)
++      return;
++    for (u32 offset = 0; offset + 146 * 4 <= size; offset += 4)
++    {
++      u32 first;
++      std::memcpy(&first, base + offset, 4);
++      if (Common::swap32(first) != FDLIBM_SQRT_CODE[0])
++        continue;
++      bool match = true;
++      for (u32 i = 1; i < 146 && match; i++)
++      {
++        u32 word;
++        std::memcpy(&word, base + offset + i * 4, 4);
++        word = Common::swap32(word);
++        match = (word & FDLIBM_SQRT_CODE[i * 2 + 1]) ==
++                (FDLIBM_SQRT_CODE[i * 2] & FDLIBM_SQRT_CODE[i * 2 + 1]);
++      }
++      if (match)
++        found.push_back(guest_base + offset);
++    }
++  };
++  scan(memory.GetRAM(), memory.GetRamSizeReal(), 0x80000000);
++  scan(memory.GetEXRAM(), memory.GetExRamSizeReal(), 0x90000000);
++  return found;
++}
++
 +template <size_t N>
 +bool CodeMatches(Core::System& system, u32 address, const std::array<u32, N>& code)
 +{
@@ -2220,16 +2408,46 @@ index 0000000..ffcbdde
 +}
 +}  // namespace
 +
-+const std::array<PS4Hook, 3> HOOKS = {{
++const std::array<PS4Hook, 4> HOOKS = {{
 +    {"PS4_Crash_cb5c4", CrashLoopCB5C4},
 +    {"PS4_Crash_cb694", CrashLoopCB694},
 +    {"PS4_Crash_caf2c", CrashLoopCAF2C},
++    {"PS4_fdlibm_sqrt", FdlibmSqrt},
 +}};
 +
 +void PatchGame(Core::System& system)
 +{
 +  if (!ps4_game_hle)
 +    return;
++  // Every game: fdlibm's square root, wherever it is.
++  if (!ps4_game_hle_only[0] || strcmp(ps4_game_hle_only, "PS4_fdlibm_sqrt") == 0)
++  {
++    const std::vector<u32> sites = FindFdlibmSqrt(system);
++    for (const u32 address : sites)
++    {
++      // Straight from RAM (no CPU thread guard here at boot); FindFdlibmSqrt read it the same way.
++      auto& memory = system.GetMemory();
++      const u8* base = (address >> 28) == 0x9 ? memory.GetEXRAM() + (address & 0x0FFFFFFF) :
++                                                memory.GetRAM() + (address & 0x01FFFFFF);
++      const auto low = [&](u32 offset) {
++        u32 word;
++        std::memcpy(&word, base + offset, 4);
++        return Common::swap32(word) & 0xFFFF;
++      };
++      const u32 errno1 = low(0x28), errno2 = low(0x58);
++      if (errno1 != errno2)
++        continue;
++      s_sqrt_errno_offset = static_cast<u32>(static_cast<s32>(static_cast<s16>(errno1)));
++      s_sqrt_nan_address = (low(0x54) << 16) + static_cast<u32>(static_cast<s32>(static_cast<s16>(low(0x5c))));
++      HLE::Patch(system, address, "PS4_fdlibm_sqrt");
++      char line[160];
++      snprintf(line, sizeof(line), "game HLE: fdlibm sqrt at %08x (errno r13%+d, NaN at %08x)",
++               address, static_cast<s32>(s_sqrt_errno_offset), s_sqrt_nan_address);
++      ps4_boot_trace(line);
++    }
++    if (sites.empty())
++      ps4_boot_trace("game HLE: no fdlibm sqrt found");
++  }
 +  const std::string game_id = SConfig::GetInstance().GetGameID();
 +  if (game_id != "GCBE7D")
 +    return;
@@ -2259,10 +2477,10 @@ index 0000000..ffcbdde
 +}  // namespace HLE_PS4Games
 diff --git a/Source/Core/Core/HLE/HLE_PS4Games.h b/Source/Core/Core/HLE/HLE_PS4Games.h
 new file mode 100755
-index 0000000..6151aca
+index 0000000..78d77cf
 --- /dev/null
 +++ b/Source/Core/Core/HLE/HLE_PS4Games.h
-@@ -0,0 +1,32 @@
+@@ -0,0 +1,34 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -2286,11 +2504,13 @@ index 0000000..6151aca
 +  const char* name;
 +  HLE::HookFunction function;
 +};
-+extern const std::array<PS4Hook, 3> HOOKS;
++extern const std::array<PS4Hook, 4> HOOKS;
 +
 +void CrashLoopCB5C4(const Core::CPUThreadGuard& guard);
 +void CrashLoopCB694(const Core::CPUThreadGuard& guard);
 +void CrashLoopCAF2C(const Core::CPUThreadGuard& guard);
++// fdlibm's __ieee754_sqrt (CodeWarrior MSL), found by its code in any game.
++void FdlibmSqrt(const Core::CPUThreadGuard& guard);
 +
 +// Installs the hooks whose game and code match (from HLE::PatchFixedFunctions).
 +void PatchGame(Core::System& system);
