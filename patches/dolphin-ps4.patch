@@ -3337,7 +3337,7 @@ index 612161b..fbee84f 100644
      PPCAnalyst::BlockStats st;
      PPCAnalyst::BlockRegStats gpa;
 diff --git a/Source/Core/Core/PowerPC/MMU.cpp b/Source/Core/Core/PowerPC/MMU.cpp
-index 940e93c..2a8781d 100644
+index 940e93c..391b70a 100644
 --- a/Source/Core/Core/PowerPC/MMU.cpp
 +++ b/Source/Core/Core/PowerPC/MMU.cpp
 @@ -25,6 +25,14 @@
@@ -3385,7 +3385,7 @@ index 940e93c..2a8781d 100644
    // Instead of storing m_page_table in savestates, we *could* refetch it from memory
    // here in DoState, but this could lead to us getting a more up-to-date set of page mappings
    // than we had when the savestate was created, which could be a problem for TAS determinism.
-@@ -189,6 +208,75 @@ static void EFB_Write(u32 data, u32 addr)
+@@ -189,6 +208,84 @@ static void EFB_Write(u32 data, u32 addr)
    }
  }
  
@@ -3411,6 +3411,12 @@ index 940e93c..2a8781d 100644
 +// inline (Jit64Common/EmuCodeBlock.cpp) aren't counted: with it, every C lookup is a miss.
 +extern "C" unsigned long long ps4_soft_tlb_hits, ps4_soft_tlb_misses;
 +unsigned long long ps4_soft_tlb_hits = 0, ps4_soft_tlb_misses = 0;
++// Why entries go (monitor): whole-table flushes (all reasons), segment register writes among
++// them, single-page invalidations (tlbie), and fills.
++extern "C" unsigned long long ps4_soft_tlb_flushes, ps4_soft_tlb_sr_flushes, ps4_soft_tlb_page_inv,
++    ps4_soft_tlb_fills;
++unsigned long long ps4_soft_tlb_flushes = 0, ps4_soft_tlb_sr_flushes = 0, ps4_soft_tlb_page_inv = 0,
++                   ps4_soft_tlb_fills = 0;
 +
 +u8* MMU::SoftTlbLookup(bool write, u32 address, u32 size)
 +{
@@ -3436,6 +3442,7 @@ index 940e93c..2a8781d 100644
 +  SoftTlbEntry& e =
 +      (write ? m_soft_tlb_write : m_soft_tlb_read)[(logical_address >> HW_PAGE_INDEX_SHIFT) &
 +                                                   (SOFT_TLB_SIZE - 1)];
++  ps4_soft_tlb_fills++;
 +  e.tag = SoftTlbTag(m_ppc_state, logical_address);
 +  e.sr = m_ppc_state.msr.DR ? m_ppc_state.sr[logical_address >> 28] : 0;
 +  e.host = host_page;
@@ -3443,6 +3450,7 @@ index 940e93c..2a8781d 100644
 +
 +void MMU::SoftTlbFlush()
 +{
++  ps4_soft_tlb_flushes++;
 +  m_soft_tlb_read.fill({});
 +  m_soft_tlb_write.fill({});
 +}
@@ -3452,6 +3460,7 @@ index 940e93c..2a8781d 100644
 +// second; emptying the whole table each time made ~350k lookups a second miss.
 +void MMU::SoftTlbInvalidatePage(u32 logical_address)
 +{
++  ps4_soft_tlb_page_inv++;
 +  const u32 index = (logical_address >> HW_PAGE_INDEX_SHIFT) & (SOFT_TLB_SIZE - 1);
 +  m_soft_tlb_read[index] = {};
 +  m_soft_tlb_write[index] = {};
@@ -3461,7 +3470,7 @@ index 940e93c..2a8781d 100644
  template <XCheckTLBFlag flag, std::unsigned_integral T, bool never_translate>
  T MMU::ReadFromHardware(u32 em_address)
  {
-@@ -215,6 +303,7 @@ T MMU::ReadFromHardware(u32 em_address)
+@@ -215,6 +312,7 @@ T MMU::ReadFromHardware(u32 em_address)
    }
  
    bool wi = false;
@@ -3469,7 +3478,7 @@ index 940e93c..2a8781d 100644
  
    if (!never_translate &&
        (IsOpcodeFlag(flag) ? m_ppc_state.msr.IR.Value() : m_ppc_state.msr.DR.Value()))
-@@ -232,6 +321,10 @@ T MMU::ReadFromHardware(u32 em_address)
+@@ -232,6 +330,10 @@ T MMU::ReadFromHardware(u32 em_address)
  
    if (flag == XCheckTLBFlag::Read && (em_address & 0xF8000000) == 0x08000000)
    {
@@ -3480,7 +3489,7 @@ index 940e93c..2a8781d 100644
      if (em_address < 0x0c000000)
      {
        return EFB_Read(em_address);
-@@ -259,6 +352,11 @@ T MMU::ReadFromHardware(u32 em_address)
+@@ -259,6 +361,11 @@ T MMU::ReadFromHardware(u32 em_address)
      T value;
      em_address &= m_memory.GetRamMask();
  
@@ -3492,7 +3501,7 @@ index 940e93c..2a8781d 100644
      if (!m_ppc_state.m_enable_dcache || wi)
      {
        std::memcpy(&value, &m_memory.GetRAM()[em_address], sizeof(T));
-@@ -278,6 +376,11 @@ T MMU::ReadFromHardware(u32 em_address)
+@@ -278,6 +385,11 @@ T MMU::ReadFromHardware(u32 em_address)
      T value;
      em_address &= 0x0FFFFFFF;
  
@@ -3504,7 +3513,7 @@ index 940e93c..2a8781d 100644
      if (!m_ppc_state.m_enable_dcache || wi)
      {
        std::memcpy(&value, &m_memory.GetEXRAM()[em_address], sizeof(T));
-@@ -343,6 +446,7 @@ void MMU::WriteToHardware(u32 em_address, const u32 data, const u32 size)
+@@ -343,6 +455,7 @@ void MMU::WriteToHardware(u32 em_address, const u32 data, const u32 size)
    }
  
    bool wi = false;
@@ -3512,7 +3521,7 @@ index 940e93c..2a8781d 100644
  
    if (!never_translate && m_ppc_state.msr.DR)
    {
-@@ -395,6 +499,21 @@ void MMU::WriteToHardware(u32 em_address, const u32 data, const u32 size)
+@@ -395,6 +508,21 @@ void MMU::WriteToHardware(u32 em_address, const u32 data, const u32 size)
  
    if (flag == XCheckTLBFlag::Write && (em_address & 0xF8000000) == 0x08000000)
    {
@@ -3534,7 +3543,7 @@ index 940e93c..2a8781d 100644
      if (em_address < 0x0c000000)
      {
        EFB_Write(data, em_address);
-@@ -465,6 +584,11 @@ void MMU::WriteToHardware(u32 em_address, const u32 data, const u32 size)
+@@ -465,6 +593,11 @@ void MMU::WriteToHardware(u32 em_address, const u32 data, const u32 size)
      // mirrors of memory).
      em_address &= m_memory.GetRamMask();
  
@@ -3546,7 +3555,7 @@ index 940e93c..2a8781d 100644
      if (m_ppc_state.m_enable_dcache && !wi)
        m_ppc_state.dCache.Write(m_memory, em_address, &swapped_data, size, HID0(m_ppc_state).DLOCK);
  
-@@ -479,6 +603,11 @@ void MMU::WriteToHardware(u32 em_address, const u32 data, const u32 size)
+@@ -479,6 +612,11 @@ void MMU::WriteToHardware(u32 em_address, const u32 data, const u32 size)
    {
      em_address &= 0x0FFFFFFF;
  
@@ -3558,7 +3567,7 @@ index 940e93c..2a8781d 100644
      if (m_ppc_state.m_enable_dcache && !wi)
      {
        m_ppc_state.dCache.Write(m_memory, em_address + 0x10000000, &swapped_data, size,
-@@ -1151,6 +1280,11 @@ void MMU::TouchDCacheLine(u32 address, bool store)
+@@ -1151,6 +1289,11 @@ void MMU::TouchDCacheLine(u32 address, bool store)
  
  u32 MMU::IsOptimizableMMIOAccess(u32 address, u32 access_size) const
  {
@@ -3570,7 +3579,7 @@ index 940e93c..2a8781d 100644
    if (m_power_pc.GetMemChecks().HasAny())
      return 0;
  
-@@ -1175,6 +1309,23 @@ u32 MMU::IsOptimizableMMIOAccess(u32 address, u32 access_size) const
+@@ -1175,6 +1318,23 @@ u32 MMU::IsOptimizableMMIOAccess(u32 address, u32 access_size) const
    return address;
  }
  
@@ -3594,7 +3603,7 @@ index 940e93c..2a8781d 100644
  bool MMU::IsOptimizableGatherPipeWrite(u32 address) const
  {
    if (m_power_pc.GetMemChecks().HasAny())
-@@ -1275,12 +1426,18 @@ void MMU::SDRUpdated()
+@@ -1275,12 +1435,19 @@ void MMU::SDRUpdated()
  
    m_ppc_state.pagetable_base = htaborg << 16;
    m_ppc_state.pagetable_mask = (htabmask << 16) | 0xffc0;
@@ -3608,12 +3617,13 @@ index 940e93c..2a8781d 100644
  void MMU::SRUpdated()
  {
 +#ifdef __ORBIS__
++  ps4_soft_tlb_sr_flushes++;
 +  SoftTlbFlush();
 +#endif
    // Our incremental handling of page table updates can't handle SR changing, so throw away all
    // existing mappings and then reparse the whole page table.
    m_memory.RemoveAllPageTableMappings();
-@@ -1374,7 +1531,25 @@ void MMU::InvalidateTLBEntry(u32 address)
+@@ -1374,7 +1541,25 @@ void MMU::InvalidateTLBEntry(u32 address)
  
    m_ppc_state.tlb[PowerPC::DATA_TLB_INDEX][entry_index].Invalidate();
    m_ppc_state.tlb[PowerPC::INST_TLB_INDEX][entry_index].Invalidate();
@@ -3639,7 +3649,7 @@ index 940e93c..2a8781d 100644
    if (m_ppc_state.msr.DR)
      PageTableUpdated();
    else
-@@ -1383,6 +1558,11 @@ void MMU::InvalidateTLBEntry(u32 address)
+@@ -1383,6 +1568,11 @@ void MMU::InvalidateTLBEntry(u32 address)
  
  void MMU::ClearPageTable()
  {
@@ -3651,7 +3661,7 @@ index 940e93c..2a8781d 100644
    // If we've skipped processing any update to the page table, we need to remove all host mappings,
    // because we don't know which of them are still valid.
    m_memory.RemoveAllPageTableMappings();
-@@ -1408,6 +1588,12 @@ void MMU::ReloadPageTable()
+@@ -1408,6 +1598,12 @@ void MMU::ReloadPageTable()
  
  void MMU::PageTableUpdated()
  {
@@ -3664,7 +3674,7 @@ index 940e93c..2a8781d 100644
    m_ppc_state.pagetable_update_pending = false;
  
    if (!m_system.GetJitInterface().WantsPageTableMappings())
-@@ -2000,6 +2186,9 @@ void MMU::UpdateFakeMMUBat(BatTable& bat_table, u32 start_addr)
+@@ -2000,6 +2196,9 @@ void MMU::UpdateFakeMMUBat(BatTable& bat_table, u32 start_addr)
  
  void MMU::DBATUpdated()
  {
@@ -3674,7 +3684,7 @@ index 940e93c..2a8781d 100644
    m_dbat_table = {};
    UpdateBATs(m_dbat_table, SPR_DBAT0U);
    bool extended_bats = m_system.IsWii() && HID4(m_ppc_state).SBE;
-@@ -2028,6 +2217,9 @@ void MMU::DBATUpdated()
+@@ -2028,6 +2227,9 @@ void MMU::DBATUpdated()
  
  void MMU::IBATUpdated()
  {
@@ -3684,7 +3694,7 @@ index 940e93c..2a8781d 100644
    m_ibat_table = {};
    UpdateBATs(m_ibat_table, SPR_IBAT0U);
    bool extended_bats = m_system.IsWii() && HID4(m_ppc_state).SBE;
-@@ -2074,6 +2266,14 @@ void ClearDCacheLineFromJit(MMU& mmu, u32 address)
+@@ -2074,6 +2276,14 @@ void ClearDCacheLineFromJit(MMU& mmu, u32 address)
  template <std::unsigned_integral T>
  Common::MakeAtLeastU32<T> ReadFromJit(MMU& mmu, u32 address)
  {
@@ -3699,7 +3709,7 @@ index 940e93c..2a8781d 100644
    return mmu.Read<T>(address);
  }
  template u32 ReadFromJit<u8>(MMU& mmu, u32 address);
-@@ -2084,6 +2284,29 @@ template u64 ReadFromJit<u64>(MMU& mmu, u32 address);
+@@ -2084,6 +2294,29 @@ template u64 ReadFromJit<u64>(MMU& mmu, u32 address);
  template <std::unsigned_integral T>
  void WriteFromJit(MMU& mmu, Common::MakeAtLeastU32<T> var, u32 address)
  {
@@ -3729,7 +3739,7 @@ index 940e93c..2a8781d 100644
    mmu.Write<T>(var, address);
  }
  template void WriteFromJit<u8>(MMU& mmu, u32 var, u32 address);
-@@ -2092,14 +2315,52 @@ template void WriteFromJit<u32>(MMU& mmu, u32 var, u32 address);
+@@ -2092,14 +2325,52 @@ template void WriteFromJit<u32>(MMU& mmu, u32 var, u32 address);
  template void WriteFromJit<u64>(MMU& mmu, u64 var, u32 address);
  void WriteU16SwapFromJit(MMU& mmu, u32 var, u32 address)
  {
@@ -3783,7 +3793,7 @@ index 940e93c..2a8781d 100644
  }
  }  // namespace PowerPC
 diff --git a/Source/Core/Core/PowerPC/MMU.h b/Source/Core/Core/PowerPC/MMU.h
-index 8c12ead..866e893 100644
+index 8c12ead..9ee129f 100644
 --- a/Source/Core/Core/PowerPC/MMU.h
 +++ b/Source/Core/Core/PowerPC/MMU.h
 @@ -28,6 +28,11 @@ namespace Memory
@@ -3811,7 +3821,7 @@ index 8c12ead..866e893 100644
    bool IsOptimizableGatherPipeWrite(u32 address) const;
  
    TranslateResult JitCache_TranslateAddress(u32 address);
-@@ -269,7 +280,33 @@ public:
+@@ -269,7 +280,34 @@ public:
    BatTable& GetIBATTable() { return m_ibat_table; }
    BatTable& GetDBATTable() { return m_dbat_table; }
  
@@ -3825,7 +3835,8 @@ index 8c12ead..866e893 100644
 +    u32 sr = 0;
 +    u8* host = nullptr;
 +  };
-+  static constexpr u32 SOFT_TLB_SIZE = 1024;
++  // 4096 pages = 16 MiB of guest memory (Spider-Man 2 missed ~300k times a second with 1024).
++  static constexpr u32 SOFT_TLB_SIZE = 4096;
 +  u8* SoftTlbLookup(bool write, u32 address, u32 size);
 +  void SoftTlbFill(bool write, u32 logical_address, u8* host_page);
 +  void SoftTlbFlush();
@@ -13069,10 +13080,10 @@ index f4dc8a9..0c37736 100644
  
 diff --git a/Source/Core/DolphinNoGUI/PlatformPS4.cpp b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
 new file mode 100644
-index 0000000..2c99c2e
+index 0000000..da37056
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
-@@ -0,0 +1,1361 @@
+@@ -0,0 +1,1365 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -13137,6 +13148,8 @@ index 0000000..2c99c2e
 +extern "C" unsigned long long ps4_present_counter;        // VideoCommon/Present.cpp
 +extern "C" unsigned long long ps4_clock_reads;            // port/ps4_runtime.cpp
 +extern "C" unsigned long long ps4_soft_tlb_hits, ps4_soft_tlb_misses;           // MMU.cpp
++extern "C" unsigned long long ps4_soft_tlb_flushes, ps4_soft_tlb_sr_flushes, ps4_soft_tlb_page_inv,
++    ps4_soft_tlb_fills;  // MMU.cpp
 +extern "C" long long ps4_compile_internal_bytes, ps4_link_internal_bytes;  // ProgramShaderCache
 +#include "Core/System.h"
 +
@@ -13731,9 +13744,11 @@ index 0000000..2c99c2e
 +        // Page table fastmem: 16 KiB host pages that could / couldn't be fast-mapped.
 +        const size_t used = strlen(line);
 +        snprintf(line + used, sizeof(line) - used,
-+                 ", page groups mapped %lld refused %lld, soft TLB hits %llu misses %llu",
++                 ", page groups mapped %lld refused %lld, soft TLB hits %llu misses %llu"
++                 " fills %llu flushes %llu (sr %llu) page inv %llu",
 +                 ps4_pt_groups_mapped, ps4_pt_groups_refused, ps4_soft_tlb_hits,
-+                 ps4_soft_tlb_misses);
++                 ps4_soft_tlb_misses, ps4_soft_tlb_fills, ps4_soft_tlb_flushes,
++                 ps4_soft_tlb_sr_flushes, ps4_soft_tlb_page_inv);
 +      }
 +      {
 +        // How busy the CPU and video threads really are (their own CPU time per wall time):
