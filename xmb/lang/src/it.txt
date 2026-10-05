@@ -382,3 +382,8 @@ Scrittura sulla scheda SD
 Permette ai giochi di salvare sulla scheda SD. No: sola lettura.
 Dimensione della scheda SD
 Automatico crea una scheda grande quanto i file nella cartella.
+# --- Motion
+Controlli di movimento
+I sensori di movimento del DualShock 4 muovono il Wii Remote: inclinalo, agitalo e scuotilo.
+Controller come Wii Remote
+Automatico: un PS Move acceso all'avvio del gioco diventa il Wii Remote (tasti, movimento e puntatore), il DualShock 4 il Nunchuk.

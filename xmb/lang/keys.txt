@@ -384,3 +384,8 @@ SD Card Writes
 Lets games save to the SD card. Off: it is read-only.
 SD Card Size
 Auto makes the card just big enough for the folder's files.
+# --- Motion
+Motion Controls
+The DualShock 4's motion sensors move the Wii Remote: tilt, swing and shake it.
+Wii Remote Controller
+Auto: a PS Move that is on when the game starts becomes the Wii Remote (buttons, motion and pointer), the DualShock 4 the Nunchuk.

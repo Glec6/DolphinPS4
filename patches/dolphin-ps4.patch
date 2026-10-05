@@ -4190,7 +4190,7 @@ index cd35ea1..aecce41 100644
 +#endif
  }  // namespace State
 diff --git a/Source/Core/DolphinNoGUI/CMakeLists.txt b/Source/Core/DolphinNoGUI/CMakeLists.txt
-index 51c3fff..f59d744 100644
+index 51c3fff..07e988f 100644
 --- a/Source/Core/DolphinNoGUI/CMakeLists.txt
 +++ b/Source/Core/DolphinNoGUI/CMakeLists.txt
 @@ -23,6 +23,29 @@ if(${CMAKE_SYSTEM_NAME} STREQUAL "Linux")
@@ -4213,7 +4213,7 @@ index 51c3fff..f59d744 100644
 +    ${CMAKE_SOURCE_DIR}/Externals/VulkanMemoryAllocator/include)
 +  target_link_libraries(dolphin-nogui PRIVATE imgui discio videovulkan CURL::libcurl)
 +  target_link_libraries(dolphin-nogui PRIVATE
-+    SceSysmodule SceSystemService SceUserService SceVideoOut SceAudioOut ScePad SceNet)
++    SceSysmodule SceSystemService SceUserService SceVideoOut SceAudioOut ScePad SceNet SceMove)
 +  if(ENABLE_VULKAN)
 +    # The Vulkan backend runs on Mesa's RADV on GNM, linked in (no Vulkan loader on the PS4).
 +    ps4_link_mesa(dolphin-nogui)
@@ -4850,10 +4850,10 @@ index 0000000..3771619
 +}  // namespace PS4Cheats
 diff --git a/Source/Core/DolphinNoGUI/PS4Controls.cpp b/Source/Core/DolphinNoGUI/PS4Controls.cpp
 new file mode 100755
-index 0000000..f5b7d92
+index 0000000..3b2bdbf
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4Controls.cpp
-@@ -0,0 +1,403 @@
+@@ -0,0 +1,460 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -5072,6 +5072,63 @@ index 0000000..f5b7d92
 +  SyncPlayers(Device::Wii);
 +}
 +
++// SetWiiMotion adds the PS Move to Wii Remote buttons as " | `PS4/0/PS Move N:...`"; the
++// Controls page shows and changes the DualShock 4 part only.
++std::string WithoutMove(std::string expression)
++{
++  const size_t at = expression.find(" | `PS4/0/PS Move");
++  if (at != std::string::npos)
++    expression.erase(at);
++  return expression;
++}
++
++void SetWiiMotion(const std::string& controller, bool motion, const std::array<bool, 4>& moves)
++{
++  Common::IniFile ini;
++  ini.Load(Path(Device::Wii));
++  constexpr const char* ACCEL[] = {"Up", "Down", "Left", "Right", "Forward", "Backward"};
++  constexpr const char* GYRO[] = {"Pitch Up", "Pitch Down", "Roll Left", "Roll Right", "Yaw Left",
++                                  "Yaw Right"};
++  // Wii Remote button -> the Move's.
++  constexpr const char* MOVE_BUTTONS[][2] = {{"Buttons/A", "Move"},  {"Buttons/B", "T"},
++                                             {"Buttons/1", "Cross"}, {"Buttons/2", "Circle"},
++                                             {"Buttons/-", "Select"}, {"Buttons/+", "Start"}};
++  for (int player = 1; player <= 4; player++)
++  {
++    Common::IniFile::Section* section = ini.GetSection("Wiimote" + std::to_string(player));
++    if (!section)
++      continue;
++    const bool move = moves[player - 1] && controller != "ds4";
++    const std::string device = "PS4/0/PS Move " + std::to_string(player);
++    auto from_move = [&](const std::string& input) { return "`" + device + ":" + input + "`"; };
++    for (const auto& [key, input] : MOVE_BUTTONS)
++    {
++      std::string value;
++      section->Get(key, &value);
++      value = WithoutMove(value);
++      if (move)
++        value = value.empty() ? from_move(input) : value + " | " + from_move(input);
++      section->Set(key, value);
++    }
++    for (const char* direction : ACCEL)
++    {
++      const std::string input = std::string("Accel ") + direction;
++      section->Set(std::string("IMUAccelerometer/") + direction,
++                   move ? from_move(input) : motion ? "`" + input + "`" : std::string());
++    }
++    for (const char* direction : GYRO)
++    {
++      const std::string input = std::string("Gyro ") + direction;
++      section->Set(std::string("IMUGyroscope/") + direction,
++                   move ? from_move(input) : motion ? "`" + input + "`" : std::string());
++    }
++    // The pointer: the Move's gyroscope (Start + Select recentres it), else the right stick.
++    section->Set("IMUIR/Enabled", std::string(move ? "True" : "False"));
++    section->Set("IMUIR/Recenter", move ? from_move("Start") + " & " + from_move("Select") : std::string());
++  }
++  ini.Save(Path(Device::Wii));
++}
++
 +std::string Get(Device device, const Binding& binding)
 +{
 +  Common::IniFile ini;
@@ -5092,7 +5149,7 @@ index 0000000..f5b7d92
 +  }
 +  const std::string key = std::string(binding.key) == "Shake" ? "Shake/X" : binding.key;
 +  section->Get(key, &value);
-+  return value;
++  return WithoutMove(value);
 +}
 +
 +std::string Describe(const std::string& expression)
@@ -5259,10 +5316,10 @@ index 0000000..f5b7d92
 +}  // namespace PS4Controls
 diff --git a/Source/Core/DolphinNoGUI/PS4Controls.h b/Source/Core/DolphinNoGUI/PS4Controls.h
 new file mode 100755
-index 0000000..76fb2d3
+index 0000000..5a405de
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4Controls.h
-@@ -0,0 +1,59 @@
+@@ -0,0 +1,66 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -5272,6 +5329,7 @@ index 0000000..76fb2d3
 +
 +#pragma once
 +
++#include <array>
 +#include <string>
 +#include <vector>
 +
@@ -5312,6 +5370,12 @@ index 0000000..76fb2d3
 +void ResetToDefault(Device device);
 +// The Wii Remote's extension ("nunchuk" or "none") and sideways orientation.
 +void SetWiiAttachment(const std::string& extension, bool sideways);
++
++// Settings -> System -> Wii Remote / Motion Controls, before a game starts: per player, the
++// player's PS Move (moves[player - 1]) joins the Wii Remote (its buttons alongside the DualShock 4's,
++// its motion and gyroscope pointer), or the DualShock 4's motion is used (motion), or none.
++// controller: "auto" (the Move when it's on) or "ds4" (never the Move).
++void SetWiiMotion(const std::string& controller, bool motion, const std::array<bool, 4>& moves);
 +// Players 2-4 (GCPad2-4, Wiimote2-4): player 1's mapping, each on their own DualShock 4
 +// ("PS4/<player - 1>/DualShock 4"). Done after every change to player 1's mapping.
 +void SyncPlayers(Device device);
@@ -7925,10 +7989,10 @@ index 0000000..c539699
 +}  // namespace PS4Net
 diff --git a/Source/Core/DolphinNoGUI/PS4Settings.cpp b/Source/Core/DolphinNoGUI/PS4Settings.cpp
 new file mode 100755
-index 0000000..aa30109
+index 0000000..663b385
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4Settings.cpp
-@@ -0,0 +1,550 @@
+@@ -0,0 +1,556 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -8059,6 +8123,12 @@ index 0000000..aa30109
 +     "What is plugged into the Wii Remote. Wii Sports and similar games need None."},
 +    {"wii_sideways", "Sideways Wii Remote", "System", {{"off", "Off"}, {"on", "On"}}, "off",
 +     false, "For games played with the Wii Remote held sideways (NSMB Wii, Mario Kart Wii)."},
++    {"motion_controls", "Motion Controls", "System", {{"on", "On"}, {"off", "Off"}}, "on", false,
++     "The DualShock 4's motion sensors move the Wii Remote: tilt, swing and shake it."},
++    {"wii_controller", "Wii Remote Controller", "System",
++     {{"auto", "Auto"}, {"ds4", "DualShock 4"}}, "auto", false,
++     "Auto: a PS Move that is on when the game starts becomes the Wii Remote (buttons, motion "
++     "and pointer), the DualShock 4 the Nunchuk."},
 +    {"sd_card", "Wii SD Card", "System", {{"on", "Inserted"}, {"off", "Removed"}}, "on", false,
 +     "A virtual SD card for Wii games and channels (saves, photos, music, homebrew)."},
 +    {"sd_sync", "SD Card Folder", "System", {{"on", "On"}, {"off", "Off"}}, "on", false,
@@ -13734,10 +13804,10 @@ index f4dc8a9..0c37736 100644
  
 diff --git a/Source/Core/DolphinNoGUI/PlatformPS4.cpp b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
 new file mode 100644
-index 0000000..c5b6f8e
+index 0000000..dad2228
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
-@@ -0,0 +1,1557 @@
+@@ -0,0 +1,1583 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -14889,6 +14959,7 @@ index 0000000..c5b6f8e
 +// the player, the game runs on the cached interpreter.
 +extern "C" int ps4_jit_unavailable;
 +int ps4_jit_unavailable = 0;
++extern "C" int ps4_move_connected(int32_t user_id);  // InputCommon/.../PS4Pad/PS4Pad.cpp
 +
 +// PS4XMB.cpp, at its first frame, and before a game starts: a downloaded update works.
 +extern "C" void ps4_update_started_ok()
@@ -15285,6 +15356,31 @@ index 0000000..c5b6f8e
 +  // when it starts).
 +  PS4Controls::SetWiiAttachment(GetPS4Option("wii_extension", "nunchuk"),
 +                                GetPS4Option("wii_sideways", "off") == "on");
++  // PS Move controllers (players in the order PS4Pad uses: the user who started the app, then
++  // the others) and motion controls for the Wii Remote.
++  {
++    std::array<bool, 4> moves{};
++    int32_t initial = -1;
++    sceUserServiceGetInitialUser(&initial);
++    std::vector<int32_t> players;
++    if (initial >= 0)
++      players.push_back(initial);
++    for (const int32_t user : PS4LoginUsers())
++    {
++      if (user >= 0 && user != initial && players.size() < 4)
++        players.push_back(user);
++    }
++    std::string found;
++    for (size_t i = 0; i < players.size(); i++)
++    {
++      moves[i] = ps4_move_connected(players[i]) != 0;
++      if (moves[i])
++        found += " " + std::to_string(i + 1);
++    }
++    BootTrace(("PS Move: players with one on:" + (found.empty() ? std::string(" none") : found)).c_str());
++    PS4Controls::SetWiiMotion(GetPS4Option("wii_controller", "auto"),
++                              GetPS4Option("motion_controls", "on") == "on", moves);
++  }
 +  // Speed Features: Compatible turns off the command-stream shortcuts (freezes and missing menu
 +  // items in Crash Tag Team Racing and FIFA Street 2 came from them).
 +  if (GetPS4Option("speed_mode", "fast") == "compatible")
@@ -15374,10 +15470,10 @@ index 8f7f4ba..34feb8e 100644
  {
 diff --git a/Source/Core/InputCommon/ControllerInterface/PS4Pad/PS4Pad.cpp b/Source/Core/InputCommon/ControllerInterface/PS4Pad/PS4Pad.cpp
 new file mode 100644
-index 0000000..1f1d6a7
+index 0000000..348f697
 --- /dev/null
 +++ b/Source/Core/InputCommon/ControllerInterface/PS4Pad/PS4Pad.cpp
-@@ -0,0 +1,272 @@
+@@ -0,0 +1,548 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -15389,7 +15485,10 @@ index 0000000..1f1d6a7
 +#include <string>
 +#include <vector>
 +
++#include <cstdio>
++
 +#include <orbis/Pad.h>
++#include <orbis/Sysmodule.h>
 +#include <orbis/UserService.h>
 +
 +#include "Common/CommonTypes.h"
@@ -15406,6 +15505,43 @@ index 0000000..1f1d6a7
 +// GameCube ports / Wii Remotes.
 +extern "C" int ps4_pad_count;
 +int ps4_pad_count = 0;
++
++// libScePad / libSceMove calls the OpenOrbis headers only have as stubs (no parameters). The
++// Move's state layout follows shadPS4 (src/core/libraries/move/move.h).
++extern "C" int32_t ps4_pad_set_motion(int32_t handle, bool enable) __asm__("scePadSetMotionSensorState");
++extern "C" int32_t sceMoveInit();
++extern "C" int32_t sceMoveOpen(int32_t user_id, int32_t type, int32_t index);
++extern "C" int32_t sceMoveClose(int32_t handle);
++extern "C" int32_t sceMoveReadStateLatest(int32_t handle, void* data);
++extern "C" int32_t sceMoveSetLightSphere(int32_t handle, uint8_t r, uint8_t g, uint8_t b);
++extern "C" int32_t sceMoveSetVibration(int32_t handle, uint8_t motor);
++extern "C" void ps4_boot_trace(const char* line);
++
++namespace
++{
++struct MoveState
++{
++  float accelerometer[3];
++  float gyro[3];
++  uint16_t buttons;
++  uint16_t trigger;
++  uint16_t extension[7];
++  uint8_t custom[5];
++  int64_t timestamp;
++  int32_t count;
++  float temperature;
++  uint8_t spare[64];  // in case the system's structure is larger than shadPS4's
++};
++
++// The Move's buttons (as on the PS3's Move): bits of MoveState::buttons.
++constexpr uint16_t MOVE_SELECT = 1 << 0, MOVE_T = 1 << 1, MOVE_MOVE = 1 << 2, MOVE_START = 1 << 3,
++                   MOVE_TRIANGLE = 1 << 4, MOVE_CIRCLE = 1 << 5, MOVE_CROSS = 1 << 6,
++                   MOVE_SQUARE = 1 << 7;
++constexpr double GRAVITY = 9.80665;
++}  // namespace
++
++// Settings -> System -> Wii Remote (PS4Controls.cpp): is player's PS Move on? Opens it if so.
++extern "C" int ps4_move_connected(int32_t user_id);
 +
 +namespace ciface::PS4Pad
 +{
@@ -15461,6 +15597,25 @@ index 0000000..1f1d6a7
 +    const bool m_negative;
 +  };
 +
++  // One direction of a motion sensor axis: its positive part, scaled to Dolphin's units (m/s^2
++  // for acceleration, rad/s for rotation). Dolphin's IMU groups subtract opposite directions.
++  class Motion final : public Input
++  {
++  public:
++    Motion(const char* name, const float& value, double scale)
++        : m_name(name), m_value(value), m_scale(scale)
++    {
++    }
++    std::string GetName() const override { return m_name; }
++    ControlState GetState() const override { return std::max(0.0, m_value * m_scale); }
++    bool IsDetectable() const override { return false; }
++
++  private:
++    const char* const m_name;
++    const float& m_value;
++    const double m_scale;
++  };
++
 +  class Motor final : public Output
 +  {
 +  public:
@@ -15511,6 +15666,23 @@ index 0000000..1f1d6a7
 +
 +    AddOutput(new Motor("Motor L",       *this, true));
 +    AddOutput(new Motor("Motor R",       *this, false));
++
++    // Motion, for the Wii Remote (Settings -> System -> Motion Controls): the pad held like a
++    // remote pointing at the TV. libScePad: x right, y up, z towards the player; acceleration in
++    // g, rotation in rad/s (right-handed).
++    ps4_pad_set_motion(m_handle, true);
++    AddInput(new Motion("Accel Up",       m_state.acell.y, GRAVITY));
++    AddInput(new Motion("Accel Down",     m_state.acell.y, -GRAVITY));
++    AddInput(new Motion("Accel Left",     m_state.acell.x, -GRAVITY));
++    AddInput(new Motion("Accel Right",    m_state.acell.x, GRAVITY));
++    AddInput(new Motion("Accel Forward",  m_state.acell.z, -GRAVITY));
++    AddInput(new Motion("Accel Backward", m_state.acell.z, GRAVITY));
++    AddInput(new Motion("Gyro Pitch Up",   m_state.vel.x, 1.0));
++    AddInput(new Motion("Gyro Pitch Down", m_state.vel.x, -1.0));
++    AddInput(new Motion("Gyro Roll Left",  m_state.vel.z, 1.0));
++    AddInput(new Motion("Gyro Roll Right", m_state.vel.z, -1.0));
++    AddInput(new Motion("Gyro Yaw Left",   m_state.vel.y, 1.0));
++    AddInput(new Motion("Gyro Yaw Right",  m_state.vel.y, -1.0));
 +    // clang-format on
 +  }
 +
@@ -15533,6 +15705,15 @@ index 0000000..1f1d6a7
 +    {
 +      m_state = data;
 +      m_buttons = data.buttons;
++      if (m_motion_logged < 3 && ++m_reads % 120 == 0)
++      {
++        // A few raw samples in the boot trace: units and axis directions on real hardware.
++        m_motion_logged++;
++        char line[200];
++        snprintf(line, sizeof(line), "DualShock 4 motion: accel %.2f %.2f %.2f, gyro %.2f %.2f %.2f",
++                 data.acell.x, data.acell.y, data.acell.z, data.vel.x, data.vel.y, data.vel.z);
++        ps4_boot_trace(line);
++      }
 +    }
 +    else
 +    {
@@ -15561,7 +15742,182 @@ index 0000000..1f1d6a7
 +  OrbisPadData m_state{};
 +  u32 m_buttons = 0;
 +  OrbisPadVibeParam m_vibration{0, 0};
++  int m_reads = 0;
++  int m_motion_logged = 0;
 +};
++
++// A PlayStation Move motion controller, as a Wii Remote: buttons, the analog T trigger, motion
++// (the pointer comes from its gyroscope: Dolphin's "IMU point"). Named per player ("PS Move 1")
++// so the Wii Remote mappings can refer to it (PS4Controls.cpp).
++class MoveDevice final : public Core::Device
++{
++  class Button final : public Input
++  {
++  public:
++    Button(const char* name, const uint16_t& buttons, uint16_t mask)
++        : m_name(name), m_buttons(buttons), m_mask(mask)
++    {
++    }
++    std::string GetName() const override { return m_name; }
++    ControlState GetState() const override { return (m_buttons & m_mask) != 0; }
++
++  private:
++    const char* const m_name;
++    const uint16_t& m_buttons;
++    const uint16_t m_mask;
++  };
++  class Trigger final : public Input
++  {
++  public:
++    explicit Trigger(const uint16_t& value) : m_value(value) {}
++    std::string GetName() const override { return "T"; }
++    ControlState GetState() const override { return std::min(m_value, uint16_t(255)) / 255.0; }
++
++  private:
++    const uint16_t& m_value;
++  };
++  class Motion final : public Input
++  {
++  public:
++    Motion(const char* name, const float& value, double scale)
++        : m_name(name), m_value(value), m_scale(scale)
++    {
++    }
++    std::string GetName() const override { return m_name; }
++    ControlState GetState() const override { return std::max(0.0, m_value * m_scale); }
++    bool IsDetectable() const override { return false; }
++
++  private:
++    const char* const m_name;
++    const float& m_value;
++    const double m_scale;
++  };
++  class Rumble final : public Output
++  {
++  public:
++    explicit Rumble(int32_t handle) : m_handle(handle) {}
++    std::string GetName() const override { return "Motor"; }
++    void SetState(ControlState state) override
++    {
++      sceMoveSetVibration(m_handle, static_cast<uint8_t>(std::clamp(state, 0.0, 1.0) * 255));
++    }
++
++  private:
++    const int32_t m_handle;
++  };
++
++public:
++  MoveDevice(int32_t handle, int player) : m_handle(handle), m_name("PS Move " + std::to_string(player))
++  {
++    // clang-format off
++    AddInput(new Button("Move",     m_state.buttons, MOVE_MOVE));
++    AddInput(new Trigger(m_state.trigger));
++    AddInput(new Button("T Click",  m_state.buttons, MOVE_T));
++    AddInput(new Button("Cross",    m_state.buttons, MOVE_CROSS));
++    AddInput(new Button("Circle",   m_state.buttons, MOVE_CIRCLE));
++    AddInput(new Button("Square",   m_state.buttons, MOVE_SQUARE));
++    AddInput(new Button("Triangle", m_state.buttons, MOVE_TRIANGLE));
++    AddInput(new Button("Start",    m_state.buttons, MOVE_START));
++    AddInput(new Button("Select",   m_state.buttons, MOVE_SELECT));
++    // Held like a Wii Remote, the ball towards the TV, buttons up. Move axes as libScePad's with
++    // the controller upright: x right, y towards the ball, z out of the button face.
++    AddInput(new Motion("Accel Up",       m_state.accelerometer[2], GRAVITY));
++    AddInput(new Motion("Accel Down",     m_state.accelerometer[2], -GRAVITY));
++    AddInput(new Motion("Accel Left",     m_state.accelerometer[0], -GRAVITY));
++    AddInput(new Motion("Accel Right",    m_state.accelerometer[0], GRAVITY));
++    AddInput(new Motion("Accel Forward",  m_state.accelerometer[1], GRAVITY));
++    AddInput(new Motion("Accel Backward", m_state.accelerometer[1], -GRAVITY));
++    AddInput(new Motion("Gyro Pitch Up",   m_state.gyro[0], 1.0));
++    AddInput(new Motion("Gyro Pitch Down", m_state.gyro[0], -1.0));
++    AddInput(new Motion("Gyro Roll Left",  m_state.gyro[1], -1.0));
++    AddInput(new Motion("Gyro Roll Right", m_state.gyro[1], 1.0));
++    AddInput(new Motion("Gyro Yaw Left",   m_state.gyro[2], 1.0));
++    AddInput(new Motion("Gyro Yaw Right",  m_state.gyro[2], -1.0));
++    AddOutput(new Rumble(m_handle));
++    // clang-format on
++    // The ball in the player's colour (Wii Remote LEDs: blue, red, green, pink).
++    static const uint8_t COLOURS[4][3] = {{0, 90, 255}, {255, 40, 40}, {40, 220, 80}, {255, 80, 200}};
++    const uint8_t* colour = COLOURS[(player - 1) & 3];
++    sceMoveSetLightSphere(m_handle, colour[0], colour[1], colour[2]);
++  }
++
++  std::string GetName() const override { return m_name; }
++  std::string GetSource() const override { return std::string(SOURCE_NAME); }
++
++  Core::DeviceRemoval UpdateInput() override
++  {
++    MoveState state;
++    std::memset(&state, 0, sizeof(state));
++    if (!ps4_pad_block && sceMoveReadStateLatest(m_handle, &state) == 0)
++    {
++      if (state.buttons != m_logged_buttons && m_button_logs < 20)
++      {
++        // Which bit is which button on real hardware (the first presses, in the boot trace).
++        m_button_logs++;
++        m_logged_buttons = state.buttons;
++        char line[96];
++        snprintf(line, sizeof(line), "%s buttons %#06x trigger %u", m_name.c_str(), state.buttons,
++                 state.trigger);
++        ps4_boot_trace(line);
++      }
++      if (m_motion_logs < 3 && ++m_reads % 120 == 0)
++      {
++        m_motion_logs++;
++        char line[200];
++        snprintf(line, sizeof(line), "%s motion: accel %.2f %.2f %.2f, gyro %.2f %.2f %.2f",
++                 m_name.c_str(), state.accelerometer[0], state.accelerometer[1],
++                 state.accelerometer[2], state.gyro[0], state.gyro[1], state.gyro[2]);
++        ps4_boot_trace(line);
++      }
++      m_state = state;
++    }
++    else
++    {
++      m_state.buttons = 0;
++      m_state.trigger = 0;
++    }
++    return Core::DeviceRemoval::Keep;
++  }
++
++private:
++  const int32_t m_handle;
++  const std::string m_name;
++  MoveState m_state{};
++  uint16_t m_logged_buttons = 0;
++  int m_button_logs = 0;
++  int m_reads = 0;
++  int m_motion_logs = 0;
++};
++
++// Move handles by user, open while the user is signed in (like s_handles).
++static std::map<int32_t, int32_t> s_move_handles;
++
++static int32_t MoveHandle(int32_t user)
++{
++  if (const auto it = s_move_handles.find(user); it != s_move_handles.end())
++    return it->second;
++  static bool s_initialized = false;
++  if (!s_initialized)
++  {
++    s_initialized = true;
++    const int load = sceSysmoduleLoadModule(ORBIS_SYSMODULE_MOVE);
++    const int init = sceMoveInit();
++    char line[96];
++    snprintf(line, sizeof(line), "PS Move: module %#x, init %#x", static_cast<unsigned>(load),
++             static_cast<unsigned>(init));
++    ps4_boot_trace(line);
++  }
++  const int32_t handle = sceMoveOpen(user, 0, 0);
++  if (handle >= 0)
++    s_move_handles[user] = handle;
++  return handle;
++}
++
++static bool MoveConnected(int32_t handle)
++{
++  MoveState state;
++  return handle >= 0 && sceMoveReadStateLatest(handle, &state) == 0;
++}
 +
 +class InputBackend final : public ciface::InputBackend
 +{
@@ -15642,6 +15998,17 @@ index 0000000..1f1d6a7
 +      count++;
 +    }
 +    ps4_pad_count = count;
++    // PS Move controllers (turned on before the game starts), one per player.
++    for (size_t player = 0; player < players.size(); player++)
++    {
++      const int32_t handle = MoveHandle(players[player]);
++      if (MoveConnected(handle))
++      {
++        GetControllerInterface().AddDevice(
++            std::make_shared<MoveDevice>(handle, static_cast<int>(player) + 1));
++        INFO_LOG_FMT(CONTROLLERINTERFACE, "PS Move of player {} found", player + 1);
++      }
++    }
 +  }
 +};
 +
@@ -15650,6 +16017,11 @@ index 0000000..1f1d6a7
 +  return std::make_unique<InputBackend>(controller_interface);
 +}
 +}  // namespace ciface::PS4Pad
++
++extern "C" int ps4_move_connected(int32_t user_id)
++{
++  return ciface::PS4Pad::MoveConnected(ciface::PS4Pad::MoveHandle(user_id)) ? 1 : 0;
++}
 diff --git a/Source/Core/InputCommon/ControllerInterface/PS4Pad/PS4Pad.h b/Source/Core/InputCommon/ControllerInterface/PS4Pad/PS4Pad.h
 new file mode 100644
 index 0000000..53d965f

@@ -382,3 +382,8 @@ La carte contient les fichiers de /data/DolphinPS4/User/Load/WiiSDSync (copiez-l
 Permet aux jeux de sauvegarder sur la carte SD. Non : lecture seule.
 Taille de la carte SD
 Auto donne à la carte juste la taille des fichiers du dossier.
+# --- Motion
+Contrôles par mouvement
+Les capteurs de mouvement de la DualShock 4 déplacent la Wii Remote : inclinez-la, balancez-la, secouez-la.
+Manette comme Wii Remote
+Auto : un PS Move allumé au lancement du jeu devient la Wii Remote (boutons, mouvement et pointeur), la DualShock 4 le Nunchuk.

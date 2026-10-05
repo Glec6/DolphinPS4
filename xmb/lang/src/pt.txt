@@ -382,3 +382,8 @@ Gravação no cartão SD
 Permite que os jogos salvem no cartão SD. Desligado: só leitura.
 Tamanho do cartão SD
 Automático deixa o cartão do tamanho exato dos arquivos da pasta.
+# --- Motion
+Controles de movimento
+Os sensores de movimento do DualShock 4 movem o Wii Remote: incline, balance e sacuda.
+Controle como Wii Remote
+Automático: um PS Move ligado quando o jogo inicia vira o Wii Remote (botões, movimento e ponteiro) e o DualShock 4 o Nunchuk.

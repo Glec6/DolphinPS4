@@ -382,3 +382,8 @@ Zapis na karcie SD
 Pozwala grom zapisywać na karcie SD. Wył.: tylko odczyt.
 Rozmiar karty SD
 Automatycznie tworzy kartę dokładnie na pliki z folderu.
+# --- Motion
+Sterowanie ruchem
+Czujniki ruchu DualShock 4 poruszają Wii Remote: przechylaj, machaj i potrząsaj.
+Kontroler jako Wii Remote
+Automatycznie: PS Move włączony przy starcie gry staje się Wii Remote (przyciski, ruch i wskaźnik), a DualShock 4 Nunchukiem.

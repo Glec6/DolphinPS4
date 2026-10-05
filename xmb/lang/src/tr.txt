@@ -382,3 +382,8 @@ SD karta yazma
 Oyunların SD karta kaydetmesine izin verir. Kapalı: salt okunur.
 SD kart boyutu
 Otomatik, kartı klasördeki dosyalar kadar büyük yapar.
+# --- Motion
+Hareket kontrolleri
+DualShock 4'ün hareket sensörleri Wii Remote'u hareket ettirir: eğ, savur ve salla.
+Wii Remote olarak kontrolcü
+Otomatik: oyun başlarken açık olan bir PS Move Wii Remote olur (tuşlar, hareket ve işaretçi), DualShock 4 Nunchuk olur.

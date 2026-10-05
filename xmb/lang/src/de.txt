@@ -382,3 +382,8 @@ SD-Karte beschreibbar
 Erlaubt Spielen, auf der SD-Karte zu speichern. Aus: nur lesen.
 SD-Kartengröße
 Automatisch macht die Karte genau so groß wie die Dateien im Ordner.
+# --- Motion
+Bewegungssteuerung
+Die Bewegungssensoren des DualShock 4 bewegen die Wii Remote: neigen, schwingen und schütteln.
+Controller als Wii Remote
+Automatisch: Ein beim Spielstart eingeschalteter PS Move wird zur Wii Remote (Tasten, Bewegung und Zeiger), der DualShock 4 zum Nunchuk.

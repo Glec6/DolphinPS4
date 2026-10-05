@@ -382,3 +382,8 @@ Schrijven naar SD-kaart
 Laat spellen opslaan op de SD-kaart. Uit: alleen lezen.
 SD-kaartgrootte
 Automatisch maakt de kaart precies groot genoeg voor de bestanden in de map.
+# --- Motion
+Bewegingsbesturing
+De bewegingssensoren van de DualShock 4 bewegen de Wii Remote: kantelen, zwaaien en schudden.
+Controller als Wii Remote
+Automatisch: een PS Move die aan staat bij het starten van het spel wordt de Wii Remote (knoppen, beweging en aanwijzer), de DualShock 4 de Nunchuk.
