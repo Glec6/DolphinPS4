@@ -4232,7 +4232,7 @@ index 51c3fff..07e988f 100644
 +  ps4_add_eboot(dolphin-nogui)
 +endif()
 diff --git a/Source/Core/DolphinNoGUI/MainNoGUI.cpp b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
-index 3bf40ea..2db1dbe 100644
+index 3bf40ea..851b8b6 100644
 --- a/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 +++ b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 @@ -2,10 +2,17 @@
@@ -4361,7 +4361,7 @@ index 3bf40ea..2db1dbe 100644
  #endif
        });
  
-@@ -270,7 +339,317 @@ int main(const int argc, char* argv[])
+@@ -270,7 +339,325 @@ int main(const int argc, char* argv[])
  
    UICommon::SetUserDirectory(user_directory);
    UICommon::Init();
@@ -4464,6 +4464,14 @@ index 3bf40ea..2db1dbe 100644
 +    // compiles the first time the game uses it (a short hitch).
 +    Config::SetBase(Config::GFX_SHADER_CACHE,
 +                    Platform::GetPS4Option("shader_cache", "on") == "on");
++    // Save states without the texture cache and the EFB: at 3x resolution mid-race in Mario Kart
++    // they made a 148 MB state, and the second save ran out of memory and crashed (it needs the
++    // state twice: the buffer and its compressed copy). Without them a GameCube state is about
++    // its 40 MB of game memory; after a load the game redraws its effects. States made with them
++    // still load (the state says whether it has them). ps4.ini state_textures=on: Dolphin's
++    // default.
++    Config::SetBase(Config::GFX_SAVE_TEXTURE_CACHE_TO_STATE,
++                    Platform::GetPS4Option("state_textures", "off") == "on");
 +    // shader_compile=async (Vulkan default): new shaders compile on background threads while the
 +    // game keeps running (objects appear a few frames late) instead of stalling the frame, and
 +    // the shader cache from earlier sessions is precompiled in the background at boot.
@@ -4679,7 +4687,7 @@ index 3bf40ea..2db1dbe 100644
  
    Common::ScopeGuard ui_common_guard([] {
      UICommon::ShutdownControllers();
-@@ -284,6 +663,12 @@ int main(const int argc, char* argv[])
+@@ -284,6 +671,12 @@ int main(const int argc, char* argv[])
    }
  
    auto core_state_changed_hook = Core::AddOnStateChangedCallback([](const Core::State state) {
@@ -4692,7 +4700,7 @@ index 3bf40ea..2db1dbe 100644
      if (state == Core::State::Uninitialized)
        s_platform->Stop();
    });
-@@ -303,6 +688,9 @@ int main(const int argc, char* argv[])
+@@ -303,6 +696,9 @@ int main(const int argc, char* argv[])
  
    DolphinAnalytics::Instance().ReportDolphinStart("nogui");
  
