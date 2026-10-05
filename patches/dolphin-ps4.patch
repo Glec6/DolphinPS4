@@ -367,16 +367,28 @@ index 67dbd1e..3f5baed 100644
  
    template <class Rep, class Period>
 diff --git a/Source/Core/Common/FileUtil.cpp b/Source/Core/Common/FileUtil.cpp
-index 053614f..a9e4a49 100644
+index 053614f..9f7b40f 100644
 --- a/Source/Core/Common/FileUtil.cpp
 +++ b/Source/Core/Common/FileUtil.cpp
-@@ -731,6 +731,9 @@ std::string GetExePath()
+@@ -60,6 +60,10 @@
+ 
+ namespace fs = std::filesystem;
+ 
++#ifdef __ORBIS__
++extern "C" const char* ps4_self_path();  // DolphinNoGUI/PlatformPS4.cpp
++#endif
++
+ namespace File
+ {
+ #ifdef ANDROID
+@@ -731,6 +735,10 @@ std::string GetExePath()
    return PathToString(exe_path_absolute);
  #elif defined(__APPLE__)
    return GetBundleDirectory();
 +#elif defined(__ORBIS__)
-+  // PS4: the app package is mounted at /app0.
-+  return "/app0/eboot.bin";
++  // PS4: the app package is mounted at /app0; a downloaded update runs from /data
++  // (DolphinNoGUI/PlatformPS4.cpp).
++  return ps4_self_path();
  #elif defined(__FreeBSD__)
    int name[4]{CTL_KERN, KERN_PROC, KERN_PROC_PATHNAME, -1};
    size_t length = 0;
@@ -5648,10 +5660,10 @@ index 0000000..5157e21
 +}  // namespace PS4Glyphs
 diff --git a/Source/Core/DolphinNoGUI/PS4IngameMenu.cpp b/Source/Core/DolphinNoGUI/PS4IngameMenu.cpp
 new file mode 100755
-index 0000000..27adbea
+index 0000000..bf41804
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4IngameMenu.cpp
-@@ -0,0 +1,1046 @@
+@@ -0,0 +1,1047 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -5705,6 +5717,7 @@ index 0000000..27adbea
 +using VideoCommon::ps4_overlay_font;
 +using VideoCommon::ps4_overlay_font_regular;
 +extern std::atomic<int> ps4_state_busy;  // Core/State.cpp
++extern "C" const char* ps4_self_path();  // PlatformPS4.cpp: the running program
 +
 +namespace PS4IngameMenu
 +{
@@ -6560,7 +6573,7 @@ index 0000000..27adbea
 +    if (Clock::now() - s_broken_time > std::chrono::seconds(5))
 +    {
 +      Log("state load failed halfway: restarting into the XMB");
-+      sceSystemServiceLoadExec("/app0/eboot.bin", nullptr);
++      sceSystemServiceLoadExec(ps4_self_path(), nullptr);
 +    }
 +    ps4_overlay_repaint = 1;
 +    system.GetFifo().PS4WakeGpu();
@@ -6574,7 +6587,7 @@ index 0000000..27adbea
 +    if (Clock::now() - s_quit_time > std::chrono::seconds(6))
 +    {
 +      Log("stop took too long, restarting into the XMB");
-+      sceSystemServiceLoadExec("/app0/eboot.bin", nullptr);
++      sceSystemServiceLoadExec(ps4_self_path(), nullptr);
 +    }
 +    return;
 +  }
@@ -7908,10 +7921,10 @@ index 0000000..41d2bb2
 +}  // namespace PS4Settings
 diff --git a/Source/Core/DolphinNoGUI/PS4Updater.cpp b/Source/Core/DolphinNoGUI/PS4Updater.cpp
 new file mode 100755
-index 0000000..3417a58
+index 0000000..941e3ef
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4Updater.cpp
-@@ -0,0 +1,237 @@
+@@ -0,0 +1,340 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -7922,6 +7935,7 @@ index 0000000..3417a58
 +#include <cstdio>
 +#include <cstdlib>
 +#include <cstring>
++#include <filesystem>
 +#include <vector>
 +
 +#include <mbedtls/sha256.h>
@@ -8021,18 +8035,32 @@ index 0000000..3417a58
 +        continue;
 +      const picojson::object& asset = value.get<picojson::object>();
 +      const std::string name = text(asset, "name");
-+      if (!EndsWith(Lower(name), ".pkg"))
-+        continue;
-+      release.package = name;
-+      release.url = text(asset, "browser_download_url");
 +      const auto size = asset.find("size");
-+      if (size != asset.end() && size->second.is<double>())
-+        release.size = static_cast<uint64_t>(size->second.get<double>());
++      const uint64_t bytes = size != asset.end() && size->second.is<double>() ?
++                                 static_cast<uint64_t>(size->second.get<double>()) :
++                                 0;
 +      const std::string digest = text(asset, "digest");
-+      if (digest.compare(0, 7, "sha256:") == 0)
-+        release.sha256 = Lower(digest.substr(7));
-+      break;
++      const std::string sha256 = digest.compare(0, 7, "sha256:") == 0 ? Lower(digest.substr(7)) : "";
++      if (EndsWith(Lower(name), "-update.tar") && release.update_url.empty())
++      {
++        release.update_name = name;
++        release.update_url = text(asset, "browser_download_url");
++        release.update_size = bytes;
++        release.update_sha256 = sha256;
++      }
++      else if (EndsWith(Lower(name), ".pkg") && release.url.empty())
++      {
++        release.package = name;
++        release.url = text(asset, "browser_download_url");
++        release.size = bytes;
++        release.sha256 = sha256;
++      }
 +    }
++  }
++  if (release.update_sha256.size() != 64)
++  {
++    // Without GitHub's checksum the archive couldn't be checked: the package is offered instead.
++    release.update_url.clear();
 +  }
 +  if (release.version.empty() || release.url.empty())
 +  {
@@ -8048,7 +8076,11 @@ index 0000000..3417a58
 +    release.ok = true;
 +  }
 +  Log("latest release " + release.version + " (" + release.package + ", " +
-+      std::to_string(release.size) + " bytes)" + (release.ok ? "" : ": " + release.error));
++      std::to_string(release.size) + " bytes" +
++      (release.update_url.empty() ? "" :
++                                    "; " + release.update_name + ", " +
++                                        std::to_string(release.update_size) + " bytes") +
++      ")" + (release.ok ? "" : ": " + release.error));
 +  return release;
 +}
 +
@@ -8148,20 +8180,109 @@ index 0000000..3417a58
 +  return true;
 +}
 +
++bool ExtractTar(const std::string& tar, const std::string& dir, std::string* error)
++{
++  FILE* in = fopen(tar.c_str(), "rb");
++  if (!in)
++  {
++    *error = "can't open " + tar;
++    return false;
++  }
++  std::vector<char> buffer(1 << 20);
++  bool ok = true;
++  int files = 0;
++  while (ok)
++  {
++    unsigned char header[512];
++    if (fread(header, 1, sizeof(header), in) != sizeof(header))
++    {
++      *error = "the archive is cut short";
++      ok = false;
++      break;
++    }
++    if (std::all_of(header, header + sizeof(header), [](unsigned char c) { return c == 0; }))
++      break;  // the end
++    auto field = [&](size_t at, size_t length) {
++      const char* begin = reinterpret_cast<const char*>(header + at);
++      return std::string(begin, strnlen(begin, length));
++    };
++    std::string name = field(0, 100);
++    const std::string prefix = field(345, 155);
++    if (!prefix.empty())
++      name = prefix + "/" + name;
++    const uint64_t size = std::strtoull(field(124, 12).c_str(), nullptr, 8);
++    const char type = static_cast<char>(header[156]);
++    while (name.rfind("./", 0) == 0)
++      name.erase(0, 2);
++    if (name.empty() || name[0] == '/' || name.find("..") != std::string::npos)
++    {
++      *error = "the archive has an unsafe path: " + name;
++      ok = false;
++      break;
++    }
++    const std::string path = dir + "/" + name;
++    if (type == '5')
++    {
++      std::error_code ec;
++      std::filesystem::create_directories(path, ec);
++      continue;
++    }
++    if (type != '0' && type != '\0')
++    {
++      // Anything else (links, extended headers) is skipped with its data.
++      fseek(in, static_cast<long>((size + 511) / 512 * 512), SEEK_CUR);
++      continue;
++    }
++    std::error_code ec;
++    std::filesystem::create_directories(std::filesystem::path(path).parent_path(), ec);
++    FILE* out = fopen(path.c_str(), "wb");
++    if (!out)
++    {
++      *error = "can't write " + path;
++      ok = false;
++      break;
++    }
++    uint64_t left = size;
++    while (left > 0 && ok)
++    {
++      const size_t chunk = static_cast<size_t>(std::min<uint64_t>(left, buffer.size()));
++      if (fread(buffer.data(), 1, chunk, in) != chunk || fwrite(buffer.data(), 1, chunk, out) != chunk)
++      {
++        *error = "can't unpack " + name;
++        ok = false;
++      }
++      left -= chunk;
++    }
++    fclose(out);
++    files++;
++    const uint64_t padding = (512 - size % 512) % 512;
++    if (ok && padding)
++      fseek(in, static_cast<long>(padding), SEEK_CUR);
++  }
++  fclose(in);
++  if (ok)
++    Log("unpacked " + std::to_string(files) + " files into " + dir);
++  return ok;
++}
 +}  // namespace PS4Updater
 diff --git a/Source/Core/DolphinNoGUI/PS4Updater.h b/Source/Core/DolphinNoGUI/PS4Updater.h
 new file mode 100755
-index 0000000..9bfcde3
+index 0000000..914dbb5
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4Updater.h
-@@ -0,0 +1,45 @@
+@@ -0,0 +1,58 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
 +// Updates from the project's GitHub releases: the latest release is compared with the running
-+// version, its package is downloaded (the connection's certificate checked, the file checked
-+// against the SHA-256 GitHub publishes for it) and handed to the PS4's own installer, which
-+// installs it in the background.
++// version, and its files are downloaded (the connection's certificate checked, each file checked
++// against the SHA-256 GitHub publishes for it).
++//
++// A release has the full package (.pkg) and, from v03.07, an update archive
++// (DolphinPS4-v<version>-update.tar: eboot.bin, xmb/ and Sys/). The archive is unpacked into
++// /data/DolphinPS4/app, and the installed app starts the newer program from there
++// (PlatformPS4.cpp, StartDownloadedUpdate), the way the PS4 Homebrew Store updates itself. A
++// release without one: the package goes to /data/pkg for the user's package installer.
 +
 +#pragma once
 +
@@ -8182,6 +8303,11 @@ index 0000000..9bfcde3
 +  std::string url;        // its download address
 +  uint64_t size = 0;
 +  std::string sha256;     // lower-case hex
++  // The update archive, if the release has one.
++  std::string update_name;
++  std::string update_url;
++  uint64_t update_size = 0;
++  std::string update_sha256;
 +};
 +
 +// The latest release on GitHub.
@@ -8195,6 +8321,9 @@ index 0000000..9bfcde3
 +bool Download(const Release& release, const std::string& path, const std::string& ca_file,
 +              const std::function<bool(uint64_t, uint64_t)>& progress, std::string* error);
 +
++// Unpacks a tar archive (ustar: plain files and folders) into dir. Returns false with *error set.
++bool ExtractTar(const std::string& tar, const std::string& dir, std::string* error);
++
 +// There is no Install(): the running app can't install over itself. With the app already
 +// installed the PS4's installer refuses the package, and the system's overwrite call
 +// (sceAppInstUtilAppPrepareOverwritePkg) uninstalls the running app on the spot (v03.03).
@@ -8202,10 +8331,10 @@ index 0000000..9bfcde3
 +}  // namespace PS4Updater
 diff --git a/Source/Core/DolphinNoGUI/PS4XMB.cpp b/Source/Core/DolphinNoGUI/PS4XMB.cpp
 new file mode 100755
-index 0000000..e614465
+index 0000000..bc34aa2
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4XMB.cpp
-@@ -0,0 +1,3671 @@
+@@ -0,0 +1,3756 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -8251,6 +8380,7 @@ index 0000000..e614465
 +#include "DolphinNoGUI/PS4XMBDisplay.h"
 +
 +extern "C" void ps4_boot_trace(const char* line);  // port/ps4_crashlog.cpp
++extern "C" void ps4_update_started_ok();          // PlatformPS4.cpp: this program works
 +
 +namespace PS4XMB
 +{
@@ -8962,6 +9092,8 @@ index 0000000..e614465
 +  bool m_update_prompted = false;  // the "update available" prompt was shown
 +  bool m_update_exit = false;      // close the app once the menu loop ends
 +  std::string m_update_ready;      // the downloaded package, for the user's package installer
++  bool m_update_unpacked = false;  // the update archive is in data_dir/app: restart to use it
++  bool m_update_restart = false;   // restart the app once the menu loop ends
 +  bool m_update_ready_shown = false;
 +  float m_time = 0.0f;
 +  float m_fade = 1.0f;  // black overlay: fades in at start, out at launch
@@ -9935,6 +10067,12 @@ index 0000000..e614465
 +      {
 +        m_update_cancel = true;
 +        Play("back");
++      }
++      else if (choice == "Restart Now")
++      {
++        m_update_restart = true;
++        m_quit = true;
++        Play("confirm");
 +      }
 +      else if (choice == "Close Dolphin")
 +      {
@@ -11547,7 +11685,8 @@ index 0000000..e614465
 +    m_update_thread.join();
 +  m_update_cancel = false;
 +  m_update_done = 0;
-+  m_update_total = m_update_release.size;
++  m_update_total = m_update_release.update_url.empty() ? m_update_release.size :
++                                                         m_update_release.update_size;
 +  m_update_state = UpdateState::Downloading;
 +  m_update_thread = std::thread([this] {
 +    PS4Updater::Release release;
@@ -11557,17 +11696,73 @@ index 0000000..e614465
 +    }
 +    const std::string dir = m_data_dir + "/update";
 +    mkdir(dir.c_str(), 0777);
++    auto progress = [this](uint64_t done, uint64_t total) {
++      m_update_done = done;
++      if (total)
++        m_update_total = total;
++      return !m_update_cancel;
++    };
++    if (!release.update_url.empty())
++    {
++      // The update archive: unpacked next to the old update (app.new), checked, then put in
++      // place of it (data_dir/app). The installed app starts it from there.
++      PS4Updater::Release archive = release;
++      archive.package = release.update_name;
++      archive.url = release.update_url;
++      archive.size = release.update_size;
++      archive.sha256 = release.update_sha256;
++      const std::string tar = dir + "/DolphinPS4-v" + release.version + "-update.tar";
++      const std::string unpacked = m_data_dir + "/app.new", target = m_data_dir + "/app";
++      std::string error;
++      std::error_code ec;
++      bool ok = PS4Updater::Download(archive, tar, m_assets_dir + "/xmb/cacert.pem", progress, &error);
++      if (ok)
++      {
++        std::filesystem::remove_all(unpacked, ec);
++        ok = PS4Updater::ExtractTar(tar, unpacked, &error);
++      }
++      if (ok)
++      {
++        std::ifstream version_file(unpacked + "/xmb/version.txt");
++        std::string version;
++        std::getline(version_file, version);
++        while (!version.empty() && (version.back() == '\r' || version.back() == ' '))
++          version.pop_back();
++        if (!std::filesystem::exists(unpacked + "/eboot.bin", ec) || version != release.version)
++        {
++          error = "the update archive is incomplete (version \"" + version + "\")";
++          ok = false;
++        }
++      }
++      if (ok)
++      {
++        std::filesystem::remove_all(target, ec);
++        std::filesystem::rename(unpacked, target, ec);
++        if (ec)
++        {
++          error = "can't move the update into place: " + ec.message();
++          ok = false;
++        }
++      }
++      std::filesystem::remove(tar, ec);
++      std::lock_guard lock(m_update_mutex);
++      if (!ok)
++      {
++        std::filesystem::remove_all(unpacked, ec);
++        m_update_error = m_update_cancel ? "" : error;
++        m_update_state = m_update_cancel ? UpdateState::Available : UpdateState::Failed;
++        Log("update: " + (m_update_cancel ? std::string("cancelled") : error));
++        return;
++      }
++      Log("update: v" + release.version + " unpacked into " + target);
++      m_update_unpacked = true;
++      m_update_state = UpdateState::Finished;
++      return;
++    }
 +    const std::string path = dir + "/DolphinPS4-v" + release.version + ".pkg";
 +    std::string error;
-+    const bool downloaded = PS4Updater::Download(
-+        release, path, m_assets_dir + "/xmb/cacert.pem",
-+        [this](uint64_t done, uint64_t total) {
-+          m_update_done = done;
-+          if (total)
-+            m_update_total = total;
-+          return !m_update_cancel;
-+        },
-+        &error);
++    const bool downloaded =
++        PS4Updater::Download(release, path, m_assets_dir + "/xmb/cacert.pem", progress, &error);
 +    if (!downloaded)
 +    {
 +      std::lock_guard lock(m_update_mutex);
@@ -11613,7 +11808,8 @@ index 0000000..e614465
 +  {
 +    title = "Update Available";
 +    char size[32];
-+    snprintf(size, sizeof(size), "%.0f MB", release.size / (1024.0 * 1024.0));
++    snprintf(size, sizeof(size), "%.0f MB",
++             (release.update_url.empty() ? release.size : release.update_size) / (1024.0 * 1024.0));
 +    lines = {"", latest + " is available.", "You have v" + m_version + ".", "",
 +             "Download it (" + std::string(size) + ")?"};
 +    options = {"Yes", "No"};
@@ -11636,6 +11832,14 @@ index 0000000..e614465
 +    {
 +      std::lock_guard lock(m_update_mutex);
 +      ready = m_update_ready;
++    }
++    if (m_update_unpacked)
++    {
++      title = "Update Installed";
++      lines = {"", latest + " is ready.", "", "It starts when Dolphin restarts.",
++               "Games, saves and settings are kept."};
++      options = {"Restart Now", "Later"};
++      break;
 +    }
 +    title = "Update Ready";
 +    lines = {"",
@@ -11725,6 +11929,7 @@ index 0000000..e614465
 +void Menu::RemoveOldUpdates()
 +{
 +  std::error_code ec;
++  std::filesystem::remove_all(m_data_dir + "/app.new", ec);  // an unpack that didn't finish
 +  const std::string dir = m_data_dir + "/update";
 +  for (const auto& entry : std::filesystem::directory_iterator(dir, ec))
 +  {
@@ -11840,6 +12045,13 @@ index 0000000..e614465
 +    Draw(dt);
 +    ImGui::Render();
 +    m_display.EndFrame();
++    static bool s_reported = false;
++    if (!s_reported)
++    {
++      // The menu is on screen: a downloaded update that got this far works.
++      s_reported = true;
++      ps4_update_started_ok();
++    }
 +
 +    if (m_launch >= 0 && m_launch_time >= 0.75f)
 +    {
@@ -11856,6 +12068,8 @@ index 0000000..e614465
 +    m_update_thread.join();
 +  if (m_update_exit)
 +    result = EXIT_APP;
++  if (m_update_restart)
++    result = RESTART_APP;
 +  m_audio.Stop();
 +  m_display.Shutdown();
 +  ImGui::DestroyContext();
@@ -11879,10 +12093,10 @@ index 0000000..e614465
 +}  // namespace PS4XMB
 diff --git a/Source/Core/DolphinNoGUI/PS4XMB.h b/Source/Core/DolphinNoGUI/PS4XMB.h
 new file mode 100755
-index 0000000..a4eae16
+index 0000000..2e8d1a4
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4XMB.h
-@@ -0,0 +1,41 @@
+@@ -0,0 +1,43 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -11909,8 +12123,10 @@ index 0000000..a4eae16
 +  std::string title;
 +};
 +
-+// Returned by Run when the app should close (an update is being installed).
++// Returned by Run when the app should close (to install an update's package).
 +inline constexpr const char* EXIT_APP = "\x01exit";
++// Returned by Run when the app should restart (an update is unpacked: it starts at once).
++inline constexpr const char* RESTART_APP = "\x01restart";
 +
 +// Finds the disc images in a folder (the game process's library scan).
 +using ScanFunction = std::function<std::vector<LibraryDisc>(const std::string& games_dir)>;
@@ -12574,10 +12790,10 @@ index f4dc8a9..0c37736 100644
  
 diff --git a/Source/Core/DolphinNoGUI/PlatformPS4.cpp b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
 new file mode 100644
-index 0000000..74c002b
+index 0000000..cc67d57
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
-@@ -0,0 +1,1232 @@
+@@ -0,0 +1,1358 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -12616,6 +12832,7 @@ index 0000000..74c002b
 +#include "DolphinNoGUI/PS4Controls.h"
 +#include "DolphinNoGUI/PS4IngameMenu.h"
 +#include "DolphinNoGUI/PS4MemoryCards.h"
++#include "DolphinNoGUI/PS4Updater.h"
 +#include "DolphinNoGUI/PS4Settings.h"
 +#include "DolphinNoGUI/PS4XMB.h"
 +#include "DiscIO/Volume.h"
@@ -12666,6 +12883,14 @@ index 0000000..74c002b
 +                                 uint64_t* bo_count);
 +#endif
 +
++// Defined below, at file scope (Common/FileUtil.cpp and PS4XMB.cpp use them too).
++extern "C" const char* ps4_self_path();
++extern "C" void ps4_update_started_ok();
++// The version this program was packaged as: scripts/package-dolphin.sh writes it over the
++// "00.00" (a downloaded update must know it isn't the installed program).
++extern "C" const char ps4_built_version[];
++extern "C" __attribute__((used)) const char ps4_built_version[] = "DOLPHINPS4-VERSION:00.00";
++
 +namespace
 +{
 +constexpr char PS4_DATA_DIR_PATH[] = "/data/DolphinPS4";
@@ -12679,9 +12904,42 @@ index 0000000..74c002b
 +// ps4.ini's global options as read (before settings.ini): the menus' defaults.
 +std::map<std::string, std::string> s_ps4_global;
 +
++// The version in ps4_built_version (empty in a build that wasn't packaged).
++std::string BuiltVersion()
++{
++  const volatile char* text = ps4_built_version;
++  std::string version;
++  for (size_t i = 19; text[i] != '\0'; i++)
++    version += text[i];
++  return version == "00.00" ? std::string() : version;
++}
++
++std::string FirstLine(const std::string& path)
++{
++  std::ifstream file(path);
++  std::string line;
++  std::getline(file, line);
++  while (!line.empty() && (line.back() == '\r' || line.back() == ' '))
++    line.pop_back();
++  return line;
++}
++
++// Updates unpacked by the XMB's updater (data/app: eboot.bin, xmb/, Sys/).
++const std::string UPDATE_DIR = std::string(PS4_DATA_DIR_PATH) + "/app";
++const std::string UPDATE_PENDING = std::string(PS4_DATA_DIR_PATH) + "/app-starting.txt";
++bool s_running_update = false;
++
++std::string AssetsDir()
++{
++  return s_running_update ? UPDATE_DIR : std::string("/app0");
++}
++
 +// The app version (APP_VER of /app0/sce_sys/param.sfo), for the logs and the XMB's About.
 +std::string AppVersion()
 +{
++  const std::string built = BuiltVersion();
++  if (!built.empty())
++    return built;
 +  // Written by scripts/package-dolphin.sh (param.sfo may not be readable from the sandbox).
 +  {
 +    std::ifstream version("/app0/xmb/version.txt");
@@ -12754,7 +13012,7 @@ index 0000000..74c002b
 +// /data/DolphinPS4/ps4.ini on top.
 +void LoadOptions()
 +{
-+  LoadOptionsFile("/app0/xmb/ps4-defaults.ini");
++  LoadOptionsFile(AssetsDir() + "/xmb/ps4-defaults.ini");
 +  LoadOptionsFile(std::string(PS4_DATA_DIR_PATH) + "/ps4.ini");
 +}
 +
@@ -13573,13 +13831,27 @@ index 0000000..74c002b
 +  // XMB when the in-game menu's "Quit Game" stopped the emulation.
 +  fflush(stderr);
 +  if (PS4IngameMenu::ReturnToXMB())
-+    sceSystemServiceLoadExec("/app0/eboot.bin", nullptr);
++    sceSystemServiceLoadExec(ps4_self_path(), nullptr);
 +  sceSystemServiceLoadExec("exit", nullptr);
 +  for (;;)
 +    sceKernelUsleep(100000);
 +}
 +
 +}  // namespace
++
++// The running program: the installed one, or a downloaded update (restarts start it again).
++// Common/FileUtil.cpp (GetExePath, so the update's Sys is used), PS4IngameMenu.cpp.
++extern "C" const char* ps4_self_path()
++{
++  static const std::string path = s_running_update ? UPDATE_DIR + "/eboot.bin" : "/app0/eboot.bin";
++  return path.c_str();
++}
++
++// PS4XMB.cpp, at its first frame, and before a game starts: a downloaded update works.
++extern "C" void ps4_update_started_ok()
++{
++  std::remove(UPDATE_PENDING.c_str());
++}
 +
 +// Core/State.cpp: save states name the app version that made them.
 +extern "C" const char* ps4_app_version()
@@ -13645,6 +13917,65 @@ index 0000000..74c002b
 +  return out;
 +}
 +
++// A downloaded update (PS4Updater.h) newer than the installed package: the installed program
++// starts it with sceSystemServiceLoadExec, as the PS4 Homebrew Store starts its updates. The
++// update knows itself by its built-in version. app-starting.txt is written before the switch and
++// removed once the update shows its menu (or starts a game); still there at the next start, the
++// update didn't work: it's set aside and the installed version runs. An installed package as new
++// as the update replaces it.
++static void StartDownloadedUpdate()
++{
++  const std::string update = FirstLine(UPDATE_DIR + "/xmb/version.txt");
++  if (update.empty())
++    return;
++  const std::string built = BuiltVersion();
++  const std::string installed = FirstLine("/app0/xmb/version.txt");
++  if (!built.empty() && built == update && built != installed)
++  {
++    s_running_update = true;
++    Platform::BootTrace(("running the downloaded update v" + update + " (installed: v" + installed + ")").c_str());
++    return;
++  }
++  std::error_code ec;
++  if (PS4Updater::CompareVersions(update, installed) <= 0)
++  {
++    std::filesystem::remove_all(UPDATE_DIR, ec);
++    std::remove(UPDATE_PENDING.c_str());
++    Platform::BootTrace(("removed the downloaded update v" + update + ": the installed v" + installed +
++               " is as new").c_str());
++    return;
++  }
++  const std::string failed = std::string(PS4_DATA_DIR_PATH) + "/app-failed";
++  if (FILE* pending = fopen(UPDATE_PENDING.c_str(), "r"))
++  {
++    fclose(pending);
++    std::remove(UPDATE_PENDING.c_str());
++    std::filesystem::remove_all(failed, ec);
++    std::filesystem::rename(UPDATE_DIR, failed, ec);
++    Platform::BootTrace(("the downloaded update v" + update + " didn't start last time: set aside in " +
++               failed + ", running the installed v" + installed).c_str());
++    return;
++  }
++  if (FILE* pending = fopen(UPDATE_PENDING.c_str(), "w"))
++  {
++    fprintf(pending, "%s\n", update.c_str());
++    fclose(pending);
++  }
++  Platform::BootTrace(("starting the downloaded update v" + update + " (installed: v" + installed + ")").c_str());
++  fflush(stderr);
++  const std::string eboot = UPDATE_DIR + "/eboot.bin";
++  const int result = sceSystemServiceLoadExec(eboot.c_str(), nullptr);
++  // Still here: it couldn't be started.
++  std::remove(UPDATE_PENDING.c_str());
++  std::filesystem::remove_all(failed, ec);
++  std::filesystem::rename(UPDATE_DIR, failed, ec);
++  char text[160];
++  snprintf(text, sizeof(text),
++           "sceSystemServiceLoadExec(%s) failed (%#x): running the installed version", eboot.c_str(),
++           static_cast<unsigned>(result));
++  Platform::BootTrace(text);
++}
++
 +std::vector<std::string> Platform::GetPS4Arguments()
 +{
 +  BootTrace("main");
@@ -13670,6 +14001,7 @@ index 0000000..74c002b
 +  setvbuf(stderr, nullptr, _IONBF, 0);
 +  atexit(OnExit);
 +  BootTrace("log opened");
++  StartDownloadedUpdate();
 +
 +  BootTrace(("app version " + AppVersion()).c_str());
 +  LoadOptions();
@@ -13708,6 +14040,7 @@ index 0000000..74c002b
 +    while (!game.empty() && (game.back() == '\n' || game.back() == '\r'))
 +      game.pop_back();
 +    BootTrace(("launch: " + game).c_str());
++    ps4_update_started_ok();  // this program got as far as starting a game
 +  }
 +  else if (GetPS4Option("xmb", "on") == "on")
 +  {
@@ -13719,7 +14052,16 @@ index 0000000..74c002b
 +        library.push_back({entry.path, entry.game_id, entry.revision, entry.disc, entry.title});
 +      return library;
 +    };
-+    game = PS4XMB::Run(scan, PS4_DATA_DIR_PATH, "/app0", AppVersion());
++    game = PS4XMB::Run(scan, PS4_DATA_DIR_PATH, AssetsDir(), AppVersion());
++    if (game == PS4XMB::RESTART_APP)
++    {
++      // An update was unpacked: the installed program starts it (StartDownloadedUpdate).
++      BootTrace("xmb: restarting for the update");
++      fflush(stderr);
++      sceSystemServiceLoadExec("/app0/eboot.bin", nullptr);
++      for (;;)
++        sceKernelUsleep(100000);
++    }
 +    if (game == PS4XMB::EXIT_APP)
 +    {
 +      // An update is installing in the background: the app closes so it can be replaced.
@@ -13741,7 +14083,7 @@ index 0000000..74c002b
 +      fclose(file);
 +      BootTrace("xmb: restarting into the game");
 +      fflush(stderr);
-+      const int result = sceSystemServiceLoadExec("/app0/eboot.bin", nullptr);
++      const int result = sceSystemServiceLoadExec(ps4_self_path(), nullptr);
 +      // Still here: the restart failed. Start the game in this process instead.
 +      char text[96];
 +      snprintf(text, sizeof(text), "xmb: sceSystemServiceLoadExec failed (%#x), booting here",
