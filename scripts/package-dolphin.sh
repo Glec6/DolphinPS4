@@ -20,7 +20,8 @@ mkdir -p "$STAGE/sce_sys"
 # update tells itself apart from the installed program by it. Same length, so the ELF's layout
 # doesn't change; create-fself then runs exactly as the build ran it.
 ELF="$BUILD/Binaries/dolphin-emu-nogui"
-WORK="$BUILD/package-eboot"
+# Same length as "Binaries": create-fself stores the input path, so the size check stays exact.
+WORK="$BUILD/PkgEboot"
 rm -rf "$WORK" && mkdir -p "$WORK"
 python3 - "$ELF" "$WORK/dolphin-emu-nogui" "$VERSION" <<'PY'
 import sys
