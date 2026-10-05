@@ -3929,7 +3929,7 @@ index cd35ea1..aecce41 100644
 +#endif
  }  // namespace State
 diff --git a/Source/Core/DolphinNoGUI/CMakeLists.txt b/Source/Core/DolphinNoGUI/CMakeLists.txt
-index 51c3fff..470280d 100644
+index 51c3fff..4571299 100644
 --- a/Source/Core/DolphinNoGUI/CMakeLists.txt
 +++ b/Source/Core/DolphinNoGUI/CMakeLists.txt
 @@ -23,6 +23,29 @@ if(${CMAKE_SYSTEM_NAME} STREQUAL "Linux")
@@ -3942,7 +3942,7 @@ index 51c3fff..470280d 100644
 +  target_sources(dolphin-nogui PRIVATE PlatformPS4.cpp ${PS4_RUNTIME_SOURCES})
 +  # The XMB launcher: Dear ImGui drawn with Vulkan (PS4XMBDisplay.cpp) through Dolphin's loader.
 +  target_sources(dolphin-nogui PRIVATE PS4XMB.cpp PS4XMBDisplay.cpp PS4IngameMenu.cpp PS4Settings.cpp
-+    PS4Controls.cpp PS4Cheats.cpp PS4Covers.cpp PS4Glyphs.cpp PS4Net.cpp PS4Updater.cpp
++    PS4Controls.cpp PS4Cheats.cpp PS4Covers.cpp PS4Glyphs.cpp PS4MemoryCards.cpp PS4Net.cpp PS4Updater.cpp
 +    ${CMAKE_SOURCE_DIR}/Externals/imgui/imgui/backends/imgui_impl_vulkan.cpp)
 +  set_source_files_properties(
 +    ${CMAKE_SOURCE_DIR}/Externals/imgui/imgui/backends/imgui_impl_vulkan.cpp
@@ -3971,7 +3971,7 @@ index 51c3fff..470280d 100644
 +  ps4_add_eboot(dolphin-nogui)
 +endif()
 diff --git a/Source/Core/DolphinNoGUI/MainNoGUI.cpp b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
-index 3bf40ea..7994e4f 100644
+index 3bf40ea..68e1ccb 100644
 --- a/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 +++ b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 @@ -2,10 +2,17 @@
@@ -4096,7 +4096,7 @@ index 3bf40ea..7994e4f 100644
  #endif
        });
  
-@@ -270,7 +335,295 @@ int main(const int argc, char* argv[])
+@@ -270,7 +335,296 @@ int main(const int argc, char* argv[])
  
    UICommon::SetUserDirectory(user_directory);
    UICommon::Init();
@@ -4388,11 +4388,12 @@ index 3bf40ea..7994e4f 100644
 +#ifdef __ORBIS__
 +  Platform::BootTrace("UICommon and controllers initialized");
 +  Platform::ApplyPS4Players();
++  Platform::ApplyPS4MemoryCards();
 +#endif
  
    Common::ScopeGuard ui_common_guard([] {
      UICommon::ShutdownControllers();
-@@ -284,6 +637,12 @@ int main(const int argc, char* argv[])
+@@ -284,6 +638,12 @@ int main(const int argc, char* argv[])
    }
  
    auto core_state_changed_hook = Core::AddOnStateChangedCallback([](const Core::State state) {
@@ -4405,7 +4406,7 @@ index 3bf40ea..7994e4f 100644
      if (state == Core::State::Uninitialized)
        s_platform->Stop();
    });
-@@ -303,6 +662,9 @@ int main(const int argc, char* argv[])
+@@ -303,6 +663,9 @@ int main(const int argc, char* argv[])
  
    DolphinAnalytics::Instance().ReportDolphinStart("nogui");
  
@@ -6727,6 +6728,283 @@ index 0000000..4af50c8
 +// "Quit Game" was chosen: the app restarts into the XMB instead of closing.
 +bool ReturnToXMB();
 +}  // namespace PS4IngameMenu
+diff --git a/Source/Core/DolphinNoGUI/PS4MemoryCards.cpp b/Source/Core/DolphinNoGUI/PS4MemoryCards.cpp
+new file mode 100644
+index 0000000..4c4d3fd
+--- /dev/null
++++ b/Source/Core/DolphinNoGUI/PS4MemoryCards.cpp
+@@ -0,0 +1,217 @@
++// Copyright 2026 Dolphin Emulator Project
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++#include "DolphinNoGUI/PS4MemoryCards.h"
++
++#include <algorithm>
++#include <filesystem>
++#include <fstream>
++#include <variant>
++
++#include "Common/Config/Config.h"
++#include "Core/Config/MainSettings.h"
++#include "Core/HW/EXI/EXI_Device.h"
++#include "Core/HW/GCMemcard/GCMemcard.h"
++#include "Core/HW/GCMemcard/GCMemcardUtils.h"
++#include "Core/HW/Sram.h"
++
++namespace PS4MemoryCards
++{
++namespace
++{
++constexpr const char* FIRST_CARD = "Memory Card 1";  // Dolphin's own, User/GC/<region>/Card A
++constexpr const char* REGIONS[] = {"USA", "EUR", "JAP"};
++// GameCube save times count from 2000-01-01.
++constexpr int64_t GC_EPOCH = 946684800;
++
++std::string CardsDir(const std::string& data_dir)
++{
++  return data_dir + "/User/GC/Cards";
++}
++
++std::string Clean(const std::string& text)
++{
++  std::string out = text;
++  while (!out.empty() && (out.back() == ' ' || out.back() == '\0'))
++    out.pop_back();
++  out.erase(std::find(out.begin(), out.end(), '\0'), out.end());
++  return out;
++}
++
++Save ReadSave(const std::string& path, const std::string& region, bool icons)
++{
++  Save save;
++  save.path = path;
++  save.region = region;
++  save.title = std::filesystem::path(path).stem().string();
++  const auto read = Memcard::ReadSavefile(path);
++  if (!std::holds_alternative<Memcard::Savefile>(read))
++  {
++    save.description = "Unreadable save file";
++    return save;
++  }
++  const Memcard::Savefile& file = std::get<Memcard::Savefile>(read);
++  const Memcard::DEntry& entry = file.dir_entry;
++  save.game_id = std::string(entry.m_gamecode.begin(), entry.m_gamecode.end()) +
++                 std::string(entry.m_makercode.begin(), entry.m_makercode.end());
++  save.blocks = entry.m_block_count;
++  save.modified = static_cast<int64_t>(static_cast<u32>(entry.m_modification_time)) + GC_EPOCH;
++  const std::string file_name =
++      Clean(std::string(entry.m_filename.begin(), entry.m_filename.end()));
++  if (!file_name.empty())
++    save.title = file_name;
++
++  // The comments and the icon: Dolphin decodes them from a card, so the save goes on an empty
++  // one in memory, just big enough.
++  u16 mbits = 4;
++  while (mbits < 128 && mbits * Memcard::MBIT_TO_BLOCKS < file.blocks.size() + 5)
++    mbits *= 2;
++  std::optional<Memcard::GCMemcard> card = Memcard::GCMemcard::Create(
++      "", CardFlashId{}, mbits, region == "JAP", 0, 0, 0);
++  if (!card || card->ImportFile(file) != Memcard::GCMemcardImportFileRetVal::SUCCESS)
++    return save;
++  const u8 index = card->GetFileIndex(0);
++  if (const auto comments = card->GetSaveComments(index))
++  {
++    if (!Clean(comments->first).empty())
++      save.title = Clean(comments->first);
++    save.description = Clean(comments->second);
++  }
++  if (icons)
++  {
++    const auto frames = card->ReadAnimRGBA8(index);
++    if (frames && !frames->empty() &&
++        (*frames)[0].image_data.size() == Memcard::MEMORY_CARD_ICON_WIDTH *
++                                              Memcard::MEMORY_CARD_ICON_HEIGHT)
++    {
++      const std::vector<u32>& argb = (*frames)[0].image_data;
++      save.icon.resize(argb.size() * 4);
++      for (size_t i = 0; i < argb.size(); i++)
++      {
++        save.icon[i * 4] = (argb[i] >> 16) & 0xFF;
++        save.icon[i * 4 + 1] = (argb[i] >> 8) & 0xFF;
++        save.icon[i * 4 + 2] = argb[i] & 0xFF;
++        save.icon[i * 4 + 3] = argb[i] >> 24;
++      }
++    }
++  }
++  return save;
++}
++
++void ReadFolder(Card& card, const std::string& folder, const std::string& region, bool icons)
++{
++  std::error_code ec;
++  std::vector<std::string> files;
++  for (const auto& entry : std::filesystem::directory_iterator(folder, ec))
++  {
++    std::string name = entry.path().filename().string();
++    std::string lower = name;
++    std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
++    // Dolphin renames saves the game deleted to *.gci.deleted: those are gone.
++    if (lower.size() > 4 && lower.compare(lower.size() - 4, 4, ".gci") == 0)
++      files.push_back(entry.path().string());
++  }
++  for (const std::string& file : files)
++  {
++    Save save = ReadSave(file, region, icons);
++    card.blocks += save.blocks;
++    card.saves.push_back(std::move(save));
++  }
++}
++}  // namespace
++
++std::vector<Card> List(const std::string& data_dir, bool icons)
++{
++  std::vector<Card> cards;
++  Card first;
++  first.name = FIRST_CARD;
++  for (const char* region : REGIONS)
++    ReadFolder(first, data_dir + "/User/GC/" + region + "/Card A", region, icons);
++  cards.push_back(std::move(first));
++
++  std::error_code ec;
++  std::vector<std::string> names;
++  for (const auto& entry : std::filesystem::directory_iterator(CardsDir(data_dir), ec))
++  {
++    std::error_code type_error;
++    if (entry.is_directory(type_error))
++      names.push_back(entry.path().filename().string());
++  }
++  // "Memory Card 2" before "Memory Card 10".
++  std::sort(names.begin(), names.end(), [](const std::string& a, const std::string& b) {
++    return a.size() != b.size() ? a.size() < b.size() : a < b;
++  });
++  for (const std::string& name : names)
++  {
++    Card card;
++    card.name = name;
++    card.folder = CardsDir(data_dir) + "/" + name + "/USA";
++    for (const char* region : REGIONS)
++      ReadFolder(card, CardsDir(data_dir) + "/" + name + "/" + region, region, icons);
++    cards.push_back(std::move(card));
++  }
++  for (Card& card : cards)
++  {
++    std::sort(card.saves.begin(), card.saves.end(),
++              [](const Save& a, const Save& b) { return a.modified > b.modified; });
++  }
++  return cards;
++}
++
++std::string Create(const std::string& data_dir, std::string* error)
++{
++  std::error_code ec;
++  for (int n = 2; n < 100; n++)
++  {
++    const std::string name = "Memory Card " + std::to_string(n);
++    const std::string dir = CardsDir(data_dir) + "/" + name;
++    if (std::filesystem::exists(dir, ec))
++      continue;
++    for (const char* region : REGIONS)
++      std::filesystem::create_directories(dir + "/" + region, ec);
++    if (ec)
++    {
++      *error = "Couldn't create " + dir + ": " + ec.message();
++      return {};
++    }
++    return name;
++  }
++  *error = "There are too many memory cards.";
++  return {};
++}
++
++std::string SlotA(const std::string& data_dir)
++{
++  std::ifstream file(data_dir + "/memcards.ini");
++  std::string line;
++  while (std::getline(file, line))
++  {
++    while (!line.empty() && (line.back() == '\r' || line.back() == ' '))
++      line.pop_back();
++    if (line.rfind("slot_a=", 0) == 0 && line.size() > 7)
++    {
++      const std::string name = line.substr(7);
++      std::error_code ec;
++      if (name == FIRST_CARD || std::filesystem::is_directory(CardsDir(data_dir) + "/" + name, ec))
++        return name;
++    }
++  }
++  return FIRST_CARD;
++}
++
++void SetSlotA(const std::string& data_dir, const std::string& name)
++{
++  std::ofstream file(data_dir + "/memcards.ini", std::ios::trunc);
++  file << "# Dolphin memory cards (edited by the menu)\nslot_a=" << name << "\n";
++}
++
++void ApplySlotA(const std::string& data_dir)
++{
++  const std::string name = SlotA(data_dir);
++  // A GCI folder in Slot A (Dolphin's default); a new card's folder ends in a region that Dolphin
++  // replaces with the game's.
++  Config::SetBase(Config::MAIN_SLOT_A, ExpansionInterface::EXIDeviceType::MemoryCardFolder);
++  Config::SetBase(Config::MAIN_GCI_FOLDER_A_PATH,
++                  name == FIRST_CARD ? std::string() : CardsDir(data_dir) + "/" + name + "/USA");
++}
++}  // namespace PS4MemoryCards
+diff --git a/Source/Core/DolphinNoGUI/PS4MemoryCards.h b/Source/Core/DolphinNoGUI/PS4MemoryCards.h
+new file mode 100644
+index 0000000..d80c0ef
+--- /dev/null
++++ b/Source/Core/DolphinNoGUI/PS4MemoryCards.h
+@@ -0,0 +1,48 @@
++// Copyright 2026 Dolphin Emulator Project
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++// GameCube memory cards for the PS4 menus (PS4XMB.cpp): the cards there are, the saves on them,
++// new cards, and which card is in Slot A.
++//
++// A card is a GCI folder, Dolphin's default kind of memory card: one .gci file per save, one
++// folder per region. The first card is Dolphin's own (User/GC/<region>/Card A); new cards live in
++// User/GC/Cards/<name>/<region>, and Dolphin picks the region folder for each game.
++
++#pragma once
++
++#include <cstdint>
++#include <string>
++#include <vector>
++
++namespace PS4MemoryCards
++{
++struct Save
++{
++  std::string path;         // the .gci file
++  std::string region;       // "USA", "EUR" or "JAP"
++  std::string game_id;      // game code + maker code, e.g. GALE01
++  std::string title;        // the save's own two comment lines, as the GameCube shows them
++  std::string description;
++  int blocks = 0;
++  int64_t modified = 0;     // Unix time
++  std::vector<uint8_t> icon;  // 32 x 32 RGBA (the first frame), empty if it has none
++};
++
++struct Card
++{
++  std::string name;
++  std::string folder;  // the card's folder setting for Dolphin ("" = Dolphin's own card)
++  std::vector<Save> saves;
++  int blocks = 0;
++};
++
++// Every card, Dolphin's own first. icons: decode each save's icon too (slower).
++std::vector<Card> List(const std::string& data_dir, bool icons);
++// A new, empty card ("Memory Card 2", ...). Returns its name, or empty with *error set.
++std::string Create(const std::string& data_dir, std::string* error);
++// The card in Slot A (its name), and choosing it (from the next game start).
++std::string SlotA(const std::string& data_dir);
++void SetSlotA(const std::string& data_dir, const std::string& name);
++// Before a game starts: Slot A's card folder in Dolphin's config.
++void ApplySlotA(const std::string& data_dir);
++}  // namespace PS4MemoryCards
 diff --git a/Source/Core/DolphinNoGUI/PS4Net.cpp b/Source/Core/DolphinNoGUI/PS4Net.cpp
 new file mode 100755
 index 0000000..023f183
@@ -7924,10 +8202,10 @@ index 0000000..9bfcde3
 +}  // namespace PS4Updater
 diff --git a/Source/Core/DolphinNoGUI/PS4XMB.cpp b/Source/Core/DolphinNoGUI/PS4XMB.cpp
 new file mode 100755
-index 0000000..45dfea1
+index 0000000..8603a8c
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4XMB.cpp
-@@ -0,0 +1,2621 @@
+@@ -0,0 +1,3627 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -7967,6 +8245,7 @@ index 0000000..45dfea1
 +#include "DolphinNoGUI/PS4Controls.h"
 +#include "DolphinNoGUI/PS4Covers.h"
 +#include "DolphinNoGUI/PS4Glyphs.h"
++#include "DolphinNoGUI/PS4MemoryCards.h"
 +#include "DolphinNoGUI/PS4Settings.h"
 +#include "DolphinNoGUI/PS4Updater.h"
 +#include "DolphinNoGUI/PS4XMBDisplay.h"
@@ -8025,6 +8304,78 @@ index 0000000..45dfea1
 +  dl->PrimWriteVtx(b, uv, cb);
 +  dl->PrimWriteVtx(c, uv, cc);
 +  dl->PrimWriteVtx(d, uv, cd);
++}
++
++// A textured quad with a colour per corner (the Library's cover reflections fade out).
++void ImageQuadColors(ImDrawList* dl, ImTextureID texture, ImVec2 a, ImVec2 b, ImVec2 c, ImVec2 d,
++                     ImVec2 uv_a, ImVec2 uv_b, ImVec2 uv_c, ImVec2 uv_d, ImU32 ca, ImU32 cb,
++                     ImU32 cc, ImU32 cd)
++{
++  dl->PushTexture(ImTextureRef(texture));
++  dl->PrimReserve(6, 4);
++  const ImDrawIdx idx = static_cast<ImDrawIdx>(dl->_VtxCurrentIdx);
++  dl->PrimWriteIdx(idx);
++  dl->PrimWriteIdx(static_cast<ImDrawIdx>(idx + 1));
++  dl->PrimWriteIdx(static_cast<ImDrawIdx>(idx + 2));
++  dl->PrimWriteIdx(idx);
++  dl->PrimWriteIdx(static_cast<ImDrawIdx>(idx + 2));
++  dl->PrimWriteIdx(static_cast<ImDrawIdx>(idx + 3));
++  dl->PrimWriteVtx(a, uv_a, ca);
++  dl->PrimWriteVtx(b, uv_b, cb);
++  dl->PrimWriteVtx(c, uv_c, cc);
++  dl->PrimWriteVtx(d, uv_d, cd);
++  dl->PopTexture();
++}
++
++// A GameCube memory card, upright, centred on c (h tall): the body, its label and the notch.
++void DrawMemoryCardIcon(ImDrawList* dl, ImVec2 c, float h, ImU32 body, ImU32 label)
++{
++  const float w = h * 0.72f;
++  const ImVec2 a(c.x - w * 0.5f, c.y - h * 0.5f), b(c.x + w * 0.5f, c.y + h * 0.5f);
++  dl->AddRectFilled(a, b, body, h * 0.08f);
++  dl->AddRectFilled(ImVec2(a.x + w * 0.14f, a.y + h * 0.16f), ImVec2(b.x - w * 0.14f, c.y + h * 0.1f),
++                    label, h * 0.04f);
++  // The connector edge at the bottom.
++  for (int i = 0; i < 4; i++)
++  {
++    const float x = a.x + w * (0.2f + i * 0.17f);
++    dl->AddRectFilled(ImVec2(x, b.y - h * 0.14f), ImVec2(x + w * 0.09f, b.y - h * 0.04f), label);
++  }
++}
++
++// "Played today", "Played 3 days ago", ...
++std::string PlayedText(int64_t when)
++{
++  if (when <= 0)
++    return "Not played yet";
++  const std::time_t now = std::time(nullptr), then = static_cast<std::time_t>(when);
++  std::tm today = {}, day = {};
++  localtime_r(&now, &today);
++  localtime_r(&then, &day);
++  today.tm_hour = day.tm_hour = 12;
++  today.tm_min = day.tm_min = today.tm_sec = day.tm_sec = 0;
++  const long days = std::lround(std::difftime(std::mktime(&today), std::mktime(&day)) / 86400.0);
++  if (days <= 0)
++    return "Played today";
++  if (days == 1)
++    return "Played yesterday";
++  if (days < 7)
++    return "Played " + std::to_string(days) + " days ago";
++  char text[48];
++  std::strftime(text, sizeof(text), "Played %b %e, %Y", &day);
++  return text;
++}
++
++std::string DateText(int64_t when)
++{
++  if (when <= 0)
++    return "";
++  const std::time_t then = static_cast<std::time_t>(when);
++  std::tm day = {};
++  localtime_r(&then, &day);
++  char text[48];
++  std::strftime(text, sizeof(text), "%b %e, %Y  %H:%M", &day);
++  return text;
 +}
 +
 +// Moves `value` towards `target` (frame-rate independent exponential smoothing).
@@ -8309,6 +8660,8 @@ index 0000000..45dfea1
 +  bool auto_update = true;  // look for a new version on GitHub when the app opens
 +  std::string games_dir;    // Settings -> Game Folder; empty = data_dir/games
 +  std::string last_game;
++  std::string style = "library";  // Settings -> Menu Style: "library" (covers) or "xmb"
++  std::string sort = "title";     // game order: "title", "recent" (last played first), "platform"
 +
 +  void Load(const std::string& path)
 +  {
@@ -8338,6 +8691,10 @@ index 0000000..45dfea1
 +        games_dir = value;
 +      else if (key == "last_game")
 +        last_game = value;
++      else if (key == "style")
++        style = value == "xmb" ? "xmb" : "library";
++      else if (key == "sort")
++        sort = value;
 +    }
 +  }
 +  void Save(const std::string& path) const
@@ -8347,7 +8704,8 @@ index 0000000..45dfea1
 +    file << "theme=" << theme << "\nwallpaper=" << wallpaper << "\nsounds="
 +         << (sounds ? "on" : "off") << "\nvolume=" << volume << "\nclock="
 +         << (clock ? "on" : "off") << "\nauto_update=" << (auto_update ? "on" : "off")
-+         << "\ngames_dir=" << games_dir << "\nlast_game=" << last_game << "\n";
++         << "\ngames_dir=" << games_dir << "\nlast_game=" << last_game << "\nstyle=" << style
++         << "\nsort=" << sort << "\n";
 +  }
 +};
 +
@@ -8372,10 +8730,19 @@ index 0000000..45dfea1
 +{
 +  Settings,
 +  Games,
++  MemoryCards,
 +  Themes,
 +};
-+constexpr int CATEGORY_COUNT = 3;
-+constexpr const char* CATEGORY_NAMES[CATEGORY_COUNT] = {"Settings", "Games", "Themes"};
++constexpr int CATEGORY_COUNT = 4;
++constexpr const char* CATEGORY_NAMES[CATEGORY_COUNT] = {"Settings", "Games", "Memory Cards",
++                                                        "Themes"};
++// The Library style's tabs (L1 / R1), left to right, and their names.
++constexpr Category TABS[] = {Category::Games, Category::MemoryCards, Category::Settings,
++                             Category::Themes};
++constexpr int TAB_COUNT = 4;
++constexpr const char* TAB_NAMES[TAB_COUNT] = {"Library", "Memory Cards", "Settings", "Themes"};
++constexpr const char* SORT_NAMES[][2] = {
++    {"title", "A-Z"}, {"recent", "Recently Played"}, {"platform", "Platform"}};
 +
 +struct Item
 +{
@@ -8384,7 +8751,9 @@ index 0000000..45dfea1
 +  int game = -1;       // index into games (Games category)
 +  int theme = -1;      // index into THEMES, or -2 - wallpaper index
 +  int setting = -1;
++  int card = -1;  // index into the memory cards; CARD_NEW: "New Memory Card"
 +};
++constexpr int CARD_NEW = -2;
 +
 +enum Setting
 +{
@@ -8399,6 +8768,8 @@ index 0000000..45dfea1
 +  SET_AUTO_UPDATE,   // Automatic Updates on/off
 +  SET_UPDATE,        // the update panel: prompt, progress, result
 +  SET_GAMES_DIR,     // Game Folder: a folder browser
++  SET_STYLE,         // Menu Style: Library or XMB
++  SET_MEMCARD,       // a memory card: Slot A and the saves on it
 +  SET_GROUP = 100,  // + index into PS4Settings::Categories(): an emulation settings list
 +};
 +
@@ -8413,6 +8784,7 @@ index 0000000..45dfea1
 +  bool note = false;    // takes effect at the next game start
 +  std::string glyph;    // Controls: the DualShock 4 control, drawn as its icon
 +  int tag = 0;          // cheats: 1 = an ON tag (green), -1 = an OFF tag (red)
++  ImTextureID icon{};   // memory cards: the save's own icon
 +};
 +
 +// A PSP-style panel on the right: options to pick from, information text, or a settings list.
@@ -8479,6 +8851,23 @@ index 0000000..45dfea1
 +  void BuildSettingRows();
 +  void ChangeSettingRow(int direction);
 +  void MoveSettingRow(int direction);
++  // Memory cards.
++  void LoadCards();
++  void OpenCardPanel(int card);
++  void CreateCard();
++  // Items and the menu style.
++  void ActivateItem(const Item& item);
++  bool Library() const { return m_prefs.style != "xmb"; }
++  int LibraryTab() const;
++  void LoadPlayed();
++  void SavePlayed() const;
++  int64_t Played(const std::string& path) const
++  {
++    const auto it = m_played.find(path);
++    return it == m_played.end() ? 0 : it->second;
++  }
++  std::string SortName() const;
++  ImTextureID SaveIcon(int card, int save) const;
 +
 +  void Draw(float dt);
 +  void DrawBackground();
@@ -8488,6 +8877,15 @@ index 0000000..45dfea1
 +  void DrawSidePanel(ImDrawList* dl, float dt);
 +  void DrawHints(ImDrawList* dl);
 +  void DrawIntro(ImDrawList* dl, float dt);
++  // The Library style: tabs on top, the games as a row of covers.
++  void DrawLibraryBackground();
++  void DrawLibrary(ImDrawList* dl, float dt);
++  void DrawLibraryGames(ImDrawList* dl, float alpha);
++  void DrawLibraryCards(ImDrawList* dl, float alpha);
++  void DrawLibraryList(ImDrawList* dl, float alpha);
++  void DrawLibraryHints(ImDrawList* dl);
++  void DrawCover(ImDrawList* dl, const Game& game, ImVec2 a, ImVec2 b, ImVec2 c, ImVec2 d,
++                 float alpha, int focus);
 +  void Text(ImDrawList* dl, ImFont* font, float size, ImVec2 pos, ImU32 color,
 +            const std::string& text, bool shadow = true);
 +  float TextWidth(ImFont* font, float size, const std::string& text);
@@ -8518,6 +8916,16 @@ index 0000000..45dfea1
 +  bool m_capture_released = false;
 +  float m_capture_time = 0.0f;
 +  int m_capture_row = 0;
++
++  // Memory cards: the cards, their saves' icons (textures), the card in Slot A, the card panel.
++  std::vector<PS4MemoryCards::Card> m_cards;
++  std::vector<std::vector<ImTextureID>> m_card_icons;
++  std::string m_slot_a;
++  int m_card_panel = -1;
++  // When each game was last played (data_dir/played.ini), for "Played today" and the order.
++  std::map<std::string, int64_t> m_played;
++  float m_tab_pos = 0.0f;  // Library: the tab highlight (animated)
++  float m_sort_shown = 0.0f;  // Library: how long the new game order is still shown
 +
 +  // Cheats panel.
 +  PS4Cheats::List m_cheats;
@@ -8891,6 +9299,7 @@ index 0000000..45dfea1
 +  }
 +  settings.push_back({"Sound Effects", m_prefs.sounds ? "On" : "Off", -1, -1, SET_SOUNDS});
 +  settings.push_back({"Volume", std::to_string(m_prefs.volume), -1, -1, SET_VOLUME});
++  settings.push_back({"Menu Style", Library() ? "Library" : "XMB", -1, -1, SET_STYLE});
 +  settings.push_back({"Clock", m_prefs.clock ? "On" : "Off", -1, -1, SET_CLOCK});
 +  settings.push_back({"Controls", "Remap the GameCube and Wii buttons", -1, -1, SET_CONTROLS});
 +  settings.push_back({"Game Folder", GamesFolder(), -1, -1, SET_GAMES_DIR});
@@ -8904,16 +9313,52 @@ index 0000000..45dfea1
 +  settings.push_back({"About", "", -1, -1, SET_ABOUT});
 +
 +  auto& games = m_items[static_cast<int>(Category::Games)];
-+  for (size_t i = 0; i < m_games.size(); i++)
++  // m_games is in title order; the other orders keep it among equals.
++  std::vector<int> order(m_games.size());
++  for (size_t i = 0; i < order.size(); i++)
++    order[i] = static_cast<int>(i);
++  if (m_prefs.sort == "recent")
++  {
++    std::stable_sort(order.begin(), order.end(), [this](int a, int b) {
++      return Played(m_games[a].path) > Played(m_games[b].path);
++    });
++  }
++  else if (m_prefs.sort == "platform")
++  {
++    std::stable_sort(order.begin(), order.end(),
++                     [this](int a, int b) { return !m_games[a].wii && m_games[b].wii; });
++  }
++  for (const int i : order)
 +  {
 +    const Game& game = m_games[i];
 +    std::string detail = game.id;
 +    if (game.discs > 1)
 +      detail += "  -  " + std::to_string(game.discs) + " discs";
-+    games.push_back({game.title, detail, static_cast<int>(i), -1, -1});
++    games.push_back({game.title, detail, i, -1, -1});
 +  }
 +  if (games.empty())
 +    games.push_back({"No games found", "Copy games to " + GamesFolder() + ", then press Square"});
++
++  auto& cards = m_items[static_cast<int>(Category::MemoryCards)];
++  for (size_t i = 0; i < m_cards.size(); i++)
++  {
++    const PS4MemoryCards::Card& card = m_cards[i];
++    const size_t saves = card.saves.size();
++    std::string detail = std::to_string(saves) + (saves == 1 ? " save" : " saves") + "  -  " +
++                         std::to_string(card.blocks) + " blocks";
++    if (card.name == m_slot_a)
++      detail = "In Slot A  -  " + detail;
++    Item item{card.name, detail};
++    item.card = static_cast<int>(i);
++    cards.push_back(item);
++  }
++  Item new_card{"New Memory Card", "An empty card for new saves"};
++  new_card.card = CARD_NEW;
++  cards.push_back(new_card);
++  for (int c = 0; c < CATEGORY_COUNT; c++)
++  {
++    m_selected[c] = std::clamp(m_selected[c], 0, std::max(0, static_cast<int>(m_items[c].size()) - 1));
++  }
 +
 +  auto& themes = m_items[static_cast<int>(Category::Themes)];
 +  for (size_t i = 0; i < std::size(THEMES); i++)
@@ -8946,6 +9391,13 @@ index 0000000..45dfea1
 +    for (int v = 100; v >= 0; v -= 10)
 +      m_panel.options.push_back(std::to_string(v));
 +    m_panel.selected = (100 - m_prefs.volume) / 10;
++    break;
++  case SET_STYLE:
++    m_panel.title = "Menu Style";
++    m_panel.options = {"Library", "XMB"};
++    m_panel.selected = Library() ? 0 : 1;
++    m_panel.lines = {"", "Library: your covers in a row,", "tabs switched with L1 / R1.", "",
++                     "XMB: the PSP-style columns."};
 +    break;
 +  case SET_CLOCK:
 +    m_panel.title = "Clock";
@@ -9067,6 +9519,24 @@ index 0000000..45dfea1
 +    return;
 +  const SettingRow& row = m_panel.rows[m_panel.selected];
 +  const std::string& game = m_panel.game_id;
++  if (m_panel.setting == SET_MEMCARD)
++  {
++    // Cross on "Put in Slot A"; the saves are only shown (their details below the list).
++    if (direction > 0 && row.key == "card:use" && m_card_panel >= 0 &&
++        m_card_panel < static_cast<int>(m_cards.size()))
++    {
++      m_slot_a = m_cards[m_card_panel].name;
++      PS4MemoryCards::SetSlotA(m_data_dir, m_slot_a);
++      Log("memory cards: " + m_slot_a + " in Slot A");
++      BuildItems();
++      const int selected = m_panel.selected;
++      OpenCardPanel(m_card_panel);
++      m_panel.selected = selected;
++      MoveSettingRow(0);
++      Play("confirm");
++    }
++    return;
++  }
 +  if (m_panel.setting == SET_GAMES_DIR)
 +  {
 +    if (direction <= 0)
@@ -9377,6 +9847,10 @@ index 0000000..45dfea1
 +  case SET_AUTO_UPDATE:
 +    m_prefs.auto_update = option == 0;
 +    break;
++  case SET_STYLE:
++    m_prefs.style = option == 0 ? "library" : "xmb";
++    Log("menu style: " + m_prefs.style);
++    break;
 +  case SET_RESET_ALL:
 +    if (option == 1)
 +      PS4Settings::ResetAll();
@@ -9530,78 +10004,84 @@ index 0000000..45dfea1
 +
 +  auto& items = m_items[m_category];
 +  int& selected = m_selected[m_category];
-+  if ((pressed & BTN_LEFT) && m_category > 0)
++  const int count = static_cast<int>(items.size());
++  const bool games = m_category == static_cast<int>(Category::Games);
++  // XMB: Left / Right switch the columns, Up / Down the items, L1 / R1 jump five.
++  // Library: L1 / R1 switch the tabs; the games scroll sideways, the other tabs up and down.
++  int prev_category = m_category > 0 ? m_category - 1 : -1;
++  int next_category = m_category < CATEGORY_COUNT - 1 ? m_category + 1 : -1;
++  uint32_t prev_tab = BTN_LEFT, next_tab = BTN_RIGHT, prev_item = BTN_UP, next_item = BTN_DOWN;
++  uint32_t prev_page = BTN_L1, next_page = BTN_R1;
++  if (Library())
 +  {
-+    m_category--;
++    const int tab = LibraryTab();
++    prev_category = tab > 0 ? static_cast<int>(TABS[tab - 1]) : -1;
++    next_category = tab < TAB_COUNT - 1 ? static_cast<int>(TABS[tab + 1]) : -1;
++    prev_tab = BTN_L1;
++    next_tab = BTN_R1;
++    prev_item = games ? BTN_LEFT : BTN_UP;
++    next_item = games ? BTN_RIGHT : BTN_DOWN;
++    prev_page = next_page = 0;
++  }
++  if ((pressed & prev_tab) && prev_category >= 0)
++  {
++    m_category = prev_category;
 +    Play("category");
 +  }
-+  else if ((pressed & BTN_RIGHT) && m_category < CATEGORY_COUNT - 1)
++  else if ((pressed & next_tab) && next_category >= 0)
 +  {
-+    m_category++;
++    m_category = next_category;
 +    Play("category");
 +  }
-+  else if ((pressed & BTN_UP) && selected > 0)
++  else if ((pressed & prev_item) && selected > 0)
 +  {
 +    selected--;
 +    Play("move");
 +  }
-+  else if ((pressed & BTN_DOWN) && selected < static_cast<int>(items.size()) - 1)
++  else if ((pressed & next_item) && selected < count - 1)
 +  {
 +    selected++;
 +    Play("move");
 +  }
-+  else if ((pressed & BTN_L1) && selected > 0)
++  else if ((pressed & prev_page) && selected > 0)
 +  {
 +    selected = std::max(0, selected - 5);
 +    Play("move");
 +  }
-+  else if ((pressed & BTN_R1) && selected < static_cast<int>(items.size()) - 1)
++  else if ((pressed & next_page) && selected < count - 1)
 +  {
-+    selected = std::min(static_cast<int>(items.size()) - 1, selected + 5);
++    selected = std::min(count - 1, selected + 5);
 +    Play("move");
 +  }
 +  else if (pressed & BTN_CROSS)
 +  {
-+    if (items.empty())
-+      return;
-+    const Item& item = items[selected];
-+    if (item.game >= 0)
-+    {
-+      m_launch = item.game;
-+      m_launch_time = 0.0f;
-+      m_prefs.last_game = m_games[item.game].path;
-+      m_prefs.Save(m_data_dir + "/xmb.ini");
-+      Play("launch");
-+    }
-+    else if (item.setting >= 0)
-+    {
-+      OpenSettingPanel(item.setting);
-+      Play("menu");
-+    }
-+    else if (item.theme != -1)
-+    {
-+      if (item.theme >= 0)
-+      {
-+        m_prefs.theme = THEMES[item.theme].name;
-+        m_prefs.wallpaper.clear();
-+      }
-+      else
-+      {
-+        m_prefs.wallpaper = m_wallpapers[-2 - item.theme];
-+      }
-+      ApplyPreferences();
-+      BuildItems();
-+      Play("confirm");
-+    }
-+    else
-+    {
-+      Play("error");
-+    }
++    if (!items.empty())
++      ActivateItem(items[selected]);
 +  }
-+  else if ((pressed & BTN_SQUARE) && m_category == static_cast<int>(Category::Games))
++  else if ((pressed & BTN_SQUARE) && games)
 +  {
 +    RefreshGames();
 +    Play("confirm");
++  }
++  else if ((pressed & BTN_OPTIONS) && games && Library())
++  {
++    // The next game order; the selected game stays selected.
++    size_t sort = 0;
++    while (sort < std::size(SORT_NAMES) && m_prefs.sort != SORT_NAMES[sort][0])
++      sort++;
++    m_prefs.sort = SORT_NAMES[(sort + 1) % std::size(SORT_NAMES)][0];
++    m_prefs.Save(m_data_dir + "/xmb.ini");
++    const int game = items.empty() ? -1 : items[selected].game;
++    BuildItems();
++    const auto& sorted = m_items[m_category];
++    for (size_t i = 0; i < sorted.size(); i++)
++    {
++      if (game >= 0 && sorted[i].game == game)
++        m_selected[m_category] = static_cast<int>(i);
++    }
++    m_item_pos[m_category] = static_cast<float>(m_selected[m_category]);
++    m_sort_shown = 2.5f;
++    Play("category");
 +  }
 +  else if (pressed & BTN_TRIANGLE)
 +  {
@@ -9618,6 +10098,204 @@ index 0000000..45dfea1
 +  {
 +    Play("back");
 +  }
++}
++
++// Cross on an item (both styles).
++void Menu::ActivateItem(const Item& item)
++{
++  if (item.game >= 0)
++  {
++    m_launch = item.game;
++    m_launch_time = 0.0f;
++    m_prefs.last_game = m_games[item.game].path;
++    m_prefs.Save(m_data_dir + "/xmb.ini");
++    m_played[m_games[item.game].path] = static_cast<int64_t>(std::time(nullptr));
++    SavePlayed();
++    Play("launch");
++  }
++  else if (item.setting >= 0)
++  {
++    OpenSettingPanel(item.setting);
++    Play("menu");
++  }
++  else if (item.theme != -1)
++  {
++    if (item.theme >= 0)
++    {
++      m_prefs.theme = THEMES[item.theme].name;
++      m_prefs.wallpaper.clear();
++    }
++    else
++    {
++      m_prefs.wallpaper = m_wallpapers[-2 - item.theme];
++    }
++    ApplyPreferences();
++    BuildItems();
++    Play("confirm");
++  }
++  else if (item.card == CARD_NEW)
++  {
++    CreateCard();
++  }
++  else if (item.card >= 0)
++  {
++    OpenCardPanel(item.card);
++    Play("menu");
++  }
++  else
++  {
++    Play("error");
++  }
++}
++
++int Menu::LibraryTab() const
++{
++  for (int i = 0; i < TAB_COUNT; i++)
++  {
++    if (static_cast<int>(TABS[i]) == m_category)
++      return i;
++  }
++  return 0;
++}
++
++std::string Menu::SortName() const
++{
++  for (const auto& [key, name] : SORT_NAMES)
++  {
++    if (m_prefs.sort == key)
++      return name;
++  }
++  return SORT_NAMES[0][1];
++}
++
++// data_dir/played.ini: "<Unix time> <game path>" per line.
++void Menu::LoadPlayed()
++{
++  std::ifstream file(m_data_dir + "/played.ini");
++  std::string line;
++  while (std::getline(file, line))
++  {
++    while (!line.empty() && (line.back() == '\r' || line.back() == ' '))
++      line.pop_back();
++    const size_t space = line.find(' ');
++    if (space != std::string::npos && space > 0)
++      m_played[line.substr(space + 1)] = std::atoll(line.c_str());
++  }
++}
++
++void Menu::SavePlayed() const
++{
++  std::ofstream file(m_data_dir + "/played.ini", std::ios::trunc);
++  for (const auto& [path, when] : m_played)
++    file << when << ' ' << path << '\n';
++}
++
++// ---------------------------------------------------------------------------------------------
++// Memory cards.
++
++void Menu::LoadCards()
++{
++  for (auto& icons : m_card_icons)
++  {
++    for (ImTextureID icon : icons)
++    {
++      if (icon != ImTextureID{})
++        m_display.DestroyTexture(icon);
++    }
++  }
++  m_card_icons.clear();
++  m_cards = PS4MemoryCards::List(m_data_dir, true);
++  m_slot_a = PS4MemoryCards::SlotA(m_data_dir);
++  size_t saves = 0;
++  for (const PS4MemoryCards::Card& card : m_cards)
++  {
++    std::vector<ImTextureID> icons;
++    for (const PS4MemoryCards::Save& save : card.saves)
++    {
++      icons.push_back(save.icon.empty() ?
++                          ImTextureID{} :
++                          m_display.CreateTexture(save.icon.data(),
++                                                  32, 32));
++    }
++    saves += card.saves.size();
++    m_card_icons.push_back(std::move(icons));
++  }
++  Log("memory cards: " + std::to_string(m_cards.size()) + " cards, " + std::to_string(saves) +
++      " saves, " + m_slot_a + " in Slot A");
++}
++
++ImTextureID Menu::SaveIcon(int card, int save) const
++{
++  if (card < 0 || card >= static_cast<int>(m_card_icons.size()) || save < 0 ||
++      save >= static_cast<int>(m_card_icons[card].size()))
++  {
++    return ImTextureID{};
++  }
++  return m_card_icons[card][save];
++}
++
++// A card's panel: Slot A, then its saves with their icons (details under the list).
++void Menu::OpenCardPanel(int index)
++{
++  if (index < 0 || index >= static_cast<int>(m_cards.size()))
++    return;
++  const PS4MemoryCards::Card& card = m_cards[index];
++  m_panel = {};
++  m_panel.open = true;
++  m_panel.setting = SET_MEMCARD;
++  m_panel.title = card.name;
++  m_card_panel = index;
++  std::vector<SettingRow> rows;
++  if (card.name == m_slot_a)
++    rows.push_back({"In Slot A", "In use", "card:in"});
++  else
++    rows.push_back({"Put in Slot A", "", "card:use"});
++  const size_t count = card.saves.size();
++  rows.push_back({std::to_string(count) + (count == 1 ? " Save" : " Saves") + "  -  " +
++                      std::to_string(card.blocks) + " blocks",
++                  "", "", true});
++  if (count == 0)
++    rows.push_back({"No saves on this card yet", "", "", true});
++  for (size_t i = 0; i < count; i++)
++  {
++    const PS4MemoryCards::Save& save = card.saves[i];
++    SettingRow row{save.title, std::to_string(save.blocks) + (save.blocks == 1 ? " block" : " blocks"),
++                   "save:" + std::to_string(i)};
++    row.icon = SaveIcon(index, static_cast<int>(i));
++    rows.push_back(row);
++  }
++  m_panel.rows = std::move(rows);
++  m_panel.selected = 0;
++  MoveSettingRow(0);
++}
++
++void Menu::CreateCard()
++{
++  std::string error;
++  const std::string name = PS4MemoryCards::Create(m_data_dir, &error);
++  if (name.empty())
++  {
++    Log("memory cards: " + error);
++    m_panel = {};
++    m_panel.open = true;
++    m_panel.title = "New Memory Card";
++    m_panel.lines = {"", error};
++    Play("error");
++    return;
++  }
++  Log("memory cards: created " + name);
++  LoadCards();
++  BuildItems();
++  auto& cards = m_items[static_cast<int>(Category::MemoryCards)];
++  for (size_t i = 0; i < cards.size(); i++)
++  {
++    if (cards[i].card >= 0 && m_cards[cards[i].card].name == name)
++    {
++      m_selected[static_cast<int>(Category::MemoryCards)] = static_cast<int>(i);
++      OpenCardPanel(cards[i].card);
++    }
++  }
++  Play("confirm");
 +}
 +
 +void Menu::Text(ImDrawList* dl, ImFont* font, float size, ImVec2 pos, ImU32 color,
@@ -9723,6 +10401,9 @@ index 0000000..45dfea1
 +    dl->AddCircle(c, r * 0.96f, color, 48, r * 0.06f);
 +    break;
 +  }
++  case Category::MemoryCards:
++    DrawMemoryCardIcon(dl, c, s * 0.95f, color, IM_COL32(0, 0, 0, 110));
++    break;
 +  case Category::Themes:
 +  {
 +    // A palette with paint dots.
@@ -9806,6 +10487,22 @@ index 0000000..45dfea1
 +    }
 +    dl->AddRect(icon_min, icon_max, Rgba(theme.text, alpha * (selected ? 0.9f : 0.4f)), 6.0f, 0,
 +                selected ? 3.0f : 1.5f);
++  }
++  else if (item.card != -1)
++  {
++    if (item.card == CARD_NEW)
++    {
++      dl->AddCircle(ImVec2(x, y), icon_h * 0.34f, text, 40, 4.0f);
++      dl->AddLine(ImVec2(x - icon_h * 0.16f, y), ImVec2(x + icon_h * 0.16f, y), text, 5.0f);
++      dl->AddLine(ImVec2(x, y - icon_h * 0.16f), ImVec2(x, y + icon_h * 0.16f), text, 5.0f);
++    }
++    else
++    {
++      const bool in_slot = m_cards[item.card].name == m_slot_a;
++      DrawMemoryCardIcon(dl, ImVec2(x, y), icon_h * 0.9f,
++                         in_slot ? Rgba(theme.wave, alpha) : Rgba(0x8A90A0, alpha),
++                         Rgba(0xFFFFFF, alpha * 0.85f));
++    }
 +  }
 +  else
 +  {
@@ -9900,7 +10597,14 @@ index 0000000..45dfea1
 +        dl->AddRectFilled(ImVec2(x0 + 30, ry - 4), ImVec2(W - 30, ry + 50),
 +                          Rgba(theme.wave, 0.30f * m_panel.slide), 10.0f);
 +      }
-+      Text(dl, sel ? m_bold : m_font, sel ? 32.0f : 30.0f, ImVec2(x0 + 60, ry + 4), text,
++      float label_x = x0 + 60;
++      if (row.icon != ImTextureID{})
++      {
++        dl->AddImage(ImTextureRef(row.icon), ImVec2(label_x, ry + 3), ImVec2(label_x + 40, ry + 43),
++                     ImVec2(0, 0), ImVec2(1, 1), IM_COL32(255, 255, 255, static_cast<int>(255 * m_panel.slide)));
++        label_x += 54;
++      }
++      Text(dl, sel ? m_bold : m_font, sel ? 32.0f : 30.0f, ImVec2(label_x, ry + 4), text,
 +           row.label);
 +      // Controls: the DualShock 4 control's icon instead of its name (names without an icon,
 +      // such as combinations, stay text).
@@ -9946,6 +10650,24 @@ index 0000000..45dfea1
 +        help = "Cross: open this folder.";
 +      else if (row.key == "usedir")
 +        help = "Cross: look for games in this folder.";
++      else if (row.key == "card:use")
++        help = "Cross: games use this card from their next start. Your other cards stay as they are.";
++      else if (row.key == "card:in")
++        help = "Games save to this card. Pick another card and put it in Slot A to switch.";
++      else if (row.key.rfind("save:", 0) == 0 && m_card_panel >= 0 &&
++               m_card_panel < static_cast<int>(m_cards.size()))
++      {
++        const auto& saves = m_cards[m_card_panel].saves;
++        const size_t index = std::strtoul(row.key.c_str() + 5, nullptr, 10);
++        if (index < saves.size())
++        {
++          const PS4MemoryCards::Save& save = saves[index];
++          help = save.description.empty() ? save.title : save.description;
++          help += "\n" + save.game_id + "  -  " + save.region + "  -  " +
++                  std::to_string(save.blocks) + (save.blocks == 1 ? " block" : " blocks") +
++                  "  -  saved " + DateText(save.modified);
++        }
++      }
 +      else if (row.key.rfind("cheat:", 0) == 0 || row.key.rfind("cheatall:", 0) == 0)
 +        help = "Applies the next time the game starts, or now from the in-game menu (L3+R3).";
 +      else if (row.scope)
@@ -10013,7 +10735,10 @@ index 0000000..45dfea1
 +
 +void Menu::Draw(float dt)
 +{
-+  DrawBackground();
++  if (Library())
++    DrawLibraryBackground();
++  else
++    DrawBackground();
 +  ImDrawList* dl = ImGui::GetForegroundDrawList();
 +  const Theme& theme = CurrentTheme();
 +
@@ -10021,71 +10746,82 @@ index 0000000..45dfea1
 +  for (int c = 0; c < CATEGORY_COUNT; c++)
 +    Approach(m_item_pos[c], static_cast<float>(m_selected[c]), 14.0f, dt);
 +
-+  // Categories: the selected one sits at x = 470, the others spaced to the left and right.
-+  const float row_y = 250.0f;
-+  const float spacing = 240.0f;
-+  for (int c = 0; c < CATEGORY_COUNT; c++)
++  if (Library())
 +  {
-+    const float offset = static_cast<float>(c) - m_category_pos;
-+    const float x = 470.0f + offset * spacing;
-+    const float focus = std::max(0.0f, 1.0f - std::abs(offset));
-+    const float size = 92.0f + 34.0f * focus;
-+    const float alpha = 0.55f + 0.45f * focus;
-+    DrawCategoryIcon(dl, static_cast<Category>(c), ImVec2(x, row_y), size,
-+                     Rgba(theme.text, alpha));
-+    if (focus > 0.05f)
-+    {
-+      const float tw = TextWidth(m_font, 32, CATEGORY_NAMES[c]);
-+      Text(dl, m_font, 32, ImVec2(x - tw * 0.5f, row_y + 76), Rgba(theme.text, focus),
-+           CATEGORY_NAMES[c]);
-+    }
++    DrawLibrary(dl, dt);
 +  }
++  else
++  {
++    // Categories: the selected one sits at x = 470, the others spaced to the left and right.
++    const float row_y = 250.0f;
++    const float spacing = 240.0f;
++    for (int c = 0; c < CATEGORY_COUNT; c++)
++    {
++      const float offset = static_cast<float>(c) - m_category_pos;
++      const float x = 470.0f + offset * spacing;
++      const float focus = std::max(0.0f, 1.0f - std::abs(offset));
++      const float size = 92.0f + 34.0f * focus;
++      const float alpha = 0.55f + 0.45f * focus;
++      DrawCategoryIcon(dl, static_cast<Category>(c), ImVec2(x, row_y), size,
++                       Rgba(theme.text, alpha));
++      if (focus > 0.05f)
++      {
++        const float tw = TextWidth(m_font, 32, CATEGORY_NAMES[c]);
++        Text(dl, m_font, 32, ImVec2(x - tw * 0.5f, row_y + 76), Rgba(theme.text, focus),
++             CATEGORY_NAMES[c]);
++      }
++    }
 +
-+  // Items of the selected category (blended into the neighbour while switching).
-+  const int c = m_category;
-+  const float switch_alpha = std::max(0.0f, 1.0f - std::abs(m_category_pos - c) * 2.0f);
-+  const auto& items = m_items[c];
-+  for (int i = 0; i < static_cast<int>(items.size()); i++)
-+  {
-+    const float rel = static_cast<float>(i) - m_item_pos[c];
-+    float y;
-+    float alpha;
-+    if (rel >= -0.5f)
++    // Items of the selected category (blended into the neighbour while switching).
++    const int c = m_category;
++    const float switch_alpha = std::max(0.0f, 1.0f - std::abs(m_category_pos - c) * 2.0f);
++    const auto& items = m_items[c];
++    for (int i = 0; i < static_cast<int>(items.size()); i++)
 +    {
-+      // The selected item and the ones after it, below the category row.
-+      y = 470.0f + rel * 120.0f + (rel > 0.5f ? 40.0f : rel * 80.0f);
-+      alpha = rel < 0.5f ? 1.0f : std::max(0.0f, 0.85f - (rel - 1.0f) * 0.12f);
++      const float rel = static_cast<float>(i) - m_item_pos[c];
++      float y;
++      float alpha;
++      if (rel >= -0.5f)
++      {
++        // The selected item and the ones after it, below the category row.
++        y = 470.0f + rel * 120.0f + (rel > 0.5f ? 40.0f : rel * 80.0f);
++        alpha = rel < 0.5f ? 1.0f : std::max(0.0f, 0.85f - (rel - 1.0f) * 0.12f);
++      }
++      else
++      {
++        // Earlier items, stacked above the category row.
++        y = 120.0f + (rel + 1.0f) * 100.0f;
++        alpha = std::max(0.0f, 0.55f + (rel + 1.0f) * 0.2f);
++      }
++      if (y < -80.0f || y > H + 80.0f || alpha <= 0.01f)
++        continue;
++      DrawItem(dl, items[i], y, i == m_selected[c], alpha * switch_alpha);
 +    }
-+    else
-+    {
-+      // Earlier items, stacked above the category row.
-+      y = 120.0f + (rel + 1.0f) * 100.0f;
-+      alpha = std::max(0.0f, 0.55f + (rel + 1.0f) * 0.2f);
-+    }
-+    if (y < -80.0f || y > H + 80.0f || alpha <= 0.01f)
-+      continue;
-+    DrawItem(dl, items[i], y, i == m_selected[c], alpha * switch_alpha);
-+  }
 +
-+  // Clock (top right).
-+  if (m_prefs.clock)
-+  {
-+    const std::time_t now = std::time(nullptr);
-+    std::tm local = {};
-+    localtime_r(&now, &local);
-+    char clock[32];
-+    std::strftime(clock, sizeof(clock), "%H:%M", &local);
-+    const float tw = TextWidth(m_bold, 40, clock);
-+    Text(dl, m_bold, 40, ImVec2(W - 110 - tw, 70), Rgba(theme.text, 0.95f), clock);
-+  }
-+  if (m_logo != ImTextureID{})
-+  {
-+    dl->AddImage(ImTextureRef(m_logo), ImVec2(80, 60), ImVec2(140, 120), ImVec2(0, 0),
-+                 ImVec2(1, 1), IM_COL32(255, 255, 255, 200));
++    // Clock (top right).
++    if (m_prefs.clock)
++    {
++      const std::time_t now = std::time(nullptr);
++      std::tm local = {};
++      localtime_r(&now, &local);
++      char clock[32];
++      std::strftime(clock, sizeof(clock), "%H:%M", &local);
++      const float tw = TextWidth(m_bold, 40, clock);
++      Text(dl, m_bold, 40, ImVec2(W - 110 - tw, 70), Rgba(theme.text, 0.95f), clock);
++    }
++    if (m_logo != ImTextureID{})
++    {
++      dl->AddImage(ImTextureRef(m_logo), ImVec2(80, 60), ImVec2(140, 120), ImVec2(0, 0),
++                   ImVec2(1, 1), IM_COL32(255, 255, 255, 200));
++    }
++
 +  }
 +
 +  DrawSidePanel(dl, dt);
-+  DrawHints(dl);
++  if (Library() && m_panel.slide < 0.5f)
++    DrawLibraryHints(dl);
++  else
++    DrawHints(dl);
 +
 +  // Fades: in at start, out when a game launches.
 +  if (m_launch >= 0)
@@ -10185,6 +10921,551 @@ index 0000000..45dfea1
 +    const ImVec2 at(W * 0.5f - tw / 2, H * 0.71f + 24.0f * (1.0f - q));
 +    dl->AddImage(ImTextureRef(m_intro_title), at, ImVec2(at.x + tw, at.y + th), ImVec2(0, 0),
 +                 ImVec2(1, 1), IM_COL32(255, 255, 255, alpha(q * vis)));
++  }
++}
++
++// ---------------------------------------------------------------------------------------------
++// The Library style: the theme's gradient over a grid floor, tabs on top (L1 / R1), the games as
++// a row of covers with the selected one in front, memory cards, and the settings as lists.
++
++void Menu::DrawLibraryBackground()
++{
++  ImDrawList* dl = ImGui::GetBackgroundDrawList();
++  const Theme& theme = CurrentTheme();
++  if (m_wallpaper != ImTextureID{})
++  {
++    dl->AddImage(ImTextureRef(m_wallpaper), ImVec2(0, 0), ImVec2(W, H));
++    dl->AddRectFilled(ImVec2(0, 0), ImVec2(W, H), IM_COL32(0, 0, 0, 110));
++    return;
++  }
++  const ImU32 top = Rgba(theme.top), bottom = Rgba(theme.bottom);
++  const float horizon = 600.0f;
++  dl->AddRectFilledMultiColor(ImVec2(0, 0), ImVec2(W, horizon), bottom, bottom, top, top);
++  dl->AddRectFilledMultiColor(ImVec2(0, horizon), ImVec2(W, H), top, top, bottom, bottom);
++  // A soft light behind the covers.
++  for (int i = 0; i < 7; i++)
++  {
++    dl->AddEllipseFilled(ImVec2(W * 0.5f, horizon), ImVec2(260.0f + i * 120.0f, 90.0f + i * 34.0f),
++                         Rgba(theme.wave, 0.035f), 0.0f, 64);
++  }
++  // The floor: lines towards a vanishing point, and rows that get closer near the horizon; the
++  // rows drift slowly towards the viewer.
++  const ImVec2 vanish(W * 0.5f, horizon - 120.0f);
++  for (int i = -14; i <= 14; i++)
++  {
++    const float x = W * 0.5f + i * 190.0f;
++    const float t = (horizon - vanish.y) / (H - vanish.y);
++    const ImVec2 start(vanish.x + (x - vanish.x) * t, horizon);
++    dl->AddLine(start, ImVec2(x, H), Rgba(theme.wave, 0.10f), 1.5f);
++  }
++  const float drift = std::fmod(m_time * 0.08f, 1.0f);
++  for (int i = 0; i < 14; i++)
++  {
++    const float k = (static_cast<float>(i) + drift) / 14.0f;
++    const float y = horizon + (H - horizon) * k * k;
++    dl->AddLine(ImVec2(0, y), ImVec2(W, y), Rgba(theme.wave, 0.03f + 0.10f * k), 1.5f);
++  }
++  dl->AddLine(ImVec2(0, horizon), ImVec2(W, horizon), Rgba(theme.wave, 0.22f), 2.0f);
++}
++
++// A cover (or, without one, a tile with the platform and the title) on the quad a-b-c-d
++// (top left, top right, bottom right, bottom left), with its reflection on the floor.
++// focus: 2 = the selected game, 1 = the others.
++void Menu::DrawCover(ImDrawList* dl, const Game& game, ImVec2 a, ImVec2 b, ImVec2 c, ImVec2 d,
++                     float alpha, int focus)
++{
++  const Theme& theme = CurrentTheme();
++  const int a255 = static_cast<int>(std::clamp(alpha, 0.0f, 1.0f) * 255.0f);
++  const ImU32 white = IM_COL32(255, 255, 255, a255);
++  const float h = d.y - a.y;
++  // Shadow.
++  dl->AddQuadFilled(ImVec2(a.x + 8, a.y + 12), ImVec2(b.x + 8, b.y + 12), ImVec2(c.x + 8, c.y + 12),
++                    ImVec2(d.x + 8, d.y + 12), IM_COL32(0, 0, 0, a255 * 45 / 100));
++  if (focus == 2)
++  {
++    // Glow around the selected cover.
++    for (int i = 6; i >= 1; i--)
++    {
++      const float g = i * 4.0f;
++      dl->AddQuad(ImVec2(a.x - g, a.y - g), ImVec2(b.x + g, b.y - g), ImVec2(c.x + g, c.y + g),
++                  ImVec2(d.x - g, d.y + g), Rgba(theme.wave, alpha * 0.07f * (7 - i)), 5.0f);
++    }
++  }
++  if (game.cover != ImTextureID{})
++  {
++    dl->AddImageQuad(ImTextureRef(game.cover), a, b, c, d, ImVec2(0, 0), ImVec2(1, 0), ImVec2(1, 1),
++                     ImVec2(0, 1), white);
++    // Reflection: the cover upside down under it, fading out.
++    const float r = 0.30f;
++    const ImVec2 ra(d.x, d.y + 6), rb(c.x, c.y + 6);
++    const ImVec2 rc(c.x + (c.x - b.x) * 0.0f, c.y + 6 + (c.y - b.y) * r),
++        rd(d.x, d.y + 6 + (d.y - a.y) * r);
++    ImageQuadColors(dl, game.cover, ra, rb, rc, rd, ImVec2(0, 1), ImVec2(1, 1), ImVec2(1, 1 - r),
++                    ImVec2(0, 1 - r), IM_COL32(255, 255, 255, a255 * 28 / 100),
++                    IM_COL32(255, 255, 255, a255 * 28 / 100), IM_COL32(255, 255, 255, 0),
++                    IM_COL32(255, 255, 255, 0));
++  }
++  else
++  {
++    const ImU32 tile_top = game.wii ? Rgba(0xF4F6F8, alpha) : Rgba(0x5B3FC4, alpha);
++    const ImU32 tile_bottom = game.wii ? Rgba(0xC8D0DA, alpha) : Rgba(0x2A1C66, alpha);
++    QuadMultiColor(dl, a, b, c, d, tile_top, tile_top, tile_bottom, tile_bottom);
++    const ImTextureID platform = game.wii ? m_icon_wii : m_icon_gc;
++    const float cx = (a.x + b.x) * 0.5f, cy = a.y + h * 0.36f, s = (b.x - a.x) * 0.42f;
++    if (platform != ImTextureID{})
++    {
++      dl->AddImage(ImTextureRef(platform), ImVec2(cx - s, cy - s), ImVec2(cx + s, cy + s),
++                   ImVec2(0, 0), ImVec2(1, 1),
++                   game.wii ? IM_COL32(60, 70, 85, a255) : IM_COL32(255, 255, 255, a255));
++    }
++    const ImU32 ink = game.wii ? IM_COL32(40, 46, 56, a255) : white;
++    const float size = std::max(18.0f, h * 0.075f);
++    dl->AddText(m_bold, size, ImVec2(a.x + 14, a.y + h * 0.66f), ink, game.title.c_str(), nullptr,
++                b.x - a.x - 28);
++  }
++  // Frame: bright for the selected game, the platform's colour for the others.
++  if (focus == 2)
++  {
++    dl->AddQuad(a, b, c, d, Rgba(theme.wave, alpha), 5.0f);
++    dl->AddQuad(ImVec2(a.x + 4, a.y + 4), ImVec2(b.x - 4, b.y + 4), ImVec2(c.x - 4, c.y - 4),
++                ImVec2(d.x + 4, d.y - 4), Rgba(0xFFFFFF, alpha * 0.55f), 1.5f);
++  }
++  else
++  {
++    dl->AddQuad(a, b, c, d, game.wii ? Rgba(0xDDE6F0, alpha * 0.55f) : Rgba(0x8C6CFF, alpha * 0.8f),
++                3.0f);
++  }
++}
++
++void Menu::DrawLibrary(ImDrawList* dl, float dt)
++{
++  const Theme& theme = CurrentTheme();
++  const int tab = LibraryTab();
++  Approach(m_tab_pos, static_cast<float>(tab), 14.0f, dt);
++  if (m_sort_shown > 0.0f)
++    m_sort_shown -= dt;
++
++  // Top bar: the logo, the tabs between L1 and R1, the clock.
++  if (m_logo != ImTextureID{})
++  {
++    dl->AddImage(ImTextureRef(m_logo), ImVec2(70, 46), ImVec2(136, 112), ImVec2(0, 0), ImVec2(1, 1),
++                 IM_COL32(255, 255, 255, 235));
++  }
++  {
++    float x = 152.0f;
++    for (const char ch : std::string("DOLPHIN"))
++    {
++      const std::string letter(1, ch);
++      Text(dl, m_bold, 30, ImVec2(x, 62), Rgba(theme.text, 0.95f), letter);
++      x += TextWidth(m_bold, 30, letter) + 7.0f;
++    }
++  }
++  constexpr float TAB_FONT = 28.0f, TAB_PAD = 34.0f, BAR_Y = 52.0f, BAR_H = 58.0f;
++  float tab_x[TAB_COUNT], tab_w[TAB_COUNT], total = 0.0f;
++  for (int i = 0; i < TAB_COUNT; i++)
++  {
++    tab_w[i] = TextWidth(m_bold, TAB_FONT, TAB_NAMES[i]) + TAB_PAD * 2;
++    total += tab_w[i];
++  }
++  const float bar_x = W * 0.5f - total * 0.5f;
++  {
++    float x = bar_x;
++    for (int i = 0; i < TAB_COUNT; i++)
++    {
++      tab_x[i] = x;
++      x += tab_w[i];
++    }
++  }
++  dl->AddRectFilled(ImVec2(bar_x - 8, BAR_Y - 6), ImVec2(bar_x + total + 8, BAR_Y + BAR_H + 6),
++                    Rgba(0x000000, 0.28f), 16.0f);
++  dl->AddRect(ImVec2(bar_x - 8, BAR_Y - 6), ImVec2(bar_x + total + 8, BAR_Y + BAR_H + 6),
++              Rgba(theme.text, 0.14f), 16.0f, 0, 1.5f);
++  {
++    // The highlight slides between the tabs.
++    const int i0 = std::clamp(static_cast<int>(std::floor(m_tab_pos)), 0, TAB_COUNT - 1);
++    const int i1 = std::min(i0 + 1, TAB_COUNT - 1);
++    const float f = std::clamp(m_tab_pos - i0, 0.0f, 1.0f);
++    const float hx = tab_x[i0] + (tab_x[i1] - tab_x[i0]) * f;
++    const float hw = tab_w[i0] + (tab_w[i1] - tab_w[i0]) * f;
++    const ImVec2 h0(hx + 2, BAR_Y), h1(hx + hw - 2, BAR_Y + BAR_H);
++    dl->AddRectFilledMultiColor(h0, h1, Rgba(theme.wave, 0.55f), Rgba(theme.wave, 0.55f),
++                                Rgba(theme.wave, 0.30f), Rgba(theme.wave, 0.30f));
++    dl->AddRect(h0, h1, Rgba(theme.wave, 0.95f), 12.0f, 0, 2.0f);
++  }
++  for (int i = 0; i < TAB_COUNT; i++)
++  {
++    const bool sel = i == tab;
++    Text(dl, sel ? m_bold : m_font, TAB_FONT, ImVec2(tab_x[i] + TAB_PAD, BAR_Y + 12),
++         Rgba(theme.text, sel ? 1.0f : 0.72f), TAB_NAMES[i], sel);
++  }
++  PS4Glyphs::Draw(dl, m_bold, "L1", bar_x - 8 - 30 - PS4Glyphs::Width("L1", 40), BAR_Y + BAR_H * 0.5f,
++                  40, 0.9f);
++  PS4Glyphs::Draw(dl, m_bold, "R1", bar_x + total + 8 + 30, BAR_Y + BAR_H * 0.5f, 40, 0.9f);
++  if (m_prefs.clock)
++  {
++    const std::time_t now = std::time(nullptr);
++    std::tm local = {};
++    localtime_r(&now, &local);
++    char clock[32];
++    std::strftime(clock, sizeof(clock), "%H:%M", &local);
++    const float tw = TextWidth(m_bold, 36, clock);
++    Text(dl, m_bold, 36, ImVec2(W - 90 - tw, 62), Rgba(theme.text, 0.95f), clock);
++  }
++
++  // The tab's page; it fades in while the highlight moves.
++  const float alpha = std::clamp(1.0f - std::abs(m_tab_pos - tab) * 1.6f, 0.0f, 1.0f);
++  switch (TABS[tab])
++  {
++  case Category::Games:
++    DrawLibraryGames(dl, alpha);
++    break;
++  case Category::MemoryCards:
++    DrawLibraryCards(dl, alpha);
++    break;
++  default:
++    DrawLibraryList(dl, alpha);
++    break;
++  }
++}
++
++void Menu::DrawLibraryGames(ImDrawList* dl, float alpha)
++{
++  const Theme& theme = CurrentTheme();
++  const int c = static_cast<int>(Category::Games);
++  const auto& items = m_items[c];
++  const int count = static_cast<int>(items.size());
++  const bool any = count > 0 && items[0].game >= 0;
++  Text(dl, m_bold, 50, ImVec2(90, 150), Rgba(theme.text, alpha), "Your games");
++  std::string sub = any ? std::to_string(count) + (count == 1 ? " game" : " games") : "No games yet";
++  if (any)
++    sub += "  -  " + SortName();
++  Text(dl, m_bold, 26, ImVec2(92, 214), Rgba(theme.wave, alpha * (m_sort_shown > 0.0f ? 1.0f : 0.85f)),
++       sub, false);
++  if (!any)
++  {
++    const std::string line1 = "Copy your games to " + GamesFolder();
++    const std::string line2 = "then press Square to look again (or pick a folder in Settings).";
++    Text(dl, m_bold, 36, ImVec2(W * 0.5f - TextWidth(m_bold, 36, line1) * 0.5f, 470),
++         Rgba(theme.text, alpha), line1);
++    Text(dl, m_font, 28, ImVec2(W * 0.5f - TextWidth(m_font, 28, line2) * 0.5f, 530),
++         Rgba(theme.text, alpha * 0.75f), line2);
++    return;
++  }
++
++  // The row: neighbours smaller and turned slightly towards the middle, farther ones behind.
++  const float pos = m_item_pos[c];
++  const int selected = m_selected[c];
++  constexpr float BASE_H = 420.0f, FLOOR_Y = 720.0f;
++  std::vector<std::pair<float, int>> order;
++  for (int i = 0; i < count; i++)
++  {
++    const float d = static_cast<float>(i) - pos;
++    if (std::abs(d) < 6.5f)
++      order.push_back({std::abs(d), i});
++  }
++  std::sort(order.begin(), order.end(), [](const auto& x, const auto& y) { return x.first > y.first; });
++  float selected_top = FLOOR_Y - BASE_H;
++  for (const auto& [ad, i] : order)
++  {
++    const Game& game = m_games[items[i].game];
++    const float d = static_cast<float>(i) - pos;
++    const float near = std::min(ad, 1.0f), far = std::max(0.0f, ad - 1.0f);
++    const float scale = 1.0f - 0.24f * near - 0.05f * far;
++    const float h = BASE_H * scale;
++    const float aspect = game.cover != ImTextureID{} ? std::clamp(game.cover_aspect, 0.55f, 1.0f) : 0.7f;
++    const float w = h * aspect;
++    const float side = d < 0.0f ? -1.0f : 1.0f;
++    const float cx = W * 0.5f + side * (near * 320.0f + far * 230.0f);
++    const float bottom = FLOOR_Y - 14.0f * near;
++    // The outer edge a little shorter: the cover faces the middle.
++    const float tilt = h * 0.045f * near;
++    ImVec2 a(cx - w * 0.5f, bottom - h), b(cx + w * 0.5f, bottom - h);
++    ImVec2 cc(cx + w * 0.5f, bottom), dd(cx - w * 0.5f, bottom);
++    if (side > 0)
++    {
++      b.y += tilt;
++      cc.y -= tilt;
++    }
++    else
++    {
++      a.y += tilt;
++      dd.y -= tilt;
++    }
++    const float fade = std::clamp((6.0f - ad) / 1.5f, 0.0f, 1.0f);
++    const float dim = 1.0f - 0.22f * near;
++    DrawCover(dl, game, a, b, cc, dd, alpha * fade * dim, i == selected && ad < 0.5f ? 2 : 1);
++    if (i == selected)
++      selected_top = a.y;
++  }
++
++  // Triangle above the selected cover (its options), its title, platform, last played, Play.
++  const float pulse = 0.65f + 0.35f * std::sin(m_time * 3.0f);
++  const float gw = PS4Glyphs::Width("Triangle", 40);
++  PS4Glyphs::Draw(dl, m_bold, "Triangle", W * 0.5f - gw * 0.5f, selected_top - 44, 40, alpha * pulse);
++  const Game& game = m_games[items[selected].game];
++  const float title_size = TextWidth(m_bold, 46, game.title) > W - 200 ? 36.0f : 46.0f;
++  const float tw = TextWidth(m_bold, title_size, game.title);
++  Text(dl, m_bold, title_size, ImVec2(W * 0.5f - tw * 0.5f, 800), Rgba(theme.text, alpha), game.title);
++  std::string info = std::string(game.wii ? "Wii" : "GameCube") + "  -  " + PlayedText(Played(game.path));
++  if (game.discs > 1)
++    info += "  -  " + std::to_string(game.discs) + " discs";
++  const float iw = TextWidth(m_font, 26, info);
++  Text(dl, m_font, 26, ImVec2(W * 0.5f - iw * 0.5f, 860), Rgba(theme.text, alpha * 0.72f), info);
++  const float bw = 210.0f, bh = 62.0f, by = 908.0f;
++  const ImVec2 b0(W * 0.5f - bw * 0.5f, by), b1(W * 0.5f + bw * 0.5f, by + bh);
++  dl->AddRectFilled(b0, b1, Rgba(theme.wave, alpha * 0.18f), 14.0f);
++  dl->AddRect(b0, b1, Rgba(theme.wave, alpha * 0.95f), 14.0f, 0, 2.5f);
++  const float cw = PS4Glyphs::Width("Cross", 38);
++  const float pw = TextWidth(m_bold, 32, "Play");
++  const float px = W * 0.5f - (cw + 14 + pw) * 0.5f;
++  PS4Glyphs::Draw(dl, m_bold, "Cross", px, by + bh * 0.5f, 38, alpha);
++  Text(dl, m_bold, 32, ImVec2(px + cw + 14, by + 12), Rgba(theme.text, alpha), "Play");
++}
++
++void Menu::DrawLibraryCards(ImDrawList* dl, float alpha)
++{
++  const Theme& theme = CurrentTheme();
++  const int c = static_cast<int>(Category::MemoryCards);
++  const auto& items = m_items[c];
++  const int selected = m_selected[c];
++  Text(dl, m_bold, 50, ImVec2(90, 150), Rgba(theme.text, alpha), "Memory Cards");
++  Text(dl, m_bold, 26, ImVec2(92, 214), Rgba(theme.wave, alpha * 0.85f), "Slot A: " + m_slot_a, false);
++
++  // The cards, top to bottom (the list scrolls with the selection).
++  constexpr float LIST_X = 90.0f, LIST_W = 600.0f, ROW_H = 118.0f, TOP = 280.0f, BOTTOM = 960.0f;
++  const float visible = (BOTTOM - TOP) / ROW_H;
++  const float scroll = std::clamp(m_item_pos[c] - visible * 0.5f + 0.5f, 0.0f,
++                                  std::max(0.0f, static_cast<float>(items.size()) - visible));
++  dl->PushClipRect(ImVec2(0, TOP - 20), ImVec2(W, BOTTOM + 10), true);
++  for (int i = 0; i < static_cast<int>(items.size()); i++)
++  {
++    const Item& item = items[i];
++    const float y = TOP + (static_cast<float>(i) - scroll) * ROW_H;
++    if (y < TOP - ROW_H || y > BOTTOM)
++      continue;
++    const bool sel = i == selected;
++    const ImVec2 r0(LIST_X, y), r1(LIST_X + LIST_W, y + ROW_H - 18);
++    dl->AddRectFilled(r0, r1, sel ? Rgba(theme.wave, alpha * 0.20f) : Rgba(0x000000, alpha * 0.25f), 14.0f);
++    dl->AddRect(r0, r1, sel ? Rgba(theme.wave, alpha) : Rgba(theme.text, alpha * 0.12f), 14.0f, 0,
++                sel ? 2.5f : 1.5f);
++    const ImVec2 icon(LIST_X + 58, y + (ROW_H - 18) * 0.5f);
++    if (item.card == CARD_NEW)
++    {
++      dl->AddCircle(icon, 28, Rgba(theme.text, alpha), 40, 3.5f);
++      dl->AddLine(ImVec2(icon.x - 13, icon.y), ImVec2(icon.x + 13, icon.y), Rgba(theme.text, alpha), 4.0f);
++      dl->AddLine(ImVec2(icon.x, icon.y - 13), ImVec2(icon.x, icon.y + 13), Rgba(theme.text, alpha), 4.0f);
++    }
++    else
++    {
++      const bool in_slot = m_cards[item.card].name == m_slot_a;
++      DrawMemoryCardIcon(dl, icon, 72, in_slot ? Rgba(theme.wave, alpha) : Rgba(0x8A90A0, alpha),
++                         Rgba(0xFFFFFF, alpha * 0.85f));
++    }
++    Text(dl, m_bold, 32, ImVec2(LIST_X + 110, y + 14), Rgba(theme.text, alpha), item.label);
++    std::string detail = item.detail;
++    if (item.card >= 0)
++    {
++      const auto& card = m_cards[item.card];
++      const size_t saves = card.saves.size();
++      detail = std::to_string(saves) + (saves == 1 ? " save" : " saves") + "  -  " +
++               std::to_string(card.blocks) + " blocks";
++      if (card.name == m_slot_a)
++      {
++        // A green SLOT A tag.
++        const float tw = TextWidth(m_bold, 22, "SLOT A");
++        const ImVec2 t0(LIST_X + LIST_W - tw - 54, y + 18), t1(LIST_X + LIST_W - 24, y + 52);
++        dl->AddRectFilled(t0, t1, Rgba(0x28AA5A, alpha * 0.9f), 17.0f);
++        Text(dl, m_bold, 22, ImVec2(t0.x + 15, t0.y + 4), Rgba(0xFFFFFF, alpha), "SLOT A", false);
++      }
++    }
++    Text(dl, m_font, 25, ImVec2(LIST_X + 110, y + 58), Rgba(theme.text, alpha * 0.72f), detail);
++  }
++  dl->PopClipRect();
++
++  // The selected card's saves on the right.
++  constexpr float PANE_X = 760.0f, PANE_R = W - 90.0f;
++  dl->AddRectFilled(ImVec2(PANE_X, TOP - 20), ImVec2(PANE_R, BOTTOM - 8), Rgba(0x000000, alpha * 0.28f), 18.0f);
++  dl->AddRect(ImVec2(PANE_X, TOP - 20), ImVec2(PANE_R, BOTTOM - 8), Rgba(theme.text, alpha * 0.10f), 18.0f, 0, 1.5f);
++  if (items.empty())
++    return;
++  const Item& item = items[selected];
++  if (item.card == CARD_NEW)
++  {
++    const char* lines[] = {"A new, empty memory card.",
++                           "",
++                           "Put it in Slot A to start fresh saves - for a second",
++                           "playthrough, or to share the console with someone.",
++                           "Your other cards and their saves stay as they are,",
++                           "and you can switch back at any time.",
++                           "",
++                           "Press Cross to create it."};
++    float y = TOP + 20;
++    for (const char* line : lines)
++    {
++      Text(dl, m_font, 30, ImVec2(PANE_X + 40, y), Rgba(theme.text, alpha * 0.85f), line);
++      y += 46;
++    }
++    return;
++  }
++  const PS4MemoryCards::Card& card = m_cards[item.card];
++  Text(dl, m_bold, 32, ImVec2(PANE_X + 40, TOP + 4), Rgba(theme.text, alpha), "Saves on " + card.name);
++  if (card.saves.empty())
++  {
++    Text(dl, m_font, 28, ImVec2(PANE_X + 40, TOP + 70), Rgba(theme.text, alpha * 0.7f),
++         "No saves yet. Put the card in Slot A and save in a game.");
++    return;
++  }
++  const float row_h = 82.0f;
++  const int fits = static_cast<int>((BOTTOM - TOP - 140) / row_h);
++  const int shown = std::min(fits, static_cast<int>(card.saves.size()));
++  for (int i = 0; i < shown; i++)
++  {
++    const PS4MemoryCards::Save& save = card.saves[i];
++    const float y = TOP + 64 + i * row_h;
++    const ImVec2 i0(PANE_X + 40, y), i1(PANE_X + 104, y + 64);
++    const ImTextureID icon = SaveIcon(item.card, i);
++    if (icon != ImTextureID{})
++    {
++      dl->AddImage(ImTextureRef(icon), i0, i1, ImVec2(0, 0), ImVec2(1, 1),
++                   IM_COL32(255, 255, 255, static_cast<int>(alpha * 255)));
++    }
++    else
++    {
++      dl->AddRectFilled(i0, i1, Rgba(0x8A90A0, alpha * 0.5f), 8.0f);
++    }
++    std::string title = save.title;
++    while (title.size() > 4 && TextWidth(m_bold, 28, title) > PANE_R - PANE_X - 470)
++      title = title.substr(0, title.size() - 4) + "...";
++    Text(dl, m_bold, 28, ImVec2(PANE_X + 124, y + 2), Rgba(theme.text, alpha), title);
++    std::string desc = save.description;
++    while (desc.size() > 4 && TextWidth(m_font, 23, desc) > PANE_R - PANE_X - 470)
++      desc = desc.substr(0, desc.size() - 4) + "...";
++    Text(dl, m_font, 23, ImVec2(PANE_X + 124, y + 38), Rgba(theme.text, alpha * 0.65f), desc);
++    const std::string blocks = std::to_string(save.blocks) + (save.blocks == 1 ? " block" : " blocks");
++    const std::string date = DateText(save.modified);
++    Text(dl, m_font, 24, ImVec2(PANE_R - 40 - TextWidth(m_font, 24, blocks), y + 4),
++         Rgba(theme.text, alpha * 0.8f), blocks);
++    Text(dl, m_font, 22, ImVec2(PANE_R - 40 - TextWidth(m_font, 22, date), y + 38),
++         Rgba(theme.text, alpha * 0.55f), date);
++  }
++  if (static_cast<int>(card.saves.size()) > shown)
++  {
++    const std::string more = "+ " + std::to_string(card.saves.size() - shown) +
++                             " more - press Cross to see them all";
++    Text(dl, m_font, 26, ImVec2(PANE_X + 40, TOP + 64 + shown * row_h + 6),
++         Rgba(theme.wave, alpha * 0.9f), more);
++  }
++}
++
++// Settings and Themes: a list of rows, scrolling with the selection.
++void Menu::DrawLibraryList(ImDrawList* dl, float alpha)
++{
++  const Theme& theme = CurrentTheme();
++  const int c = m_category;
++  const auto& items = m_items[c];
++  const bool themes = c == static_cast<int>(Category::Themes);
++  Text(dl, m_bold, 50, ImVec2(90, 150), Rgba(theme.text, alpha), themes ? "Themes" : "Settings");
++  Text(dl, m_bold, 26, ImVec2(92, 214), Rgba(theme.wave, alpha * 0.85f),
++       themes ? "Colours and wallpapers (PNG in " + m_data_dir + "/themes)" :
++                "Emulation, controls, updates and more",
++       false);
++  constexpr float X = 90.0f, ROW_H = 84.0f, TOP = 280.0f, BOTTOM = 960.0f;
++  const float right = W - 90.0f;
++  const float visible = (BOTTOM - TOP) / ROW_H;
++  const float scroll = std::clamp(m_item_pos[c] - visible * 0.5f + 0.5f, 0.0f,
++                                  std::max(0.0f, static_cast<float>(items.size()) - visible));
++  dl->PushClipRect(ImVec2(0, TOP - 20), ImVec2(W, BOTTOM + 10), true);
++  for (int i = 0; i < static_cast<int>(items.size()); i++)
++  {
++    const Item& item = items[i];
++    const float y = TOP + (static_cast<float>(i) - scroll) * ROW_H;
++    if (y < TOP - ROW_H || y > BOTTOM)
++      continue;
++    const bool sel = i == m_selected[c];
++    const ImVec2 r0(X, y), r1(right, y + ROW_H - 12);
++    if (sel)
++    {
++      dl->AddRectFilled(r0, r1, Rgba(theme.wave, alpha * 0.20f), 14.0f);
++      dl->AddRect(r0, r1, Rgba(theme.wave, alpha), 14.0f, 0, 2.5f);
++    }
++    else
++    {
++      dl->AddRectFilled(r0, r1, Rgba(0x000000, alpha * 0.22f), 14.0f);
++    }
++    float tx = X + 34;
++    if (item.theme != -1)
++    {
++      // Swatch.
++      const ImVec2 s0(X + 24, y + 12), s1(X + 144, y + ROW_H - 24);
++      if (item.theme >= 0)
++      {
++        const Theme& t = THEMES[item.theme];
++        dl->AddRectFilledMultiColor(s0, s1, Rgba(t.top, alpha), Rgba(t.top, alpha),
++                                    Rgba(t.bottom, alpha), Rgba(t.bottom, alpha));
++        dl->AddLine(ImVec2(s0.x + 10, s1.y - 14), ImVec2(s1.x - 10, s0.y + 14), Rgba(t.wave, alpha), 4.0f);
++      }
++      else
++      {
++        dl->AddRectFilled(s0, s1, Rgba(0x404650, alpha), 6.0f);
++        Text(dl, m_bold, 22, ImVec2(s0.x + 34, s0.y + 12), Rgba(0xFFFFFF, alpha), "PNG", false);
++      }
++      dl->AddRect(s0, s1, Rgba(theme.text, alpha * 0.4f), 6.0f, 0, 1.5f);
++      tx = X + 170;
++    }
++    Text(dl, sel ? m_bold : m_font, 32, ImVec2(tx, y + 18), Rgba(theme.text, alpha), item.label);
++    const float dw = TextWidth(m_font, 26, item.detail);
++    Text(dl, m_font, 26, ImVec2(right - 34 - dw, y + 22), Rgba(theme.text, alpha * 0.7f), item.detail);
++  }
++  dl->PopClipRect();
++}
++
++void Menu::DrawLibraryHints(ImDrawList* dl)
++{
++  const Theme& theme = CurrentTheme();
++  const float y = H - 62.0f;
++  const ImU32 text = Rgba(theme.text, 0.85f);
++  dl->AddLine(ImVec2(70, y - 46), ImVec2(W - 70, y - 46), Rgba(theme.text, 0.10f), 1.5f);
++  // Left: browse and select; right: the tab's other buttons.
++  float x = 90.0f;
++  auto left = [&](const char* glyph, const std::string& label) {
++    x += PS4Glyphs::Draw(dl, m_bold, glyph, x, y, 36, 0.9f) + 12;
++    Text(dl, m_font, 28, ImVec2(x, y - 17), text, label);
++    x += TextWidth(m_font, 28, label) + 44;
++  };
++  const bool games = m_category == static_cast<int>(Category::Games);
++  const auto& items = m_items[m_category];
++  const bool has_game = games && !items.empty() && items[0].game >= 0;
++  left("D-Pad", "Browse");
++  if (games)
++    left("Cross", "Play");
++  else if (m_category == static_cast<int>(Category::MemoryCards))
++    left("Cross", !items.empty() && items[m_selected[m_category]].card == CARD_NEW ? "Create" : "Open");
++  else
++    left("Cross", "Select");
++  if (has_game)
++  {
++    char counter[32];
++    snprintf(counter, sizeof(counter), "%02d / %02d", m_selected[m_category] + 1,
++             static_cast<int>(items.size()));
++    const float cw = TextWidth(m_bold, 28, counter);
++    Text(dl, m_bold, 28, ImVec2(W * 0.5f - cw * 0.5f, y - 17), Rgba(theme.text, 0.7f), counter);
++  }
++  float rx = W - 90.0f;
++  auto right = [&](const char* glyph, const std::string& label) {
++    const float lw = TextWidth(m_font, 28, label);
++    rx -= lw;
++    Text(dl, m_font, 28, ImVec2(rx, y - 17), text, label);
++    const float gw = PS4Glyphs::Width(glyph, 36);
++    rx -= gw + 12;
++    PS4Glyphs::Draw(dl, m_bold, glyph, rx, y, 36, 0.9f);
++    rx -= 44;
++  };
++  if (games)
++  {
++    right("Options", "Sort");
++    right("Square", "Refresh");
++    if (has_game)
++      right("Triangle", "Options");
 +  }
 +}
 +
@@ -10455,6 +11736,8 @@ index 0000000..45dfea1
 +  m_audio.Start(user);
 +  m_input.Open(user);
 +  LoadAssets();
++  LoadPlayed();
++  LoadCards();
 +  ApplyPreferences();
 +  BuildItems();
 +  // Start on the game played last.
@@ -10467,6 +11750,7 @@ index 0000000..45dfea1
 +      m_item_pos[static_cast<int>(Category::Games)] = static_cast<float>(i);
 +    }
 +  }
++  m_tab_pos = static_cast<float>(LibraryTab());
 +  RemoveOldUpdates();
 +  if (m_prefs.auto_update)
 +    StartUpdateCheck(false);
@@ -11212,7 +12496,7 @@ index 0000000..f15dbc7
 +};
 +}  // namespace PS4XMB
 diff --git a/Source/Core/DolphinNoGUI/Platform.h b/Source/Core/DolphinNoGUI/Platform.h
-index f4dc8a9..121376e 100644
+index f4dc8a9..0c37736 100644
 --- a/Source/Core/DolphinNoGUI/Platform.h
 +++ b/Source/Core/DolphinNoGUI/Platform.h
 @@ -5,6 +5,7 @@
@@ -11223,7 +12507,7 @@ index f4dc8a9..121376e 100644
  
  #include "Common/Flag.h"
  #include "Common/WindowSystemInfo.h"
-@@ -47,6 +48,18 @@ public:
+@@ -47,6 +48,20 @@ public:
    static std::unique_ptr<Platform> CreateMacOSPlatform();
  #endif
  
@@ -11237,6 +12521,8 @@ index f4dc8a9..121376e 100644
 +  static std::string GetPS4Option(const std::string& key, const std::string& default_value);
 +  // One GameCube port / Wii Remote per connected DualShock 4 (up to 4 players).
 +  static void ApplyPS4Players();
++  // The memory card the menus put in Slot A (PS4MemoryCards), before a game starts.
++  static void ApplyPS4MemoryCards();
 +#endif
 +
  protected:
@@ -11244,10 +12530,10 @@ index f4dc8a9..121376e 100644
  
 diff --git a/Source/Core/DolphinNoGUI/PlatformPS4.cpp b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
 new file mode 100644
-index 0000000..1beba90
+index 0000000..74c002b
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
-@@ -0,0 +1,1225 @@
+@@ -0,0 +1,1232 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -11285,6 +12571,7 @@ index 0000000..1beba90
 +#include "Common/Config/Config.h"
 +#include "DolphinNoGUI/PS4Controls.h"
 +#include "DolphinNoGUI/PS4IngameMenu.h"
++#include "DolphinNoGUI/PS4MemoryCards.h"
 +#include "DolphinNoGUI/PS4Settings.h"
 +#include "DolphinNoGUI/PS4XMB.h"
 +#include "DiscIO/Volume.h"
@@ -12293,6 +13580,12 @@ index 0000000..1beba90
 +      Config::SetBase(Config::GetInfoForWiimoteSource(i), source);
 +  }
 +  BootTrace(fmt::format("players: {} (GameCube ports / Wii Remotes in use)", players).c_str());
++}
++
++void Platform::ApplyPS4MemoryCards()
++{
++  PS4MemoryCards::ApplySlotA(PS4_DATA_DIR_PATH);
++  BootTrace(("memory card in Slot A: " + PS4MemoryCards::SlotA(PS4_DATA_DIR_PATH)).c_str());
 +}
 +
 +// The signed-in users, to notice a player joining or leaving (cheap; checked about once a
