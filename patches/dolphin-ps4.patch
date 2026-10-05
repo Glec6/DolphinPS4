@@ -8941,10 +8941,10 @@ index 0000000..914dbb5
 +}  // namespace PS4Updater
 diff --git a/Source/Core/DolphinNoGUI/PS4XMB.cpp b/Source/Core/DolphinNoGUI/PS4XMB.cpp
 new file mode 100755
-index 0000000..f741266
+index 0000000..440f0df
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4XMB.cpp
-@@ -0,0 +1,3880 @@
+@@ -0,0 +1,3886 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -9462,6 +9462,7 @@ index 0000000..f741266
 +  std::string title;
 +  bool wii = false;
 +  bool wad = false;  // WiiWare / Virtual Console / channel (a .wad file)
++  bool homebrew = false;  // a .dol / .elf program
 +  int discs = 1;
 +  uint16_t revision = 0;
 +  ImTextureID banner{};
@@ -9771,7 +9772,8 @@ index 0000000..f741266
 +    game.id = disc.game_id;
 +    game.revision = disc.revision;
 +    game.wad = disc.wad;
-+    game.wii = disc.wad;
++    game.homebrew = disc.homebrew;
++    game.wii = disc.wad || disc.wii;
 +    game.title = disc.title.empty() ? std::filesystem::path(disc.path).stem().string() : disc.title;
 +    for (const std::string& id : {disc.game_id, disc.game_id.substr(0, 4)})
 +    {
@@ -9855,6 +9857,8 @@ index 0000000..f741266
 +{
 +  for (Game& game : m_games)
 +  {
++    if (game.homebrew)
++      continue;  // no banner in a program file
 +    // GameCube discs and Wii title packages carry a banner; Wii discs only in a NAND.
 +    std::unique_ptr<DiscIO::Volume> volume =
 +        game.wad ? std::unique_ptr<DiscIO::Volume>(DiscIO::CreateWAD(game.path)) :
@@ -9934,7 +9938,8 @@ index 0000000..f741266
 +    std::string lower = name;
 +    std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
 +    for (const char* extension :
-+         {".iso", ".gcm", ".ciso", ".gcz", ".wbfs", ".wia", ".rvz", ".nkit.iso", ".wad"})
++         {".iso", ".gcm", ".ciso", ".gcz", ".wbfs", ".wia", ".rvz", ".nkit.iso", ".tgc", ".wad",
++          ".dol", ".elf"})
 +    {
 +      const size_t length = std::strlen(extension);
 +      if (lower.size() > length && lower.compare(lower.size() - length, length, extension) == 0)
@@ -10784,9 +10789,10 @@ index 0000000..f741266
 +        m_panel.lines = {game.title,
 +                         "",
 +                         std::string("Platform: ") +
-+                             (game.wad ? "Wii (WiiWare / Virtual Console / channel)" :
-+                              game.wii ? "Wii" :
-+                                         "GameCube"),
++                             (game.homebrew ? (game.wii ? "Homebrew (Wii)" : "Homebrew (GameCube)") :
++                              game.wad      ? "Wii (WiiWare / Virtual Console / channel)" :
++                              game.wii      ? "Wii" :
++                                              "GameCube"),
 +                         "Game ID: " + game.id,
 +                         "Discs: " + std::to_string(game.discs),
 +                         "File: " + std::filesystem::path(game.path).filename().string()};
@@ -12827,10 +12833,10 @@ index 0000000..f741266
 +}  // namespace PS4XMB
 diff --git a/Source/Core/DolphinNoGUI/PS4XMB.h b/Source/Core/DolphinNoGUI/PS4XMB.h
 new file mode 100755
-index 0000000..b5979d4
+index 0000000..d6d6011
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4XMB.h
-@@ -0,0 +1,44 @@
+@@ -0,0 +1,46 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -12856,6 +12862,8 @@ index 0000000..b5979d4
 +  int disc = 0;  // 0 = Disc 1
 +  std::string title;
 +  bool wad = false;  // a Wii title package (WiiWare, Virtual Console, channels)
++  bool homebrew = false;  // a .dol / .elf program (no game ID)
++  bool wii = false;       // homebrew: built for the Wii
 +};
 +
 +// Returned by Run when the app should close (to install an update's package).
@@ -13525,10 +13533,10 @@ index f4dc8a9..0c37736 100644
  
 diff --git a/Source/Core/DolphinNoGUI/PlatformPS4.cpp b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
 new file mode 100644
-index 0000000..ded038e
+index 0000000..3281af0
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
-@@ -0,0 +1,1415 @@
+@@ -0,0 +1,1437 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -13571,6 +13579,8 @@ index 0000000..ded038e
 +#include "DolphinNoGUI/PS4Updater.h"
 +#include "DolphinNoGUI/PS4Settings.h"
 +#include "DolphinNoGUI/PS4XMB.h"
++#include "Core/Boot/DolReader.h"
++#include "Core/Boot/ElfReader.h"
 +#include "DiscIO/Volume.h"
 +#include "DiscIO/Blob.h"
 +#include "DiscIO/VolumeWad.h"
@@ -14356,6 +14366,8 @@ index 0000000..ded038e
 +  int disc = 0;  // 0 = Disc 1
 +  std::string title;
 +  bool wad = false;
++  bool homebrew = false;  // .dol / .elf
++  bool wii = false;       // homebrew built for the Wii
 +};
 +
 +bool HasExtension(const std::string& name, const char* extension)
@@ -14366,11 +14378,13 @@ index 0000000..ded038e
 +  return lower.size() > length && lower.compare(lower.size() - length, length, extension) == 0;
 +}
 +
-+// Disc images and Wii title packages (.wad: WiiWare, Virtual Console, channels).
++// Disc images (.tgc: GameCube demo discs), Wii title packages (.wad: WiiWare, Virtual Console,
++// channels) and homebrew programs (.dol, .elf).
 +bool IsDiscImage(const std::string& name)
 +{
-+  static const std::array<std::string, 9> extensions = {".iso", ".gcm",  ".ciso", ".gcz", ".wbfs",
-+                                                        ".wia", ".rvz",  ".nkit.iso", ".wad"};
++  static const std::array<std::string, 12> extensions = {
++      ".iso", ".gcm", ".ciso", ".gcz", ".wbfs", ".wia", ".rvz", ".nkit.iso", ".tgc",
++      ".wad", ".dol", ".elf"};
 +  std::string lower = name;
 +  std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
 +  for (const std::string& extension : extensions)
@@ -14393,7 +14407,23 @@ index 0000000..ded038e
 +      continue;
 +    LibraryEntry game;
 +    game.path = entry.path().string();
-+    if (HasExtension(name, ".wad"))
++    if (HasExtension(name, ".dol") || HasExtension(name, ".elf"))
++    {
++      // Homebrew: no game ID; its file name is its title. Dolphin boots it directly.
++      game.homebrew = true;
++      game.title = entry.path().stem().string();
++      if (HasExtension(name, ".dol"))
++      {
++        const DolReader reader(game.path);
++        game.wii = reader.IsValid() && reader.IsWii();
++      }
++      else
++      {
++        const ElfReader reader(game.path);
++        game.wii = reader.IsValid() && reader.IsWii();
++      }
++    }
++    else if (HasExtension(name, ".wad"))
 +    {
 +      // Dolphin installs it into the emulated Wii's storage when it starts (BootParameters).
 +      game.wad = true;
@@ -14840,8 +14870,8 @@ index 0000000..ded038e
 +    const PS4XMB::ScanFunction scan = [](const std::string& games_dir) {
 +      std::vector<PS4XMB::LibraryDisc> library;
 +      for (const LibraryEntry& entry : ScanLibrary(games_dir))
-+        library.push_back(
-+            {entry.path, entry.game_id, entry.revision, entry.disc, entry.title, entry.wad});
++        library.push_back({entry.path, entry.game_id, entry.revision, entry.disc, entry.title,
++                           entry.wad, entry.homebrew, entry.wii});
 +      return library;
 +    };
 +    game = PS4XMB::Run(scan, PS4_DATA_DIR_PATH, AssetsDir(), AppVersion());
