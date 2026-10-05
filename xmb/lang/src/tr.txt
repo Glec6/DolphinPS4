@@ -394,3 +394,9 @@ Wii Remote
 Bir Wii oyununun gördüğü: Wii Remote, GameCube kontrolcüsü (Mario Kart Wii, Super Smash Bros. Brawl ve diğerleri destekler) ya da ikisi birden.
 # --- Restart
 Oyunu yeniden başlat
+# --- Riivolution
+Riivolution yamaları
+Bu oyun için Riivolution modu yok.
+Modun SD kart dosyalarını
+(riivolution klasörünü ve diğerlerini) şuraya kopyalayın:
+Oyun bir sonraki açılışta uygulanır.

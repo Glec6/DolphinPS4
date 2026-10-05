@@ -394,3 +394,9 @@ Wii 리모컨
 Wii 게임이 인식하는 것: Wii 리모컨, 게임큐브 컨트롤러(Mario Kart Wii, Super Smash Bros. Brawl 등이 지원), 또는 둘 다.
 # --- Restart
 게임 다시 시작
+# --- Riivolution
+Riivolution 패치
+이 게임용 Riivolution 모드가 없습니다.
+모드의 SD 카드 파일
+(riivolution 폴더와 나머지)을 다음 위치에 복사:
+다음에 게임을 시작할 때 적용됩니다.

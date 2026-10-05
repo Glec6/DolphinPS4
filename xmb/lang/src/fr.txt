@@ -394,3 +394,9 @@ Wii Remote
 Ce que voit un jeu Wii : une Wii Remote, une manette GameCube (Mario Kart Wii, Super Smash Bros. Brawl et d'autres la prennent en charge) ou les deux.
 # --- Restart
 Redémarrer le jeu
+# --- Riivolution
+Patchs Riivolution
+Aucun mod Riivolution pour ce jeu.
+Copiez les fichiers SD du mod
+(son dossier riivolution et le reste) dans
+S'applique au prochain lancement du jeu.
