@@ -367,10 +367,20 @@ index 67dbd1e..3f5baed 100644
  
    template <class Rep, class Period>
 diff --git a/Source/Core/Common/FileUtil.cpp b/Source/Core/Common/FileUtil.cpp
-index 053614f..9f7b40f 100644
+index 053614f..f2e011a 100644
 --- a/Source/Core/Common/FileUtil.cpp
 +++ b/Source/Core/Common/FileUtil.cpp
-@@ -60,6 +60,10 @@
+@@ -8,6 +8,9 @@
+ #include <cstdio>
+ #include <cstring>
+ #include <fcntl.h>
++#include <dirent.h>
++#include <sys/stat.h>
++#include <cerrno>
+ #include <filesystem>
+ #include <limits.h>
+ #include <stack>
+@@ -60,6 +63,10 @@
  
  namespace fs = std::filesystem;
  
@@ -381,7 +391,57 @@ index 053614f..9f7b40f 100644
  namespace File
  {
  #ifdef ANDROID
-@@ -731,6 +735,10 @@ std::string GetExePath()
+@@ -516,10 +523,49 @@ FSTEntry ScanDirectoryTree(const std::string& directory, bool recursive)
+ }
+ 
+ // Deletes the given directory and anything under it. Returns true on success.
++#ifdef __ORBIS__
++// std::filesystem::remove_all uses openat / unlinkat, which the PS4 kernel doesn't implement
++// ("Function not implemented"): nothing was deleted. Every Wii save state failed to load (IOS
++// rebuilds the NAND's /tmp from the state), and the updater never removed its old folders.
++static bool PS4RemoveAll(const std::string& path)
++{
++  struct stat st;
++  if (lstat(path.c_str(), &st) != 0)
++    return errno == ENOENT;
++  if (!S_ISDIR(st.st_mode))
++    return unlink(path.c_str()) == 0;
++  std::vector<std::string> names;
++  if (DIR* dir = opendir(path.c_str()))
++  {
++    while (const dirent* entry = readdir(dir))
++    {
++      const std::string name = entry->d_name;
++      if (name != "." && name != "..")
++        names.push_back(name);
++    }
++    closedir(dir);
++  }
++  bool ok = true;
++  for (const std::string& name : names)
++    ok = PS4RemoveAll(path + "/" + name) && ok;
++  return rmdir(path.c_str()) == 0 && ok;
++}
++#endif
++
+ bool DeleteDirRecursively(const std::string& directory)
+ {
+   DEBUG_LOG_FMT(COMMON, "{}: {}", __func__, directory);
+ 
++#ifdef __ORBIS__
++  std::string path = directory;
++  while (path.size() > 1 && path.back() == '/')
++    path.pop_back();
++  const bool removed = PS4RemoveAll(path);
++  if (!removed)
++    ERROR_LOG_FMT(COMMON, "{}: {} failed. {}", __func__, directory, Common::LastStrerrorString());
++  return removed;
++#endif
++
+   std::error_code error;
+   const std::uintmax_t num_removed = std::filesystem::remove_all(StringToPath(directory), error);
+   const bool success = num_removed != static_cast<std::uintmax_t>(-1) && !error;
+@@ -731,6 +777,10 @@ std::string GetExePath()
    return PathToString(exe_path_absolute);
  #elif defined(__APPLE__)
    return GetBundleDirectory();
@@ -4858,10 +4918,10 @@ index 0000000..3771619
 +}  // namespace PS4Cheats
 diff --git a/Source/Core/DolphinNoGUI/PS4Controls.cpp b/Source/Core/DolphinNoGUI/PS4Controls.cpp
 new file mode 100755
-index 0000000..01bac28
+index 0000000..dc56381
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4Controls.cpp
-@@ -0,0 +1,502 @@
+@@ -0,0 +1,511 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -5040,12 +5100,21 @@ index 0000000..01bac28
 +  std::rename(temp.c_str(), path.c_str());
 +}
 +
-+// Missing, empty or without its first controller (cut short): the defaults.
-+void WriteIfMissing(const std::string& path, const char* contents)
++// Missing, empty, or player 1 without a device or button A (cut short by a power cut; the Wii
++// Remote setup then rebuilt the file around an empty player 1, and players 2-4 still had their
++// devices): the defaults.
++void WriteIfMissing(const std::string& path, const char* contents, const std::string& first)
 +{
-+  const std::string text = ReadAll(path);
-+  if (text.find("Device") != std::string::npos)
-+    return;
++  Common::IniFile ini;
++  ini.Load(path);
++  if (const Common::IniFile::Section* section = ini.GetSection(first))
++  {
++    std::string device, button_a;
++    section->Get("Device", &device);
++    section->Get("Buttons/A", &button_a);
++    if (!device.empty() && !button_a.empty())
++      return;
++  }
 +  const std::string temp = path + ".new";
 +  if (FILE* file = fopen(temp.c_str(), "w"))
 +  {
@@ -5093,8 +5162,8 @@ index 0000000..01bac28
 +{
 +  mkdir(s_user_dir.c_str(), 0777);
 +  mkdir((s_user_dir + "/Config").c_str(), 0777);
-+  WriteIfMissing(Path(Device::GameCube), GCPAD_DEFAULTS);
-+  WriteIfMissing(Path(Device::Wii), WIIMOTE_DEFAULTS);
++  WriteIfMissing(Path(Device::GameCube), GCPAD_DEFAULTS, "GCPad1");
++  WriteIfMissing(Path(Device::Wii), WIIMOTE_DEFAULTS, "Wiimote1");
 +  // The GameCube L / R clicks came from the DualShock 4's digital L2 / R2, which switch on early
 +  // in the pull; Dolphin then reports the analog trigger as fully pressed (MixedTriggers), so half
 +  // a press was a full one. Driven by the analog triggers instead, they click at Dolphin's
@@ -9100,7 +9169,7 @@ index 0000000..914dbb5
 +}  // namespace PS4Updater
 diff --git a/Source/Core/DolphinNoGUI/PS4XMB.cpp b/Source/Core/DolphinNoGUI/PS4XMB.cpp
 new file mode 100755
-index 0000000..8194a12
+index 0000000..c303f7f
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4XMB.cpp
 @@ -0,0 +1,4064 @@
@@ -12735,7 +12804,7 @@ index 0000000..8194a12
 +      bool ok = PS4Updater::Download(archive, tar, m_assets_dir + "/xmb/cacert.pem", progress, &error);
 +      if (ok)
 +      {
-+        std::filesystem::remove_all(unpacked, ec);
++        File::DeleteDirRecursively(unpacked);
 +        ok = PS4Updater::ExtractTar(tar, unpacked, &error);
 +      }
 +      if (ok)
@@ -12756,7 +12825,7 @@ index 0000000..8194a12
 +        // The running program may be the old update itself: its folder can't be deleted while it
 +        // runs (v03.09), but it can be renamed. app-old goes at the next start (RemoveOldUpdates).
 +        const std::string old_dir = m_data_dir + "/app-old";
-+        std::filesystem::remove_all(old_dir, ec);
++        File::DeleteDirRecursively(old_dir);
 +        if (std::filesystem::exists(target, ec))
 +        {
 +          std::filesystem::rename(target, old_dir, ec);
@@ -12784,7 +12853,7 @@ index 0000000..8194a12
 +      std::lock_guard lock(m_update_mutex);
 +      if (!ok)
 +      {
-+        std::filesystem::remove_all(unpacked, ec);
++        File::DeleteDirRecursively(unpacked);
 +        m_update_error = m_update_cancel ? "" : error;
 +        m_update_state = m_update_cancel ? UpdateState::Available : UpdateState::Failed;
 +        Log("update: " + (m_update_cancel ? std::string("cancelled") : error));
@@ -12965,8 +13034,8 @@ index 0000000..8194a12
 +void Menu::RemoveOldUpdates()
 +{
 +  std::error_code ec;
-+  std::filesystem::remove_all(m_data_dir + "/app.new", ec);  // an unpack that didn't finish
-+  std::filesystem::remove_all(m_data_dir + "/app-old", ec);  // the update an update replaced
++  File::DeleteDirRecursively(m_data_dir + "/app.new");  // an unpack that didn't finish
++  File::DeleteDirRecursively(m_data_dir + "/app-old");  // the update an update replaced
 +  const std::string dir = m_data_dir + "/update";
 +  for (const auto& entry : std::filesystem::directory_iterator(dir, ec))
 +  {
@@ -13874,10 +13943,10 @@ index f4dc8a9..0c37736 100644
  
 diff --git a/Source/Core/DolphinNoGUI/PlatformPS4.cpp b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
 new file mode 100644
-index 0000000..ef616e8
+index 0000000..2b5d90c
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
-@@ -0,0 +1,1617 @@
+@@ -0,0 +1,1618 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -13885,6 +13954,7 @@ index 0000000..ef616e8
 +// /data/DolphinPS4 and klog, and a command line built from /data/DolphinPS4 since PS4 apps are
 +// started without arguments.
 +
++#include "Common/FileUtil.h"
 +#include "DolphinNoGUI/Platform.h"
 +
 +#include <atomic>
@@ -15190,7 +15260,7 @@ index 0000000..ef616e8
 +  std::error_code ec;
 +  if (PS4Updater::CompareVersions(update, installed) <= 0)
 +  {
-+    std::filesystem::remove_all(UPDATE_DIR, ec);
++    File::DeleteDirRecursively(UPDATE_DIR);
 +    std::remove(UPDATE_PENDING.c_str());
 +    Platform::BootTrace(("removed the downloaded update v" + update + ": the installed v" + installed +
 +               " is as new").c_str());
@@ -15201,7 +15271,7 @@ index 0000000..ef616e8
 +  {
 +    fclose(pending);
 +    std::remove(UPDATE_PENDING.c_str());
-+    std::filesystem::remove_all(failed, ec);
++    File::DeleteDirRecursively(failed);
 +    std::filesystem::rename(UPDATE_DIR, failed, ec);
 +    Platform::BootTrace(("the downloaded update v" + update + " didn't start last time: set aside in " +
 +               failed + ", running the installed v" + installed).c_str());
@@ -15221,7 +15291,7 @@ index 0000000..ef616e8
 +  const int result = sceSystemServiceLoadExec(eboot.c_str(), nullptr);
 +  // Still here: it couldn't be started.
 +  std::remove(UPDATE_PENDING.c_str());
-+  std::filesystem::remove_all(failed, ec);
++  File::DeleteDirRecursively(failed);
 +  std::filesystem::rename(UPDATE_DIR, failed, ec);
 +  char text[160];
 +  snprintf(text, sizeof(text),
@@ -15574,10 +15644,10 @@ index 8f7f4ba..34feb8e 100644
  {
 diff --git a/Source/Core/InputCommon/ControllerInterface/PS4Pad/PS4Pad.cpp b/Source/Core/InputCommon/ControllerInterface/PS4Pad/PS4Pad.cpp
 new file mode 100644
-index 0000000..3afb3d6
+index 0000000..e8c7219
 --- /dev/null
 +++ b/Source/Core/InputCommon/ControllerInterface/PS4Pad/PS4Pad.cpp
-@@ -0,0 +1,571 @@
+@@ -0,0 +1,574 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -15777,20 +15847,23 @@ index 0000000..3afb3d6
 +
 +    // Motion, for the Wii Remote (Settings -> System -> Motion Controls): the pad held like a
 +    // remote pointing at the TV. libScePad: x right, y up, z towards the player; acceleration in
-+    // g, rotation in rad/s (right-handed).
++    // g, rotation in rad/s (right-handed). OpenOrbis's OrbisPadData has the two vectors in the
++    // wrong order: Sony's ScePadData is orientation, acceleration, angular velocity, so "vel" holds
++    // the acceleration and "acell" the rotation (read the other way, a pad at rest showed zero
++    // acceleration).
 +    ps4_pad_set_motion(m_handle, true);
-+    AddInput(new Motion("Accel Up",       m_state.acell.y, GRAVITY));
-+    AddInput(new Motion("Accel Down",     m_state.acell.y, -GRAVITY));
-+    AddInput(new Motion("Accel Left",     m_state.acell.x, -GRAVITY));
-+    AddInput(new Motion("Accel Right",    m_state.acell.x, GRAVITY));
-+    AddInput(new Motion("Accel Forward",  m_state.acell.z, -GRAVITY));
-+    AddInput(new Motion("Accel Backward", m_state.acell.z, GRAVITY));
-+    AddInput(new Motion("Gyro Pitch Up",   m_state.vel.x, 1.0));
-+    AddInput(new Motion("Gyro Pitch Down", m_state.vel.x, -1.0));
-+    AddInput(new Motion("Gyro Roll Left",  m_state.vel.z, 1.0));
-+    AddInput(new Motion("Gyro Roll Right", m_state.vel.z, -1.0));
-+    AddInput(new Motion("Gyro Yaw Left",   m_state.vel.y, 1.0));
-+    AddInput(new Motion("Gyro Yaw Right",  m_state.vel.y, -1.0));
++    AddInput(new Motion("Accel Up",       m_state.vel.y, GRAVITY));
++    AddInput(new Motion("Accel Down",     m_state.vel.y, -GRAVITY));
++    AddInput(new Motion("Accel Left",     m_state.vel.x, -GRAVITY));
++    AddInput(new Motion("Accel Right",    m_state.vel.x, GRAVITY));
++    AddInput(new Motion("Accel Forward",  m_state.vel.z, -GRAVITY));
++    AddInput(new Motion("Accel Backward", m_state.vel.z, GRAVITY));
++    AddInput(new Motion("Gyro Pitch Up",   m_state.acell.x, 1.0));
++    AddInput(new Motion("Gyro Pitch Down", m_state.acell.x, -1.0));
++    AddInput(new Motion("Gyro Roll Left",  m_state.acell.z, 1.0));
++    AddInput(new Motion("Gyro Roll Right", m_state.acell.z, -1.0));
++    AddInput(new Motion("Gyro Yaw Left",   m_state.acell.y, 1.0));
++    AddInput(new Motion("Gyro Yaw Right",  m_state.acell.y, -1.0));
 +    // clang-format on
 +  }
 +
@@ -15819,7 +15892,7 @@ index 0000000..3afb3d6
 +        m_motion_logged++;
 +        char line[200];
 +        snprintf(line, sizeof(line), "DualShock 4 motion: accel %.2f %.2f %.2f, gyro %.2f %.2f %.2f",
-+                 data.acell.x, data.acell.y, data.acell.z, data.vel.x, data.vel.y, data.vel.z);
++                 data.vel.x, data.vel.y, data.vel.z, data.acell.x, data.acell.y, data.acell.z);
 +        ps4_boot_trace(line);
 +      }
 +    }
