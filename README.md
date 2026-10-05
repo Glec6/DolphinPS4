@@ -6,13 +6,15 @@
   <a href="https://github.com/iHaiDeeZ/DolphinPS4/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/iHaiDeeZ/DolphinPS4?label=release&color=5bb8ff"></a>
   <img alt="PS4 homebrew" src="https://img.shields.io/badge/PS4-homebrew-1f5fd6">
   <img alt="GameCube and Wii" src="https://img.shields.io/badge/GameCube%20%2B%20Wii-Dolphin-5cd3ff">
+  <a href="https://discord.gg/QwtU8ZaCth"><img alt="Discord" src="https://img.shields.io/badge/Discord-join%20the%20testers-5865F2?logo=discord&logoColor=white"></a>
   <a href="LICENSE"><img alt="GPL-2.0-or-later" src="https://img.shields.io/badge/license-GPL--2.0--or--later-ff9ccf"></a>
 </p>
 
 <h3 align="center">Your GameCube and Wii library, on the PS4.</h3>
 
 <p align="center">
-  <a href="https://github.com/iHaiDeeZ/DolphinPS4/releases/latest"><b>⬇ Get v02.99</b></a> ·
+  <a href="https://github.com/iHaiDeeZ/DolphinPS4/releases/latest"><b>⬇ Get the latest version</b></a> ·
+  <a href="https://discord.gg/QwtU8ZaCth">Discord</a> ·
   <a href="#getting-started">Getting started</a> ·
   <a href="#controls">Controls</a> ·
   <a href="#faq">FAQ</a> ·
@@ -231,6 +233,12 @@ Turn on *Settings → Diagnostics → All Diagnostics*, play until the problem s
 [open an issue](https://github.com/iHaiDeeZ/DolphinPS4/issues). Attach `boot-trace.log` and
 `dolphin.log` from `/data/DolphinPS4/`, plus `crash.log` or any `*-stacks*.txt` file if there is
 one, and mention the game, its region and the app version.
+
+## Testing and feedback
+
+Want to help test new versions, report a game that misbehaves or share frame rates? Join the
+**[Dolphin for PS4 Discord](https://discord.gg/QwtU8ZaCth)**. When you report a problem, say which
+game and version (**Settings → About**) you used, and attach `/data/DolphinPS4/dolphin.log` if you can.
 
 ## Good to know
 
