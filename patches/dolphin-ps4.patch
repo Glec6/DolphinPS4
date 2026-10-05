@@ -5921,10 +5921,10 @@ index 0000000..5157e21
 +}  // namespace PS4Glyphs
 diff --git a/Source/Core/DolphinNoGUI/PS4IngameMenu.cpp b/Source/Core/DolphinNoGUI/PS4IngameMenu.cpp
 new file mode 100755
-index 0000000..c5c0acb
+index 0000000..add6acf
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4IngameMenu.cpp
-@@ -0,0 +1,1051 @@
+@@ -0,0 +1,1058 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -5981,6 +5981,7 @@ index 0000000..c5c0acb
 +extern std::atomic<int> ps4_state_busy;  // Core/State.cpp
 +extern "C" const char* ps4_self_path();  // PlatformPS4.cpp: the running program
 +extern "C" void ps4_return_to_menu();    // PlatformPS4.cpp: the restart shows the menu
++extern "C" int ps4_jit_unavailable;      // PlatformPS4.cpp: no JIT on this console
 +
 +namespace PS4IngameMenu
 +{
@@ -6805,6 +6806,12 @@ index 0000000..c5c0acb
 +void Poll(Core::System& system)
 +{
 +  s_polls++;
++  static bool s_jit_notice = false;
++  if (ps4_jit_unavailable && !s_jit_notice && s_polls > 120)
++  {
++    s_jit_notice = true;
++    Toast("This console doesn't allow Dolphin's fast CPU mode (JIT): games run slowly.", 9000);
++  }
 +  if (s_saving_slot != 0 && ps4_state_busy == 0)
 +  {
 +    Toast("Saved to slot " + std::to_string(s_saving_slot));
@@ -13577,10 +13584,10 @@ index f4dc8a9..0c37736 100644
  
 diff --git a/Source/Core/DolphinNoGUI/PlatformPS4.cpp b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
 new file mode 100644
-index 0000000..256a914
+index 0000000..2364073
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
-@@ -0,0 +1,1498 @@
+@@ -0,0 +1,1554 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -13610,6 +13617,9 @@ index 0000000..256a914
 +#include <fcntl.h>
 +#include <sys/stat.h>
 +#include <pthread.h>
++#include <setjmp.h>
++#include <signal.h>
++#include <sys/mman.h>
 +#include <unistd.h>
 +
 +#include "Common/Logging/LogManager.h"
@@ -14722,6 +14732,11 @@ index 0000000..256a914
 +    fclose(file);
 +}
 +
++// Set when the console won't run code from memory Dolphin writes (no JIT): PS4IngameMenu tells
++// the player, the game runs on the cached interpreter.
++extern "C" int ps4_jit_unavailable;
++int ps4_jit_unavailable = 0;
++
 +// PS4XMB.cpp, at its first frame, and before a game starts: a downloaded update works.
 +extern "C" void ps4_update_started_ok()
 +{
@@ -14822,6 +14837,38 @@ index 0000000..256a914
 +  return held;
 +}
 +
++// Dolphin's JIT writes the game's code as x86 code into memory mapped read/write/execute and runs
++// it. GoldHEN allows that; a console whose jailbreak doesn't crashes on the first translated block
++// (a PS4 Pro report, v03.10: SIGSEGV at the start of the JIT area). Tried once at start-up with a
++// tiny function in the same kind of mapping; a fault comes back here instead of crashing.
++static sigjmp_buf s_exec_test_jump;
++static void ExecTestFault(int)
++{
++  siglongjmp(s_exec_test_jump, 1);
++}
++
++static bool ExecutableMemoryWorks()
++{
++  constexpr size_t SIZE = 0x4000;
++  void* page = mmap(nullptr, SIZE, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_ANON | MAP_PRIVATE, -1, 0);
++  if (page == MAP_FAILED)
++    return false;
++  static const unsigned char code[] = {0xB8, 0x34, 0x12, 0x00, 0x00, 0xC3};  // mov eax, 0x1234; ret
++  std::memcpy(page, code, sizeof(code));
++  struct sigaction fault = {}, old_segv = {}, old_bus = {};
++  fault.sa_handler = ExecTestFault;
++  sigemptyset(&fault.sa_mask);
++  sigaction(SIGSEGV, &fault, &old_segv);
++  sigaction(SIGBUS, &fault, &old_bus);
++  volatile int result = 0;
++  if (sigsetjmp(s_exec_test_jump, 1) == 0)
++    result = reinterpret_cast<int (*)()>(page)();
++  sigaction(SIGSEGV, &old_segv, nullptr);
++  sigaction(SIGBUS, &old_bus, nullptr);
++  munmap(page, SIZE);
++  return result == 0x1234;
++}
++
 +static void StartDownloadedUpdate()
 +{
 +  const std::string update = FirstLine(UPDATE_DIR + "/xmb/version.txt");
@@ -14906,7 +14953,23 @@ index 0000000..256a914
 +  StartDownloadedUpdate();
 +
 +  BootTrace(("app version " + AppVersion()).c_str());
++  {
++    OrbisKernelSwVersion firmware = {};
++    firmware.Size = sizeof(firmware);
++    if (sceKernelGetSystemSwVersion(&firmware) == 0)
++      BootTrace(("firmware " + std::string(firmware.VersionString)).c_str());
++  }
 +  LoadOptions();
++  // No JIT on this console: the cached interpreter and the software vertex loader, which need no
++  // executable memory. Slow, but the games run.
++  if (!ExecutableMemoryWorks())
++  {
++    ps4_jit_unavailable = 1;
++    s_options["cpu_core"] = "cachedinterpreter";
++    s_options["vertex_loader"] = "software";
++    BootTrace("executable memory refused by this console (jailbreak without RWX): "
++              "cached interpreter, software vertex loader");
++  }
 +  // The menus' settings (settings.ini) over ps4.ini's global options; settings never changed in
 +  // the menus keep ps4.ini's values (PS4Settings.h has the full order).
 +  s_ps4_global = s_options;

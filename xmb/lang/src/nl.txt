@@ -369,3 +369,5 @@ start bij het openen van Dolphin.
 Houd L1 ingedrukt tijdens het starten
 om in plaats daarvan het menu te openen.
 Start bij het openen van Dolphin
+# --- JIT
+Deze console staat de snelle CPU-modus van Dolphin (JIT) niet toe: spellen draaien traag.

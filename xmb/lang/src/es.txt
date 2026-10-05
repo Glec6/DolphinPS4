@@ -369,3 +369,5 @@ se inicia al abrir Dolphin.
 Mantén L1 mientras Dolphin arranca
 para abrir el menú en su lugar.
 Se inicia al abrir Dolphin
+# --- JIT
+Esta consola no permite el modo rápido de CPU de Dolphin (JIT): los juegos van lentos.

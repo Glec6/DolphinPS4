@@ -369,3 +369,5 @@ startet beim Öffnen von Dolphin.
 Halte L1 beim Start von Dolphin,
 um stattdessen das Menü zu öffnen.
 Startet beim Öffnen von Dolphin
+# --- JIT
+Diese Konsole erlaubt Dolphins schnellen CPU-Modus (JIT) nicht: Spiele laufen langsam.

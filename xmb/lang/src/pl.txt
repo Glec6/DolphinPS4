@@ -369,3 +369,5 @@ uruchamia się po otwarciu Dolphin.
 Przytrzymaj L1 podczas uruchamiania Dolphin,
 aby zamiast tego otworzyć menu.
 Uruchamia się po otwarciu Dolphin
+# --- JIT
+Ta konsola nie pozwala na szybki tryb CPU Dolphin (JIT): gry działają wolno.

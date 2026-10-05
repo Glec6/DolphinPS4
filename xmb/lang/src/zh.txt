@@ -369,3 +369,5 @@ R2（模拟）
 启动 Dolphin 时按住 L1
 即可改为打开菜单。
 打开 Dolphin 时启动
+# --- JIT
+此主机不允许 Dolphin 的快速 CPU 模式（JIT）：游戏会运行得很慢。

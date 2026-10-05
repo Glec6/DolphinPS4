@@ -371,3 +371,5 @@ starts when Dolphin opens.
 Hold L1 while Dolphin starts
 to open the menu instead.
 Starts when Dolphin opens
+# --- JIT
+This console doesn't allow Dolphin's fast CPU mode (JIT): games run slowly.
