@@ -371,3 +371,14 @@ para abrir el menú en su lugar.
 Se inicia al abrir Dolphin
 # --- JIT
 Esta consola no permite el modo rápido de CPU de Dolphin (JIT): los juegos van lentos.
+# --- SD card
+Tarjeta SD de Wii
+Insertada
+Quitada
+Una tarjeta SD virtual para juegos y canales de Wii (partidas, fotos, música, homebrew).
+Carpeta de la tarjeta SD
+La tarjeta contiene los archivos de /data/DolphinPS4/User/Load/WiiSDSync (cópialos ahí por FTP); lo que escriben los juegos vuelve ahí al terminar.
+Escritura en la tarjeta SD
+Permite que los juegos guarden en la tarjeta SD. No: es de solo lectura.
+Tamaño de la tarjeta SD
+Automático hace la tarjeta justo del tamaño de los archivos de la carpeta.

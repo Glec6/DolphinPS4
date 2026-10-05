@@ -371,3 +371,14 @@ Dolphin açılırken L1'i basılı tut.
 Dolphin açılınca başlar
 # --- JIT
 Bu konsol Dolphin'in hızlı CPU modunu (JIT) desteklemiyor: oyunlar yavaş çalışır.
+# --- SD card
+Wii SD kartı
+Takılı
+Çıkarıldı
+Wii oyunları ve kanalları için sanal bir SD kart (kayıtlar, fotoğraflar, müzik, homebrew).
+SD kart klasörü
+Kart /data/DolphinPS4/User/Load/WiiSDSync içindeki dosyaları içerir (FTP ile oraya kopyala); oyunların yazdıkları bitince oraya geri döner.
+SD karta yazma
+Oyunların SD karta kaydetmesine izin verir. Kapalı: salt okunur.
+SD kart boyutu
+Otomatik, kartı klasördeki dosyalar kadar büyük yapar.

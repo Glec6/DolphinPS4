@@ -371,3 +371,14 @@ om in plaats daarvan het menu te openen.
 Start bij het openen van Dolphin
 # --- JIT
 Deze console staat de snelle CPU-modus van Dolphin (JIT) niet toe: spellen draaien traag.
+# --- SD card
+Wii-SD-kaart
+Geplaatst
+Verwijderd
+Een virtuele SD-kaart voor Wii-spellen en -kanalen (saves, foto's, muziek, homebrew).
+SD-kaartmap
+De kaart bevat de bestanden in /data/DolphinPS4/User/Load/WiiSDSync (kopieer ze daarheen via FTP); wat spellen schrijven komt daar terug als ze stoppen.
+Schrijven naar SD-kaart
+Laat spellen opslaan op de SD-kaart. Uit: alleen lezen.
+SD-kaartgrootte
+Automatisch maakt de kaart precies groot genoeg voor de bestanden in de map.

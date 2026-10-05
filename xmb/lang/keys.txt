@@ -373,3 +373,14 @@ to open the menu instead.
 Starts when Dolphin opens
 # --- JIT
 This console doesn't allow Dolphin's fast CPU mode (JIT): games run slowly.
+# --- SD card
+Wii SD Card
+Inserted
+Removed
+A virtual SD card for Wii games and channels (saves, photos, music, homebrew).
+SD Card Folder
+The card holds the files in /data/DolphinPS4/User/Load/WiiSDSync (copy them there over FTP); what games write goes back there when they end.
+SD Card Writes
+Lets games save to the SD card. Off: it is read-only.
+SD Card Size
+Auto makes the card just big enough for the folder's files.

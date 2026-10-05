@@ -836,18 +836,22 @@ index 0000000..90decba
 +  void* m_context = nullptr;
 +};
 diff --git a/Source/Core/Common/LinearDiskCache.h b/Source/Core/Common/LinearDiskCache.h
-index 061f7d4..3985395 100644
+index 061f7d4..bde3303 100644
 --- a/Source/Core/Common/LinearDiskCache.h
 +++ b/Source/Core/Common/LinearDiskCache.h
-@@ -150,8 +150,13 @@ private:
+@@ -150,8 +150,17 @@ private:
      {
        // Null-terminator is intentionally not copied.
        std::memcpy(&id, "DCAC", sizeof(u32));
 -      std::memcpy(ver, Common::GetScmRevGitStr().c_str(),
 -                  std::min(Common::GetScmRevGitStr().size(), sizeof(ver)));
 +#ifdef __ORBIS__
-+      // Port cache version 2: Vulkan vertex shaders read posmtx as uint4 again (v02.69).
-+      const std::string version = "ps4c2-" + Common::GetScmRevGitStr();
++      // Port caches belong to the Dolphin base the port is built on, not to each build: with the
++      // build's git hash every release threw all compiled shaders away, and the first play after
++      // an update stuttered badly (Spider-Man 2, v03.15). Increase the number when the port
++      // changes what the shader generators produce; change the base hash when rebasing.
++      // 2: Vulkan vertex shaders read posmtx as uint4 again (v02.69). 3: stable across releases.
++      const std::string version = "ps4c3-771fb154";
 +#else
 +      const std::string& version = Common::GetScmRevGitStr();
 +#endif
@@ -4228,7 +4232,7 @@ index 51c3fff..f59d744 100644
 +  ps4_add_eboot(dolphin-nogui)
 +endif()
 diff --git a/Source/Core/DolphinNoGUI/MainNoGUI.cpp b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
-index 3bf40ea..385ec2f 100644
+index 3bf40ea..2db1dbe 100644
 --- a/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 +++ b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 @@ -2,10 +2,17 @@
@@ -4357,7 +4361,7 @@ index 3bf40ea..385ec2f 100644
  #endif
        });
  
-@@ -270,7 +339,308 @@ int main(const int argc, char* argv[])
+@@ -270,7 +339,317 @@ int main(const int argc, char* argv[])
  
    UICommon::SetUserDirectory(user_directory);
    UICommon::Init();
@@ -4541,6 +4545,15 @@ index 3bf40ea..385ec2f 100644
 +    // EA's VP6 videos need it - FIFA Street 2).
 +    Config::SetBase(Config::GFX_HACK_FAST_TEXTURE_SAMPLING,
 +                    Platform::GetPS4Option("manual_texture_sampling", "off") != "on");
++    // Settings -> System: the Wii's SD card (an image in User/Load; with the folder setting it is
++    // packed from User/Load/WiiSDSync when a game starts and unpacked into it when it ends).
++    Config::SetBase(Config::MAIN_WII_SD_CARD, Platform::GetPS4Option("sd_card", "on") == "on");
++    Config::SetBase(Config::MAIN_WII_SD_CARD_ENABLE_FOLDER_SYNC,
++                    Platform::GetPS4Option("sd_sync", "on") == "on");
++    Config::SetBase(Config::MAIN_ALLOW_SD_WRITES, Platform::GetPS4Option("sd_writes", "on") == "on");
++    Config::SetBase(Config::MAIN_WII_SD_CARD_FILESIZE,
++                    static_cast<u64>(std::atoll(Platform::GetPS4Option("sd_size", "0").c_str())) *
++                        1024 * 1024);
 +    // Settings -> Language: the GameCube / Wii system language, where the console has it.
 +    Config::SetBase(Config::MAIN_GC_LANGUAGE, PS4Lang::Current().gc_language);
 +    Config::SetBase(Config::SYSCONF_LANGUAGE,
@@ -4666,7 +4679,7 @@ index 3bf40ea..385ec2f 100644
  
    Common::ScopeGuard ui_common_guard([] {
      UICommon::ShutdownControllers();
-@@ -284,6 +654,12 @@ int main(const int argc, char* argv[])
+@@ -284,6 +663,12 @@ int main(const int argc, char* argv[])
    }
  
    auto core_state_changed_hook = Core::AddOnStateChangedCallback([](const Core::State state) {
@@ -4679,7 +4692,7 @@ index 3bf40ea..385ec2f 100644
      if (state == Core::State::Uninitialized)
        s_platform->Stop();
    });
-@@ -303,6 +679,9 @@ int main(const int argc, char* argv[])
+@@ -303,6 +688,9 @@ int main(const int argc, char* argv[])
  
    DolphinAnalytics::Instance().ReportDolphinStart("nogui");
  
@@ -7912,10 +7925,10 @@ index 0000000..c539699
 +}  // namespace PS4Net
 diff --git a/Source/Core/DolphinNoGUI/PS4Settings.cpp b/Source/Core/DolphinNoGUI/PS4Settings.cpp
 new file mode 100755
-index 0000000..96718aa
+index 0000000..aa30109
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4Settings.cpp
-@@ -0,0 +1,539 @@
+@@ -0,0 +1,550 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -8046,6 +8059,17 @@ index 0000000..96718aa
 +     "What is plugged into the Wii Remote. Wii Sports and similar games need None."},
 +    {"wii_sideways", "Sideways Wii Remote", "System", {{"off", "Off"}, {"on", "On"}}, "off",
 +     false, "For games played with the Wii Remote held sideways (NSMB Wii, Mario Kart Wii)."},
++    {"sd_card", "Wii SD Card", "System", {{"on", "Inserted"}, {"off", "Removed"}}, "on", false,
++     "A virtual SD card for Wii games and channels (saves, photos, music, homebrew)."},
++    {"sd_sync", "SD Card Folder", "System", {{"on", "On"}, {"off", "Off"}}, "on", false,
++     "The card holds the files in /data/DolphinPS4/User/Load/WiiSDSync (copy them there over "
++     "FTP); what games write goes back there when they end."},
++    {"sd_writes", "SD Card Writes", "System", {{"on", "On"}, {"off", "Off"}}, "on", false,
++     "Lets games save to the SD card. Off: it is read-only."},
++    {"sd_size", "SD Card Size", "System",
++     {{"0", "Auto"}, {"128", "128 MB"}, {"256", "256 MB"}, {"512", "512 MB"}, {"1024", "1 GB"},
++      {"2048", "2 GB"}},
++     "0", false, "Auto makes the card just big enough for the folder's files."},
 +    {"audio_buffer", "Audio Buffer", "System",
 +     {{"100", "100 ms"}, {"150", "150 ms"}, {"200", "200 ms"}, {"250", "250 ms"},
 +      {"300", "300 ms"}},
@@ -13645,10 +13669,10 @@ index f4dc8a9..0c37736 100644
  
 diff --git a/Source/Core/DolphinNoGUI/PlatformPS4.cpp b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
 new file mode 100644
-index 0000000..2364073
+index 0000000..c5b6f8e
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
-@@ -0,0 +1,1554 @@
+@@ -0,0 +1,1557 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -14735,6 +14759,9 @@ index 0000000..2364073
 +{
 +  mkdir(user_dir.c_str(), 0777);
 +  mkdir((user_dir + "/Config").c_str(), 0777);
++  // The Wii SD card's folder (Settings -> System -> SD Card Folder), ready to copy files into.
++  mkdir((user_dir + "/Load").c_str(), 0777);
++  mkdir((user_dir + "/Load/WiiSDSync").c_str(), 0777);
 +  PS4Controls::SetUserDirectory(user_dir);
 +  PS4Controls::WriteDefaultsIfMissing();
 +}

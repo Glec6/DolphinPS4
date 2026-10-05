@@ -371,3 +371,14 @@ R2（模拟）
 打开 Dolphin 时启动
 # --- JIT
 此主机不允许 Dolphin 的快速 CPU 模式（JIT）：游戏会运行得很慢。
+# --- SD card
+Wii SD 卡
+已插入
+已移除
+供 Wii 游戏和频道使用的虚拟 SD 卡（存档、照片、音乐、自制软件）。
+SD 卡文件夹
+SD 卡包含 /data/DolphinPS4/User/Load/WiiSDSync 中的文件（通过 FTP 复制到那里）；游戏写入的内容会在结束时写回那里。
+允许写入 SD 卡
+允许游戏保存到 SD 卡。关闭：只读。
+SD 卡容量
+自动会让容量刚好装下文件夹中的文件。

@@ -371,3 +371,14 @@ um stattdessen das Menü zu öffnen.
 Startet beim Öffnen von Dolphin
 # --- JIT
 Diese Konsole erlaubt Dolphins schnellen CPU-Modus (JIT) nicht: Spiele laufen langsam.
+# --- SD card
+Wii-SD-Karte
+Eingesteckt
+Entfernt
+Eine virtuelle SD-Karte für Wii-Spiele und -Kanäle (Spielstände, Fotos, Musik, Homebrew).
+SD-Karten-Ordner
+Die Karte enthält die Dateien aus /data/DolphinPS4/User/Load/WiiSDSync (per FTP dorthin kopieren); was Spiele schreiben, landet am Ende wieder dort.
+SD-Karte beschreibbar
+Erlaubt Spielen, auf der SD-Karte zu speichern. Aus: nur lesen.
+SD-Kartengröße
+Automatisch macht die Karte genau so groß wie die Dateien im Ordner.

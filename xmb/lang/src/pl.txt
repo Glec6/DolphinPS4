@@ -371,3 +371,14 @@ aby zamiast tego otworzyć menu.
 Uruchamia się po otwarciu Dolphin
 # --- JIT
 Ta konsola nie pozwala na szybki tryb CPU Dolphin (JIT): gry działają wolno.
+# --- SD card
+Karta SD Wii
+Włożona
+Wyjęta
+Wirtualna karta SD dla gier i kanałów Wii (zapisy, zdjęcia, muzyka, homebrew).
+Folder karty SD
+Karta zawiera pliki z /data/DolphinPS4/User/Load/WiiSDSync (skopiuj je tam przez FTP); to, co zapiszą gry, wraca tam po ich zakończeniu.
+Zapis na karcie SD
+Pozwala grom zapisywać na karcie SD. Wył.: tylko odczyt.
+Rozmiar karty SD
+Automatycznie tworzy kartę dokładnie na pliki z folderu.
