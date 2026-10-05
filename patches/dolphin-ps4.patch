@@ -9045,10 +9045,10 @@ index 0000000..914dbb5
 +}  // namespace PS4Updater
 diff --git a/Source/Core/DolphinNoGUI/PS4XMB.cpp b/Source/Core/DolphinNoGUI/PS4XMB.cpp
 new file mode 100755
-index 0000000..e9c6de9
+index 0000000..dad2f0e
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4XMB.cpp
-@@ -0,0 +1,4049 @@
+@@ -0,0 +1,4048 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -9830,6 +9830,7 @@ index 0000000..e9c6de9
 +  bool m_intro = true;
 +  float m_intro_time = 0.0f;
 +  ImTextureID m_intro_dolphin{}, m_intro_title{};
++  ImTextureID m_glow{};  // a soft round light (white, gaussian alpha): stardust and nebula
 +  float m_intro_dolphin_aspect = 2.0f, m_intro_title_aspect = 5.4f;
 +  int m_launch = -1;
 +  float m_launch_time = 0.0f;
@@ -9946,6 +9947,21 @@ index 0000000..e9c6de9
 +  m_intro_dolphin =
 +      LoadPngTexture(m_assets_dir + "/xmb/intro-dolphin.png", &m_intro_dolphin_aspect);
 +  m_intro_title = LoadPngTexture(m_assets_dir + "/xmb/intro-title.png", &m_intro_title_aspect);
++  {
++    constexpr int SIZE = 64;
++    std::vector<u8> pixels(SIZE * SIZE * 4);
++    for (int y = 0; y < SIZE; y++)
++    {
++      for (int x = 0; x < SIZE; x++)
++      {
++        const float dx = (x + 0.5f) / SIZE * 2.0f - 1.0f, dy = (y + 0.5f) / SIZE * 2.0f - 1.0f;
++        u8* px = &pixels[(y * SIZE + x) * 4];
++        px[0] = px[1] = px[2] = 255;
++        px[3] = static_cast<u8>(std::exp(-(dx * dx + dy * dy) * 4.0f) * 255.0f);
++      }
++    }
++    m_glow = m_display.CreateTexture(pixels.data(), SIZE, SIZE);
++  }
 +  LoadCovers();
 +  LoadBanners();
 +
@@ -11881,97 +11897,93 @@ index 0000000..e9c6de9
 +  const float out = smooth(clamp01((t - OUT_START) / (END - OUT_START)));
 +  const float vis = 1.0f - out;
 +
-+  // Night-sea background with a soft glow where the dolphin lands.
++  // Night sky, deeper at the bottom.
 +  const ImVec2 centre(W * 0.5f, H * 0.40f);
 +  dl->AddRectFilledMultiColor(ImVec2(0, 0), ImVec2(W, H), IM_COL32(4, 10, 28, alpha(vis)),
 +                              IM_COL32(4, 10, 28, alpha(vis)), IM_COL32(0, 0, 0, alpha(vis)),
 +                              IM_COL32(0, 0, 0, alpha(vis)));
-+  // A nebula behind it all: clouds of violet, magenta and cyan light that drift and swell slowly
-+  // (each one soft layered discs), and a field of twinkling stars, a few with a flare.
-+  {
-+    const float neb = clamp01(t / 0.7f) * vis;
-+    struct Cloud
-+    {
-+      float x, y, r, speed, phase;
-+      int colour;
-+    };
-+    static const Cloud CLOUDS[] = {
-+        {0.28f, 0.30f, 430, 0.25f, 0.0f, 0}, {0.74f, 0.24f, 390, -0.20f, 1.3f, 1},
-+        {0.55f, 0.52f, 540, 0.15f, 2.1f, 2}, {0.16f, 0.64f, 370, -0.30f, 3.0f, 1},
-+        {0.86f, 0.66f, 410, 0.22f, 4.2f, 0}, {0.44f, 0.16f, 310, -0.18f, 5.1f, 2},
-+        {0.63f, 0.80f, 350, 0.27f, 0.7f, 1}, {0.34f, 0.84f, 290, -0.24f, 2.6f, 2},
-+        {0.50f, 0.38f, 260, 0.33f, 3.7f, 1},
-+    };
-+    static const int COLOURS[3][3] = {{120, 70, 255}, {255, 70, 170}, {60, 190, 255}};
-+    for (const Cloud& cloud : CLOUDS)
-+    {
-+      const float drift = t * cloud.speed + cloud.phase;
-+      const ImVec2 c(cloud.x * W + std::sin(drift) * 46.0f, cloud.y * H + std::cos(drift * 0.8f) * 28.0f);
-+      const float swell = 1.0f + 0.08f * std::sin(t * 0.9f + cloud.phase * 2.0f);
-+      const int* rgb = COLOURS[cloud.colour];
-+      // Stretched and turned a little, each its own way: clouds rather than discs.
-+      const ImVec2 radius(cloud.r * swell * (1.0f + 0.35f * std::sin(cloud.phase * 3.1f)),
-+                          cloud.r * swell * (0.75f + 0.2f * std::cos(cloud.phase * 1.7f)));
-+      const float turn = cloud.phase + t * cloud.speed * 0.15f;
-+      constexpr int RINGS = 18;
-+      for (int i = 0; i < RINGS; i++)
-+      {
-+        const float k = 1.0f - static_cast<float>(i) / RINGS;
-+        dl->AddEllipseFilled(c, ImVec2(radius.x * k, radius.y * k),
-+                             IM_COL32(rgb[0], rgb[1], rgb[2], alpha(0.016f * neb)), turn, 48);
-+      }
-+      // A softer, whiter heart.
-+      for (int i = 0; i < 5; i++)
-+      {
-+        const float k = 0.22f * (1.0f - i / 5.0f);
-+        dl->AddEllipseFilled(c, ImVec2(radius.x * k, radius.y * k),
-+                             IM_COL32((rgb[0] + 255) / 2, (rgb[1] + 255) / 2, (rgb[2] + 255) / 2,
-+                                      alpha(0.02f * neb)),
-+                             turn, 32);
-+      }
-+    }
-+    for (int i = 0; i < 150; i++)
-+    {
-+      // Fixed places from a hash, so nothing needs to be kept between frames.
-+      const float hx = std::abs(std::fmod(std::sin(i * 12.9898f) * 43758.5453f, 1.0f));
-+      const float hy = std::abs(std::fmod(std::sin(i * 78.233f) * 24634.6345f, 1.0f));
-+      const float hs = std::abs(std::fmod(std::sin(i * 39.425f) * 15731.743f, 1.0f));
-+      const ImVec2 p(hx * W, hy * H);
-+      const float twinkle = 0.55f + 0.45f * std::sin(t * (1.5f + hs * 3.0f) + i);
-+      const float size = 0.8f + hs * 1.8f;
-+      const int a = alpha(neb * twinkle * (0.35f + 0.65f * hs));
-+      dl->AddCircleFilled(p, size, IM_COL32(230, 235, 255, a), 8);
-+      if (hs > 0.93f)
-+      {
-+        // A flare on the brightest few.
-+        const float f = size * 5.0f * twinkle;
-+        const ImU32 flare = IM_COL32(200, 215, 255, a / 2);
-+        dl->AddLine(ImVec2(p.x - f, p.y), ImVec2(p.x + f, p.y), flare, 1.2f);
-+        dl->AddLine(ImVec2(p.x, p.y - f), ImVec2(p.x, p.y + f), flare, 1.2f);
-+      }
-+    }
-+  }
-+  const float glow = clamp01((t - 0.3f) / 0.8f) * vis;
-+  for (int i = 0; i < 6; i++)
-+  {
-+    const float r = 260.0f + i * 70.0f;
-+    dl->AddCircleFilled(centre, r, IM_COL32(60, 110, 190, alpha(0.05f * glow)), 64);
-+  }
 +
 +  // The leap: from below the bottom-right corner, over an arc, head first (the artwork faces
 +  // left), easing out into the centre; the body follows the arc and levels out as it lands.
-+  const float p = 1.0f - std::pow(1.0f - clamp01((t - 0.05f) / (LAND - 0.05f)), 3.0f);
 +  const ImVec2 p0(W * 0.98f, H * 1.10f), p1(W * 0.70f, H * -0.05f), p2 = centre;
-+  const float u = 1.0f - p;
-+  ImVec2 pos(u * u * p0.x + 2 * u * p * p1.x + p * p * p2.x,
-+             u * u * p0.y + 2 * u * p * p1.y + p * p * p2.y);
-+  const ImVec2 vel(2 * u * (p1.x - p0.x) + 2 * p * (p2.x - p1.x),
-+                   2 * u * (p1.y - p0.y) + 2 * p * (p2.y - p1.y));
-+  const float heading = std::atan2(vel.y, vel.x) - 3.14159265f;  // the head points -x
-+  float angle = std::remainder(heading, 6.2831853f) * (1.0f - p);
++  auto path = [&](float q, ImVec2* velocity) {
++    const float v = 1.0f - q;
++    if (velocity)
++    {
++      *velocity = ImVec2(2 * v * (p1.x - p0.x) + 2 * q * (p2.x - p1.x),
++                         2 * v * (p1.y - p0.y) + 2 * q * (p2.y - p1.y));
++    }
++    return ImVec2(v * v * p0.x + 2 * v * q * p1.x + q * q * p2.x,
++                  v * v * p0.y + 2 * v * q * p1.y + q * q * p2.y);
++  };
++  const float p = 1.0f - std::pow(1.0f - clamp01((t - 0.05f) / (LAND - 0.05f)), 3.0f);
++  ImVec2 vel;
++  ImVec2 pos = path(p, &vel);
 +  // After landing it floats gently.
 +  if (t > LAND)
 +    pos.y += std::sin((t - LAND) * 3.2f) * 6.0f * clamp01((t - LAND) / 0.3f);
++
++  // Stardust around the dolphin: soft light (one blurred dot texture, tinted and stretched), no
++  // drawn shapes. Violet, pink, cyan and white; fixed per grain from a hash, so nothing is kept
++  // between frames.
++  static const int PALETTE[4][3] = {{150, 90, 255}, {255, 90, 190}, {70, 200, 255}, {255, 255, 255}};
++  auto hash = [](int i, float k) { return std::abs(std::fmod(std::sin(i * k) * 43758.5453f, 1.0f)); };
++  auto light = [&](float x, float y, float radius, const int* rgb, float a) {
++    if (a <= 0.004f || m_glow == ImTextureID{})
++      return;
++    dl->AddImage(ImTextureRef(m_glow), ImVec2(x - radius, y - radius), ImVec2(x + radius, y + radius),
++                 ImVec2(0, 0), ImVec2(1, 1), IM_COL32(rgb[0], rgb[1], rgb[2], alpha(a)));
++  };
++  const float neb = clamp01((t - 0.1f) / 0.5f) * vis;
++  // A nebula glow clustered around it, swirling slowly, spreading as it fades out.
++  for (int i = 0; i < 22; i++)
++  {
++    const float ang = i * 2.39996f + t * (i % 2 ? 0.35f : -0.28f);
++    const float dist = (70.0f + 190.0f * hash(i, 12.9898f)) * (1.0f + 1.2f * out);
++    light(pos.x + std::cos(ang) * dist * 1.3f, pos.y + std::sin(ang) * dist * 0.75f,
++          130.0f + 170.0f * hash(i, 78.233f), PALETTE[i % 3], 0.13f * neb);
++  }
++  // A swirl of tiny glowing grains (the inner ones faster), twinkling.
++  for (int i = 0; i < 320; i++)
++  {
++    float r = 40.0f + 300.0f * std::pow(hash(i, 39.425f), 0.8f);
++    const float ang = hash(i, 11.13f) * 6.2832f + t * (1.6f - r / 300.0f);
++    r *= 1.0f + 1.6f * out;
++    const float twinkle = 0.5f + 0.5f * std::sin(t * (3.0f + 4.0f * hash(i, 7.7f)) + i);
++    light(pos.x + std::cos(ang) * r * 1.35f, pos.y + std::sin(ang) * r * 0.7f,
++          3.0f + 6.0f * hash(i, 3.3f), PALETTE[i % 4], (0.35f + 0.6f * twinkle) * neb);
++  }
++  // A comet tail of dust along the path behind it, fading out.
++  for (int i = 0; i < 160; i++)
++  {
++    const float k = i / 160.0f;
++    const float q = p - k * 0.45f;
++    if (q < 0.0f)
++      continue;
++    ImVec2 at = path(q, nullptr);
++    const float jitter = 30.0f + 60.0f * k;
++    at.x += (hash(i, 5.1f) - 0.5f) * jitter * 2.0f + k * 40.0f * std::sin(t * 2.0f + i);
++    at.y += (hash(i, 9.7f) - 0.5f) * jitter * 2.0f - (t > LAND ? (t - LAND) * 40.0f * k : 0.0f);
++    light(at.x, at.y, 3.0f + 5.0f * hash(i, 2.2f), PALETTE[i % 4],
++          0.8f * std::pow(1.0f - k, 1.5f) * clamp01((t - 0.05f) / 0.2f) * vis);
++  }
++  // Where it lands: dust bursting out sideways.
++  if (t > LAND)
++  {
++    const float q = clamp01((t - LAND) / 1.1f);
++    for (int i = 0; i < 140; i++)
++    {
++      const float ang = hash(i, 21.7f) * 6.2832f;
++      const float r = (80.0f + 620.0f * hash(i, 4.4f)) * (1.0f - (1.0f - q) * (1.0f - q));
++      light(centre.x + std::cos(ang) * r,
++            centre.y + 175.0f + std::sin(ang) * r * 0.16f - q * 30.0f * hash(i, 8.8f),
++            3.0f + 4.0f * hash(i, 6.6f), PALETTE[(i + 1) % 4], (1.0f - q) * 0.9f * vis);
++    }
++  }
++
++  // The dolphin.
++  const float heading = std::atan2(vel.y, vel.x) - 3.14159265f;  // the head points -x
++  const float angle = std::remainder(heading, 6.2831853f) * (1.0f - p);
 +  const float scale = (0.55f + 0.45f * p) * (1.0f + 0.12f * out);
 +  const float dw = 760.0f * scale, dh = dw / m_intro_dolphin_aspect;
 +  const float c = std::cos(angle), s = std::sin(angle);
@@ -11982,19 +11994,6 @@ index 0000000..e9c6de9
 +  dl->AddImageQuad(ImTextureRef(m_intro_dolphin), corner(-dw / 2, -dh / 2), corner(dw / 2, -dh / 2),
 +                   corner(dw / 2, dh / 2), corner(-dw / 2, dh / 2), ImVec2(0, 0), ImVec2(1, 0),
 +                   ImVec2(1, 1), ImVec2(0, 1), IM_COL32(255, 255, 255, dolphin_alpha));
-+
-+  // Ripples spreading out where it landed (flattened rings, cyan and pink like the artwork).
-+  for (int i = 0; i < 3; i++)
-+  {
-+    const float q = clamp01((t - LAND - i * 0.18f) / 1.0f);
-+    if (q <= 0.0f || q >= 1.0f)
-+      continue;
-+    const float r = 120.0f + 620.0f * (1.0f - (1.0f - q) * (1.0f - q));
-+    const ImU32 colour = i % 2 == 0 ? IM_COL32(110, 220, 255, alpha(0.55f * (1.0f - q) * vis)) :
-+                                      IM_COL32(255, 170, 210, alpha(0.45f * (1.0f - q) * vis));
-+    dl->AddEllipse(ImVec2(centre.x, centre.y + 175.0f), ImVec2(r, r * 0.16f), colour, 0.0f, 96,
-+                   3.0f);
-+  }
 +
 +  // The title rises into place under the dolphin.
 +  if (m_intro_title != ImTextureID{})
