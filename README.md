@@ -100,6 +100,9 @@ PS4), an FTP connection to it, and backups of games you own.
 
 **Updating:** install the newer package on top of the old one. Everything you've set up lives in
 `/data/DolphinPS4/` and survives updates. **Settings → About** shows which version you're on.
+Dolphin also checks GitHub for new versions: say *Yes* and it downloads the package, checks it and
+puts it in `/data/pkg`; then close Dolphin and install it from **Debug Settings → Game → Package
+Installer** (or GoldHEN's).
 
 ## Controls
 
