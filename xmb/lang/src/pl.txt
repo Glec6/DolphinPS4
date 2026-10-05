@@ -392,3 +392,11 @@ Kontroler w grach Wii
 Oba
 Wii Remote
 Co widzi gra Wii: Wii Remote, kontroler GameCube (obsługują go m.in. Mario Kart Wii i Super Smash Bros. Brawl) lub oba.
+# --- Restart
+Uruchom grę ponownie
+# --- Riivolution
+Łatki Riivolution
+Brak modów Riivolution dla tej gry.
+Skopiuj pliki z karty SD moda
+(folder riivolution i resztę) do
+Zadziała przy następnym uruchomieniu gry.

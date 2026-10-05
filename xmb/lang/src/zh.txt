@@ -392,3 +392,11 @@ Wii 游戏中的手柄
 两者
 Wii 遥控器
 Wii 游戏识别到的手柄：Wii 遥控器、GameCube 手柄（Mario Kart Wii、Super Smash Bros. Brawl 等支持），或两者。
+# --- Restart
+重新开始游戏
+# --- Riivolution
+Riivolution 补丁
+此游戏没有 Riivolution 模组。
+将模组的 SD 卡文件
+（riivolution 文件夹及其余文件）复制到
+下次启动游戏时生效。

@@ -392,3 +392,11 @@ SD-карта Wii
 Оба
 Wii Remote
 Что видит игра Wii: Wii Remote, контроллер GameCube (его поддерживают Mario Kart Wii, Super Smash Bros. Brawl и другие) или оба.
+# --- Restart
+Перезапустить игру
+# --- Riivolution
+Патчи Riivolution
+Для этой игры нет модов Riivolution.
+Скопируйте файлы мода для SD-карты
+(папку riivolution и остальное) в
+Применится при следующем запуске игры.

@@ -392,3 +392,11 @@ Controller in Wii-games
 Beide
 Wii Remote
 Wat een Wii-game ziet: een Wii Remote, een GameCube-controller (Mario Kart Wii, Super Smash Bros. Brawl en andere ondersteunen die) of beide.
+# --- Restart
+Spel herstarten
+# --- Riivolution
+Riivolution-patches
+Geen Riivolution-mods voor deze game.
+Kopieer de SD-kaartbestanden van de mod
+(de riivolution-map en de rest) naar
+Geldt vanaf de volgende keer dat de game start.

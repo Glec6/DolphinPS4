@@ -4292,7 +4292,7 @@ index 51c3fff..07e988f 100644
 +  ps4_add_eboot(dolphin-nogui)
 +endif()
 diff --git a/Source/Core/DolphinNoGUI/MainNoGUI.cpp b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
-index 3bf40ea..851b8b6 100644
+index 3bf40ea..f6ff708 100644
 --- a/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 +++ b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 @@ -2,10 +2,17 @@
@@ -4313,7 +4313,7 @@ index 3bf40ea..851b8b6 100644
  #include <string>
  #include <vector>
  
-@@ -15,7 +22,15 @@
+@@ -15,14 +22,26 @@
  #include <windows.h>
  #endif
  
@@ -4327,9 +4327,12 @@ index 3bf40ea..851b8b6 100644
 +#include "Core/Config/MainSettings.h"
 +#include "Core/PowerPC/PowerPC.h"
  #include "Core/Boot/Boot.h"
++#include "DiscIO/Enums.h"
++#include "DiscIO/RiivolutionParser.h"
++#include "DiscIO/VolumeDisc.h"
  #include "Core/BootManager.h"
  #include "Core/Core.h"
-@@ -23,6 +38,7 @@
+ #include "Core/DolphinAnalytics.h"
  #include "Core/Host.h"
  #include "Core/System.h"
  
@@ -4337,7 +4340,7 @@ index 3bf40ea..851b8b6 100644
  #include "UICommon/CommandLineParse.h"
  #ifdef USE_DISCORD_PRESENCE
  #include "UICommon/DiscordPresence.h"
-@@ -31,6 +47,42 @@
+@@ -31,6 +50,42 @@
  
  static std::unique_ptr<Platform> s_platform;
  
@@ -4380,7 +4383,7 @@ index 3bf40ea..851b8b6 100644
  static void signal_handler(int)
  {
    constexpr char message[] = "A signal was received. A second signal will force Dolphin to stop.\n";
-@@ -173,6 +225,10 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
+@@ -173,6 +228,10 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
    if (platform_name == "macos" || platform_name.empty())
      return Platform::CreateMacOSPlatform();
  #endif
@@ -4391,7 +4394,7 @@ index 3bf40ea..851b8b6 100644
  
    if (platform_name == "headless" || platform_name.empty())
      return Platform::CreateHeadlessPlatform();
-@@ -184,8 +240,17 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
+@@ -184,8 +243,17 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
  #define main app_main
  #endif
  
@@ -4410,7 +4413,7 @@ index 3bf40ea..851b8b6 100644
    const auto parser =
        CommandLineParse::CreateParser(CommandLineParse::ParserOptions::OmitGUIOptions);
    parser->add_option("-p", "--platform")
-@@ -207,6 +272,10 @@ int main(const int argc, char* argv[])
+@@ -207,6 +275,10 @@ int main(const int argc, char* argv[])
  #ifdef __APPLE__
                  ,
                  "macos"
@@ -4421,7 +4424,7 @@ index 3bf40ea..851b8b6 100644
  #endif
        });
  
-@@ -270,7 +339,325 @@ int main(const int argc, char* argv[])
+@@ -270,7 +342,325 @@ int main(const int argc, char* argv[])
  
    UICommon::SetUserDirectory(user_directory);
    UICommon::Init();
@@ -4747,7 +4750,7 @@ index 3bf40ea..851b8b6 100644
  
    Common::ScopeGuard ui_common_guard([] {
      UICommon::ShutdownControllers();
-@@ -284,6 +671,12 @@ int main(const int argc, char* argv[])
+@@ -284,6 +674,12 @@ int main(const int argc, char* argv[])
    }
  
    auto core_state_changed_hook = Core::AddOnStateChangedCallback([](const Core::State state) {
@@ -4760,11 +4763,30 @@ index 3bf40ea..851b8b6 100644
      if (state == Core::State::Uninitialized)
        s_platform->Stop();
    });
-@@ -303,6 +696,9 @@ int main(const int argc, char* argv[])
+@@ -303,6 +699,28 @@ int main(const int argc, char* argv[])
  
    DolphinAnalytics::Instance().ReportDolphinStart("nogui");
  
 +#ifdef __ORBIS__
++  // Riivolution mods (User/Load/Riivolution, as on a Wii's SD card): the options chosen in the
++  // XMB (Triangle on a Wii game -> Riivolution Patches) are in riivolution/config/<ID4>.xml.
++  if (boot && std::holds_alternative<BootParameters::Disc>(boot->parameters))
++  {
++    const auto& disc = std::get<BootParameters::Disc>(boot->parameters);
++    if (disc.volume && disc.volume->GetVolumeType() == DiscIO::Platform::WiiDisc)
++    {
++      auto patches = DiscIO::Riivolution::GenerateRiivolutionPatchesFromConfig(
++          File::GetUserPath(D_RIIVOLUTION_IDX), disc.volume->GetGameID(),
++          disc.volume->GetRevision(), disc.volume->GetDiscNumber());
++      if (!patches.empty())
++      {
++        Platform::BootTrace(
++            fmt::format("riivolution: {} patches for {}", patches.size(), disc.volume->GetGameID())
++                .c_str());
++        AddRiivolutionPatches(boot.get(), std::move(patches));
++      }
++    }
++  }
 +  Platform::BootTrace("BootCore");
 +#endif
    if (!BootManager::BootCore(Core::System::GetInstance(), std::move(boot), wsi))
@@ -6117,10 +6139,10 @@ index 0000000..5157e21
 +}  // namespace PS4Glyphs
 diff --git a/Source/Core/DolphinNoGUI/PS4IngameMenu.cpp b/Source/Core/DolphinNoGUI/PS4IngameMenu.cpp
 new file mode 100755
-index 0000000..add6acf
+index 0000000..dfea98f
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4IngameMenu.cpp
-@@ -0,0 +1,1058 @@
+@@ -0,0 +1,1079 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -6177,6 +6199,7 @@ index 0000000..add6acf
 +extern std::atomic<int> ps4_state_busy;  // Core/State.cpp
 +extern "C" const char* ps4_self_path();  // PlatformPS4.cpp: the running program
 +extern "C" void ps4_return_to_menu();    // PlatformPS4.cpp: the restart shows the menu
++extern "C" void ps4_relaunch_game();     // PlatformPS4.cpp: the restart boots this game again
 +extern "C" int ps4_jit_unavailable;      // PlatformPS4.cpp: no JIT on this console
 +
 +namespace PS4IngameMenu
@@ -6194,6 +6217,7 @@ index 0000000..add6acf
 +  MAIN_WII_SIDEWAYS,
 +  MAIN_SETTINGS,
 +  MAIN_CHEATS,
++  MAIN_RESTART,
 +  MAIN_QUIT,
 +  MAIN_COUNT,
 +};
@@ -6252,6 +6276,7 @@ index 0000000..add6acf
 +uint32_t s_held = 0;
 +float s_repeat = 0.0f;
 +bool s_quit = false;
++bool s_restart = false;  // the quit is a Restart Game
 +Clock::time_point s_quit_time;
 +// A game asked for the Wii Menu (IOS ES), which the port doesn't have: quit to the XMB instead.
 +std::atomic<bool> s_quit_requested{false};
@@ -6372,6 +6397,9 @@ index 0000000..add6acf
 +      case MAIN_CHEATS:
 +        rows.push_back({"Cheats"});
 +        break;
++      case MAIN_RESTART:
++        rows.push_back({"Restart Game"});
++        break;
 +      case MAIN_QUIT:
 +        rows.push_back({"Quit Game"});
 +        break;
@@ -6491,7 +6519,7 @@ index 0000000..add6acf
 +    s_main_items.push_back(MAIN_WII_EXTENSION);
 +    s_main_items.push_back(MAIN_WII_SIDEWAYS);
 +  }
-+  s_main_items.insert(s_main_items.end(), {MAIN_SETTINGS, MAIN_CHEATS, MAIN_QUIT});
++  s_main_items.insert(s_main_items.end(), {MAIN_SETTINGS, MAIN_CHEATS, MAIN_RESTART, MAIN_QUIT});
 +  BuildRows();
 +  {
 +    std::lock_guard lock(s_mutex);
@@ -6716,6 +6744,12 @@ index 0000000..add6acf
 +    SelectableMove(1);
 +    if (!s_row_keys.empty() && s_row_keys[s_settings_selected].empty())
 +      s_settings_selected = 0;
++    break;
++  case MAIN_RESTART:
++    // The same clean stop as Quit Game (memory cards and the NAND are written as the game saves);
++    // the app then restarts into this game instead of the menu: a fresh boot, like a console reset.
++    s_restart = true;
++    QuitToXMB(system, "restart the game");
 +    break;
 +  case MAIN_QUIT:
 +    QuitToXMB(system, "quit to the XMB");
@@ -6988,6 +7022,11 @@ index 0000000..add6acf
 +{
 +  return s_quit;
 +}
++
++bool RestartGame()
++{
++  return s_quit && s_restart;
++}
 +}  // namespace PS4IngameMenu
 +
 +// IOS ES (Core/IOS/ES/ES.cpp), any thread: a game chose "Wii Menu" in its HOME Menu.
@@ -7053,8 +7092,12 @@ index 0000000..add6acf
 +    // The clean stop normally ends the main loop quickly; don't wait forever on it.
 +    if (Clock::now() - s_quit_time > std::chrono::seconds(6))
 +    {
-+      Log("stop took too long, restarting into the XMB");
-+      ps4_return_to_menu();
++      Log(s_restart ? "stop took too long, restarting the game" :
++                      "stop took too long, restarting into the XMB");
++      if (s_restart)
++        ps4_relaunch_game();
++      else
++        ps4_return_to_menu();
 +      sceSystemServiceLoadExec(ps4_self_path(), nullptr);
 +    }
 +    return;
@@ -7181,10 +7224,10 @@ index 0000000..add6acf
 +}  // namespace PS4IngameMenu
 diff --git a/Source/Core/DolphinNoGUI/PS4IngameMenu.h b/Source/Core/DolphinNoGUI/PS4IngameMenu.h
 new file mode 100755
-index 0000000..4af50c8
+index 0000000..b9b11df
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4IngameMenu.h
-@@ -0,0 +1,24 @@
+@@ -0,0 +1,26 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -7208,6 +7251,8 @@ index 0000000..4af50c8
 +void Install();
 +// "Quit Game" was chosen: the app restarts into the XMB instead of closing.
 +bool ReturnToXMB();
++// "Restart Game" stopped the emulation: the app restarts straight into the same game.
++bool RestartGame();
 +}  // namespace PS4IngameMenu
 diff --git a/Source/Core/DolphinNoGUI/PS4Lang.cpp b/Source/Core/DolphinNoGUI/PS4Lang.cpp
 new file mode 100644
@@ -9169,10 +9214,10 @@ index 0000000..914dbb5
 +}  // namespace PS4Updater
 diff --git a/Source/Core/DolphinNoGUI/PS4XMB.cpp b/Source/Core/DolphinNoGUI/PS4XMB.cpp
 new file mode 100755
-index 0000000..930f9d7
+index 0000000..4ff441b
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4XMB.cpp
-@@ -0,0 +1,4068 @@
+@@ -0,0 +1,4196 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -9211,6 +9256,8 @@ index 0000000..930f9d7
 +#include "DiscIO/Blob.h"
 +#include "DiscIO/VolumeWad.h"
 +#include "DiscIO/VolumeDisc.h"
++#include "DiscIO/RiivolutionParser.h"
++#include "Common/FileSearch.h"
 +#include "Common/FileUtil.h"
 +#include "DolphinNoGUI/PS4Cheats.h"
 +#include "DolphinNoGUI/PS4Controls.h"
@@ -9812,6 +9859,9 @@ index 0000000..930f9d7
 +  void BuildControlRows();
 +  void OpenCheatsList(const Game& game);
 +  void BuildCheatRows();
++  void OpenRiivolutionList(const Game& game);
++  void BuildRiivolutionRows();
++  void SaveRiivolutionConfig();
 +  void StartCoverDownload();
 +  void UpdateCoverDownload();
 +  std::string GamesFolder() const
@@ -9911,6 +9961,9 @@ index 0000000..930f9d7
 +  // Cheats panel.
 +  PS4Cheats::List m_cheats;
 +  std::string m_cheats_game;
++  // Riivolution Patches page: the mods (XMLs) for the game, their options as chosen.
++  std::vector<DiscIO::Riivolution::Disc> m_riivolution;
++  std::string m_riivolution_game;
 +
 +  // Cover download (background thread).
 +  std::thread m_cover_thread;
@@ -10678,6 +10731,23 @@ index 0000000..930f9d7
 +    BuildCheatRows();
 +    return;
 +  }
++  if (row.key.rfind("riiv:", 0) == 0)
++  {
++    // riiv:<mod>:<section>:<option>: Off (0) and the option's choices (1-based), in turn.
++    size_t mod = 0, section = 0, option = 0;
++    if (std::sscanf(row.key.c_str() + 5, "%zu:%zu:%zu", &mod, &section, &option) == 3 &&
++        mod < m_riivolution.size() && section < m_riivolution[mod].m_sections.size() &&
++        option < m_riivolution[mod].m_sections[section].m_options.size())
++    {
++      auto& o = m_riivolution[mod].m_sections[section].m_options[option];
++      const int count = static_cast<int>(o.m_choices.size()) + 1;
++      const int next = ((static_cast<int>(o.m_selected_choice) + direction) % count + count) % count;
++      o.m_selected_choice = static_cast<u32>(next);
++      SaveRiivolutionConfig();
++      BuildRiivolutionRows();
++    }
++    return;
++  }
 +  if (row.scope)
 +  {
 +    PS4Settings::SetCustom(game, !PS4Settings::IsCustom(game));
@@ -10759,6 +10829,97 @@ index 0000000..930f9d7
 +                     "Dolphin's cheat database has none for " + game.id + "."};
 +  m_panel.selected = 0;
 +  MoveSettingRow(0);
++}
++
++// Riivolution: mods as on a Wii's SD card, in User/Load/Riivolution (its riivolution folder with
++// the XMLs, and the mod's own folders). The choices go in riivolution/config/<ID4>.xml, the file
++// Riivolution and Dolphin on PC use; the game process applies them (MainNoGUI).
++void Menu::OpenRiivolutionList(const Game& game)
++{
++  m_panel = {};
++  m_panel.open = true;
++  m_panel.title = "Riivolution Patches";
++  m_riivolution.clear();
++  m_riivolution_game = game.id;
++  const std::string root = m_data_dir + "/User/Load/Riivolution/";
++  std::optional<DiscIO::Riivolution::Config> config;
++  if (game.id.size() == 4 || game.id.size() == 6)
++  {
++    config = DiscIO::Riivolution::ParseConfigFile(root + "riivolution/config/" +
++                                                  game.id.substr(0, 4) + ".xml");
++  }
++  for (const std::string& path : Common::DoFileSearch({root + "riivolution"}, {".xml"}))
++  {
++    auto parsed = DiscIO::Riivolution::ParseFile(path);
++    if (!parsed || !parsed->IsValidForGame(game.id, game.revision, 0))
++      continue;
++    if (config)
++      DiscIO::Riivolution::ApplyConfigDefaults(&*parsed, *config);
++    m_riivolution.push_back(std::move(*parsed));
++  }
++  BuildRiivolutionRows();
++  if (m_panel.rows.empty())
++  {
++    m_panel.lines = {"", "No Riivolution mods for this game.", "",
++                     "Copy the mod's SD card files", "(its riivolution folder and the rest) to",
++                     "/data/DolphinPS4/User/Load/Riivolution/"};
++  }
++  m_panel.selected = 0;
++  MoveSettingRow(0);
++}
++
++void Menu::BuildRiivolutionRows()
++{
++  std::vector<SettingRow> rows;
++  for (size_t d = 0; d < m_riivolution.size(); d++)
++  {
++    const auto& disc = m_riivolution[d];
++    for (size_t s = 0; s < disc.m_sections.size(); s++)
++    {
++      const auto& section = disc.m_sections[s];
++      if (section.m_options.empty())
++        continue;
++      rows.push_back({section.m_name, "", "", true});
++      for (size_t o = 0; o < section.m_options.size(); o++)
++      {
++        const auto& option = section.m_options[o];
++        const u32 choice = option.m_selected_choice;
++        SettingRow row{option.m_name,
++                       choice == 0 || choice > option.m_choices.size() ?
++                           "Off" :
++                           option.m_choices[choice - 1].m_name,
++                       "riiv:" + std::to_string(d) + ":" + std::to_string(s) + ":" +
++                           std::to_string(o)};
++        row.tag = choice == 0 ? -1 : 1;
++        rows.push_back(std::move(row));
++      }
++    }
++  }
++  m_panel.rows = std::move(rows);
++}
++
++void Menu::SaveRiivolutionConfig()
++{
++  const std::string& id = m_riivolution_game;
++  if (!(id.size() == 4 || id.size() == 6))
++    return;
++  DiscIO::Riivolution::Config config;
++  for (const auto& disc : m_riivolution)
++  {
++    for (const auto& section : disc.m_sections)
++    {
++      for (const auto& option : section.m_options)
++      {
++        config.m_options.push_back(
++            {option.m_id.empty() ? section.m_name + option.m_name : option.m_id,
++             option.m_selected_choice});
++      }
++    }
++  }
++  const std::string dir = m_data_dir + "/User/Load/Riivolution/riivolution/config/";
++  File::CreateFullPath(dir);
++  DiscIO::Riivolution::WriteConfigFile(dir + id.substr(0, 4) + ".xml", config);
++  Log("riivolution: choices saved for " + id);
 +}
 +
 +void Menu::BuildCheatRows()
@@ -11073,6 +11234,13 @@ index 0000000..930f9d7
 +        Play("confirm");
 +        return;
 +      }
++      else if (m_panel.title == "Game" && m_panel.selected == 5)
++      {
++        const Item& item = m_items[m_category][m_selected[m_category]];
++        OpenRiivolutionList(m_games[item.game]);
++        Play("confirm");
++        return;
++      }
 +      else if (m_panel.title == "Game" && m_panel.selected == 4)
 +      {
 +        // One default game: setting another replaces it, the same game again removes it.
@@ -11210,6 +11378,9 @@ index 0000000..930f9d7
 +                         m_prefs.default_game == m_games[items[selected].game].path ?
 +                             "Remove Default ISO" :
 +                             "Set as Default ISO"};
++      if (m_games[items[selected].game].wii && !m_games[items[selected].game].homebrew &&
++          !m_games[items[selected].game].wad)
++        m_panel.options.push_back("Riivolution Patches");
 +      Play("menu");
 +    }
 +  }
@@ -11843,6 +12014,8 @@ index 0000000..930f9d7
 +      }
 +      else if (row.key.rfind("cheat:", 0) == 0 || row.key.rfind("cheatall:", 0) == 0)
 +        help = "Applies the next time the game starts, or now from the in-game menu (L3+R3).";
++      else if (row.key.rfind("riiv:", 0) == 0)
++        help = "Applies the next time the game starts.";
 +      else if (row.scope)
 +        help = "All Games: this game follows the global settings. This Game: its own.";
 +      else if (const PS4Settings::Setting* setting = PS4Settings::Find(row.key))
@@ -13947,10 +14120,10 @@ index f4dc8a9..0c37736 100644
  
 diff --git a/Source/Core/DolphinNoGUI/PlatformPS4.cpp b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
 new file mode 100644
-index 0000000..2b5d90c
+index 0000000..6cdaa88
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
-@@ -0,0 +1,1618 @@
+@@ -0,0 +1,1644 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -14056,6 +14229,7 @@ index 0000000..2b5d90c
 +extern "C" const char* ps4_self_path();
 +extern "C" void ps4_update_started_ok();
 +extern "C" void ps4_return_to_menu();
++extern "C" void ps4_relaunch_game();
 +// The version this program was packaged as: scripts/package-dolphin.sh writes it over the
 +// "00.00" (a downloaded update must know it isn't the installed program).
 +extern "C" const char ps4_built_version[];
@@ -15041,6 +15215,8 @@ index 0000000..2b5d90c
 +  // The Wii SD card's folder (Settings -> System -> SD Card Folder), ready to copy files into.
 +  mkdir((user_dir + "/Load").c_str(), 0777);
 +  mkdir((user_dir + "/Load/WiiSDSync").c_str(), 0777);
++  mkdir((user_dir + "/Load/Riivolution").c_str(), 0777);
++  mkdir((user_dir + "/Load/Riivolution/riivolution").c_str(), 0777);
 +  PS4Controls::SetUserDirectory(user_dir);
 +  PS4Controls::WriteDefaultsIfMissing();
 +}
@@ -15050,6 +15226,11 @@ index 0000000..2b5d90c
 +  // The raw exit syscall isn't allowed for apps: ask the system to close us, or restart into the
 +  // XMB when the in-game menu's "Quit Game" stopped the emulation.
 +  fflush(stderr);
++  if (PS4IngameMenu::RestartGame())
++  {
++    ps4_relaunch_game();
++    sceSystemServiceLoadExec(ps4_self_path(), nullptr);
++  }
 +  if (PS4IngameMenu::ReturnToXMB())
 +  {
 +    ps4_return_to_menu();
@@ -15097,6 +15278,23 @@ index 0000000..2b5d90c
 +{
 +  if (FILE* file = fopen(TO_MENU.c_str(), "w"))
 +    fclose(file);
++}
++
++// The game this process booted (its first disc). The in-game menu's Restart Game: launch.txt
++// names it again, so the restarted app boots it the way the menu starts games.
++std::string s_booted_game;
++extern "C" void ps4_relaunch_game()
++{
++  if (s_booted_game.empty())
++  {
++    ps4_return_to_menu();
++    return;
++  }
++  if (FILE* file = fopen((std::string(PS4_DATA_DIR_PATH) + "/launch.txt").c_str(), "w"))
++  {
++    fprintf(file, "%s\n", s_booted_game.c_str());
++    fclose(file);
++  }
 +}
 +
 +// Set when the console won't run code from memory Dolphin writes (no JIT): PS4IngameMenu tells
@@ -15476,6 +15674,7 @@ index 0000000..2b5d90c
 +  }
 +  else
 +  {
++    s_booted_game = game;
 +    for (const std::string& disc : FindAllDiscs(game))
 +    {
 +      fprintf(stderr, "[dolphin] booting %s\n", disc.c_str());

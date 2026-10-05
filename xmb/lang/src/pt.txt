@@ -392,3 +392,12 @@ Controle em jogos de Wii
 Ambos
 Wii Remote
 Define o que o jogo de Wii detecta: um Wii Remote, um controle de GameCube (Mario Kart Wii, Super Smash Bros. Brawl e outros aceitam) ou ambos.
+
+# --- Restart
+Reiniciar jogo
+# --- Riivolution
+Patches do Riivolution
+Nenhum mod do Riivolution para este jogo.
+Copie os arquivos do cartão SD do mod
+(a pasta riivolution e os demais arquivos) para
+Será aplicado na próxima vez que o jogo iniciar.
