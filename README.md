@@ -249,6 +249,11 @@ Its shader is being compiled. It's saved to the cache, so it won't happen there 
 Open its Game Settings and set *Speed Features* to *Compatible*. If it still happens, please
 report it.
 
+**Tilting the controller does nothing in Wii games.**
+Motion controls need an official DualShock 4. Many third-party controllers have no motion
+sensors: the PS4 then reports a controller that never moves. Also check *Settings → System →
+Motion Controls* is On.
+
 **A Wii game tells me to disconnect the Nunchuk.**
 Press L3 + R3 and set *Wii Extension* to *None*. The game remembers it.
 
