@@ -8951,10 +8951,10 @@ index 0000000..914dbb5
 +}  // namespace PS4Updater
 diff --git a/Source/Core/DolphinNoGUI/PS4XMB.cpp b/Source/Core/DolphinNoGUI/PS4XMB.cpp
 new file mode 100755
-index 0000000..293b86e
+index 0000000..cfdf08f
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4XMB.cpp
-@@ -0,0 +1,3923 @@
+@@ -0,0 +1,3984 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -8981,6 +8981,7 @@ index 0000000..293b86e
 +#include <imgui_internal.h>
 +#include <orbis/AudioOut.h>
 +#include <orbis/Pad.h>
++#include <orbis/SystemService.h>
 +#include <orbis/UserService.h>
 +#include <orbis/libkernel.h>
 +
@@ -9527,6 +9528,7 @@ index 0000000..293b86e
 +  SET_UPDATE,        // the update panel: prompt, progress, result
 +  SET_GAMES_DIR,     // Game Folder: a folder browser
 +  SET_STYLE,         // Menu Style: Library or XMB
++  SET_LANGUAGE,      // Language: the menus' (and games') language, a list of all of them
 +  SET_MEMCARD,       // a memory card: Slot A and the saves on it
 +  SET_GROUP = 100,  // + index into PS4Settings::Categories(): an emulation settings list
 +};
@@ -9724,7 +9726,8 @@ index 0000000..293b86e
 +  std::string m_update_ready;      // the downloaded package, for the user's package installer
 +  bool m_update_unpacked = false;  // the update archive is in data_dir/app: restart to use it
 +  bool m_update_restart = false;   // restart the app once the menu loop ends
-+  bool m_language_restart = false;  // Settings -> Language changed: restart when the panel closes
++  bool m_first_language = false;  // the first start: the language list before anything else
++  void SetLanguage(const std::string& code);
 +  bool m_update_ready_shown = false;
 +  float m_time = 0.0f;
 +  float m_fade = 1.0f;  // black overlay: fades in at start, out at launch
@@ -10072,6 +10075,7 @@ index 0000000..293b86e
 +
 +  auto& settings = m_items[static_cast<int>(Category::Settings)];
 +  // Emulation settings for every game (each game can have its own: Triangle on it).
++  settings.push_back({"Language", PS4Lang::Current().name, -1, -1, SET_LANGUAGE});
 +  const auto& categories = PS4Settings::Categories();
 +  constexpr const char* GROUP_HELP[] = {"Picture, resolution, frame rate",
 +                                        "Filtering, anti-aliasing, effects",
@@ -10173,6 +10177,15 @@ index 0000000..293b86e
 +  return installed.empty() || installed == m_version ? "" : " (installed package " + installed + ")";
 +}
 +
++// The menus switch at once (every font is loaded already); games use it from their next start.
++void Menu::SetLanguage(const std::string& code)
++{
++  PS4Settings::Set("language", code);
++  PS4Lang::Load(m_assets_dir, code);
++  Log("language: " + code);
++  BuildItems();
++}
++
 +void Menu::OpenSettingPanel(int setting)
 +{
 +  m_panel = {};
@@ -10191,6 +10204,18 @@ index 0000000..293b86e
 +      m_panel.options.push_back(std::to_string(v));
 +    m_panel.selected = (100 - m_prefs.volume) / 10;
 +    break;
++  case SET_LANGUAGE:
++  {
++    m_panel.title = "Language";
++    const auto& languages = PS4Lang::All();
++    for (size_t i = 0; i < languages.size(); i++)
++    {
++      m_panel.options.push_back(languages[i].name);
++      if (std::string(languages[i].code) == PS4Lang::Current().code)
++        m_panel.selected = static_cast<int>(i);
++    }
++    break;
++  }
 +  case SET_STYLE:
 +    m_panel.title = "Menu Style";
 +    m_panel.options = {"Library", "XMB"};
@@ -10437,7 +10462,7 @@ index 0000000..293b86e
 +    PS4Settings::Set(row.key, PS4Settings::Step(*setting, PS4Settings::Get(row.key, game), direction),
 +                     game);
 +    if (row.key == "language")
-+      m_language_restart = true;
++      SetLanguage(PS4Settings::Get("language"));
 +  }
 +  BuildSettingRows();
 +}
@@ -10648,6 +10673,11 @@ index 0000000..293b86e
 +  case SET_AUTO_UPDATE:
 +    m_prefs.auto_update = option == 0;
 +    break;
++  case SET_LANGUAGE:
++    if (option >= 0 && option < static_cast<int>(PS4Lang::All().size()))
++      SetLanguage(PS4Lang::All()[option].code);
++    m_first_language = false;
++    break;
 +  case SET_STYLE:
 +    m_prefs.style = option == 0 ? "library" : "xmb";
 +    Log("menu style: " + m_prefs.style);
@@ -10677,12 +10707,10 @@ index 0000000..293b86e
 +  {
 +    if (pressed & BTN_CIRCLE)
 +    {
-+      if (m_language_restart)
++      if (m_first_language && m_panel.setting == SET_LANGUAGE)
 +      {
-+        // Settings -> Language: the menu starts again in the new language (and its fonts).
-+        Log("language changed: restarting the menu");
-+        m_update_restart = true;
-+        m_quit = true;
++        // The first start's language list closed without a choice: the highlighted one.
++        ApplySettingOption(SET_LANGUAGE, m_panel.selected);
 +      }
 +      if (m_panel.setting == SET_UPDATE && m_update_state == UpdateState::Downloading)
 +        m_update_cancel = true;
@@ -12780,6 +12808,39 @@ index 0000000..293b86e
 +    }
 +  }
 +  m_tab_pos = static_cast<float>(LibraryTab());
++  // The first start (no language chosen yet): the language list first, on the PS4's own language.
++  {
++    bool chosen = false;
++    for (const auto& [key, value] : PS4Settings::GlobalValues())
++      chosen = chosen || key == "language";
++    if (!chosen)
++    {
++      // PS4 system languages: 0 Japanese, 1 English, 2 French, 3 Spanish, 4 German, 5 Italian,
++      // 6 Dutch, 7 Portuguese, 8 Russian, 9 Korean, 10/11 Chinese, 16 Polish, 17 Portuguese
++      // (Brazil), 18 English (UK), 19 Turkish, 20 Spanish (Latin America), 22 French (Canada).
++      int32_t system = 1;
++      sceSystemServiceParamGetInt(ORBIS_SYSTEM_SERVICE_PARAM_ID_LANG, &system);
++      const char* code = system == 0                  ? "ja" :
++                         system == 2 || system == 22  ? "fr" :
++                         system == 3 || system == 20  ? "es" :
++                         system == 4                  ? "de" :
++                         system == 5                  ? "it" :
++                         system == 6                  ? "nl" :
++                         system == 7 || system == 17  ? "pt" :
++                         system == 8                  ? "ru" :
++                         system == 9                  ? "ko" :
++                         system == 10 || system == 11 ? "zh" :
++                         system == 16                 ? "pl" :
++                         system == 19                 ? "tr" :
++                                                        "en";
++      PS4Lang::Load(m_assets_dir, code);
++      BuildItems();
++      OpenSettingPanel(SET_LANGUAGE);
++      m_first_language = true;
++      Log(std::string("first start: language list (PS4 language ") + std::to_string(system) +
++          ", suggested " + code + ")");
++    }
++  }
 +  RemoveOldUpdates();
 +  if (m_prefs.auto_update)
 +    StartUpdateCheck(false);
