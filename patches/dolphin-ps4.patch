@@ -13010,10 +13010,10 @@ index f4dc8a9..0c37736 100644
  
 diff --git a/Source/Core/DolphinNoGUI/PlatformPS4.cpp b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
 new file mode 100644
-index 0000000..cc67d57
+index 0000000..2c99c2e
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
-@@ -0,0 +1,1358 @@
+@@ -0,0 +1,1361 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -14184,6 +14184,9 @@ index 0000000..cc67d57
 +  Platform::BootTrace(("starting the downloaded update v" + update + " (installed: v" + installed + ")").c_str());
 +  fflush(stderr);
 +  const std::string eboot = UPDATE_DIR + "/eboot.bin";
++  // Too early for the usual module loading: without libSceSystemService loaded the call below
++  // kills the app with PRX_NOT_RESOLVED_FUNCTION (v03.07).
++  LoadSystemModules();
 +  const int result = sceSystemServiceLoadExec(eboot.c_str(), nullptr);
 +  // Still here: it couldn't be started.
 +  std::remove(UPDATE_PENDING.c_str());
