@@ -211,8 +211,26 @@ Measured on a launch-model PS4, average frames per second while playing:
 | Wii Sports Resort | Wii | ~37 |
 | Bully: Scholarship Edition | Wii | 15–30 (its normal rate is 30) |
 
-A range means the frame rate depends on what's on screen. Tested a game that isn't listed? Let
-us know how it runs in an [issue](https://github.com/iHaiDeeZ/DolphinPS4/issues).
+A range means the frame rate depends on what's on screen.
+
+**Reported by testers** on the [Discord](https://discord.gg/QwtU8ZaCth):
+
+| Game | System | Console | Resolution | Result |
+|---|---|---|---|---|
+| Super Smash Bros. Melee (Akaneia / ACE mod) | GameCube | PS4 Slim, 11.00 | 1080p | 60 FPS, very stable, no stutters or crashes |
+| Dragon Ball Z: Budokai | GameCube | PS4 Slim, 12.52 | 1080p | 60 FPS, stable, no stutters or crashes |
+| The Legend of Zelda: Four Swords Adventures | GameCube | PS4 Slim, 11.02 | 1080p | Steady 60 FPS most of the time |
+| The Legend of Zelda: Twilight Princess | GameCube | PS4 Slim, 12.52 | 1080p | 28 FPS, stable, no stutters or freezes |
+| Spider-Man 2 | GameCube | PS4 Slim, 12.52 | 1080p | ~25 FPS, dips to 80% speed, some stutters, no crashes |
+| Dead to Rights | GameCube | PS4 Slim, 12.52 | 720p | 45–50 FPS, speed dips, some stutters, no crashes |
+| Super Paper Mario | Wii | – | 1080p | 50–60 FPS, stable, playable |
+| Super Smash Bros. Brawl | Wii | PS4 Slim, 11.00 | 1080p | 60 FPS, stutters on some stages, no crashes |
+| Mario Kart Wii | Wii | PS4 Slim, 11.00 | 1080p | 40–50 FPS, sometimes full speed, some stutters, no crashes |
+| Crash of the Titans | Wii | PS4 Pro, 13.52 | 1080p | Doesn't start: loops at the beginning |
+
+Tested a game that isn't listed? Tell us on the [Discord](https://discord.gg/QwtU8ZaCth) or in an
+[issue](https://github.com/iHaiDeeZ/DolphinPS4/issues): the game, your console and firmware, the
+resolution and how it ran.
 
 ## FAQ
 
