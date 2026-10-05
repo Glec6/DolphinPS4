@@ -8975,10 +8975,10 @@ index 0000000..914dbb5
 +}  // namespace PS4Updater
 diff --git a/Source/Core/DolphinNoGUI/PS4XMB.cpp b/Source/Core/DolphinNoGUI/PS4XMB.cpp
 new file mode 100755
-index 0000000..cfdf08f
+index 0000000..e9c6de9
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4XMB.cpp
-@@ -0,0 +1,3984 @@
+@@ -0,0 +1,4049 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -11816,6 +11816,71 @@ index 0000000..cfdf08f
 +  dl->AddRectFilledMultiColor(ImVec2(0, 0), ImVec2(W, H), IM_COL32(4, 10, 28, alpha(vis)),
 +                              IM_COL32(4, 10, 28, alpha(vis)), IM_COL32(0, 0, 0, alpha(vis)),
 +                              IM_COL32(0, 0, 0, alpha(vis)));
++  // A nebula behind it all: clouds of violet, magenta and cyan light that drift and swell slowly
++  // (each one soft layered discs), and a field of twinkling stars, a few with a flare.
++  {
++    const float neb = clamp01(t / 0.7f) * vis;
++    struct Cloud
++    {
++      float x, y, r, speed, phase;
++      int colour;
++    };
++    static const Cloud CLOUDS[] = {
++        {0.28f, 0.30f, 430, 0.25f, 0.0f, 0}, {0.74f, 0.24f, 390, -0.20f, 1.3f, 1},
++        {0.55f, 0.52f, 540, 0.15f, 2.1f, 2}, {0.16f, 0.64f, 370, -0.30f, 3.0f, 1},
++        {0.86f, 0.66f, 410, 0.22f, 4.2f, 0}, {0.44f, 0.16f, 310, -0.18f, 5.1f, 2},
++        {0.63f, 0.80f, 350, 0.27f, 0.7f, 1}, {0.34f, 0.84f, 290, -0.24f, 2.6f, 2},
++        {0.50f, 0.38f, 260, 0.33f, 3.7f, 1},
++    };
++    static const int COLOURS[3][3] = {{120, 70, 255}, {255, 70, 170}, {60, 190, 255}};
++    for (const Cloud& cloud : CLOUDS)
++    {
++      const float drift = t * cloud.speed + cloud.phase;
++      const ImVec2 c(cloud.x * W + std::sin(drift) * 46.0f, cloud.y * H + std::cos(drift * 0.8f) * 28.0f);
++      const float swell = 1.0f + 0.08f * std::sin(t * 0.9f + cloud.phase * 2.0f);
++      const int* rgb = COLOURS[cloud.colour];
++      // Stretched and turned a little, each its own way: clouds rather than discs.
++      const ImVec2 radius(cloud.r * swell * (1.0f + 0.35f * std::sin(cloud.phase * 3.1f)),
++                          cloud.r * swell * (0.75f + 0.2f * std::cos(cloud.phase * 1.7f)));
++      const float turn = cloud.phase + t * cloud.speed * 0.15f;
++      constexpr int RINGS = 18;
++      for (int i = 0; i < RINGS; i++)
++      {
++        const float k = 1.0f - static_cast<float>(i) / RINGS;
++        dl->AddEllipseFilled(c, ImVec2(radius.x * k, radius.y * k),
++                             IM_COL32(rgb[0], rgb[1], rgb[2], alpha(0.016f * neb)), turn, 48);
++      }
++      // A softer, whiter heart.
++      for (int i = 0; i < 5; i++)
++      {
++        const float k = 0.22f * (1.0f - i / 5.0f);
++        dl->AddEllipseFilled(c, ImVec2(radius.x * k, radius.y * k),
++                             IM_COL32((rgb[0] + 255) / 2, (rgb[1] + 255) / 2, (rgb[2] + 255) / 2,
++                                      alpha(0.02f * neb)),
++                             turn, 32);
++      }
++    }
++    for (int i = 0; i < 150; i++)
++    {
++      // Fixed places from a hash, so nothing needs to be kept between frames.
++      const float hx = std::abs(std::fmod(std::sin(i * 12.9898f) * 43758.5453f, 1.0f));
++      const float hy = std::abs(std::fmod(std::sin(i * 78.233f) * 24634.6345f, 1.0f));
++      const float hs = std::abs(std::fmod(std::sin(i * 39.425f) * 15731.743f, 1.0f));
++      const ImVec2 p(hx * W, hy * H);
++      const float twinkle = 0.55f + 0.45f * std::sin(t * (1.5f + hs * 3.0f) + i);
++      const float size = 0.8f + hs * 1.8f;
++      const int a = alpha(neb * twinkle * (0.35f + 0.65f * hs));
++      dl->AddCircleFilled(p, size, IM_COL32(230, 235, 255, a), 8);
++      if (hs > 0.93f)
++      {
++        // A flare on the brightest few.
++        const float f = size * 5.0f * twinkle;
++        const ImU32 flare = IM_COL32(200, 215, 255, a / 2);
++        dl->AddLine(ImVec2(p.x - f, p.y), ImVec2(p.x + f, p.y), flare, 1.2f);
++        dl->AddLine(ImVec2(p.x, p.y - f), ImVec2(p.x, p.y + f), flare, 1.2f);
++      }
++    }
++  }
 +  const float glow = clamp01((t - 0.3f) / 0.8f) * vis;
 +  for (int i = 0; i < 6; i++)
 +  {
