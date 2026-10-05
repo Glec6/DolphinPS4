@@ -387,3 +387,8 @@ SD 카드 용량
 DualShock 4의 모션 센서로 Wii 리모컨을 움직입니다: 기울이고, 휘두르고, 흔드세요.
 Wii 리모컨으로 쓸 컨트롤러
 자동: 게임 시작 시 켜져 있는 PS Move가 Wii 리모컨(버튼, 모션, 포인터)이 되고 DualShock 4가 눈차크가 됩니다.
+# --- Wii input
+Wii 게임의 컨트롤러
+둘 다
+Wii 리모컨
+Wii 게임이 인식하는 것: Wii 리모컨, 게임큐브 컨트롤러(Mario Kart Wii, Super Smash Bros. Brawl 등이 지원), 또는 둘 다.

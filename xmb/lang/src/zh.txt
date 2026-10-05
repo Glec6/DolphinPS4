@@ -387,3 +387,8 @@ SD 卡容量
 DualShock 4 的体感传感器可以移动 Wii 遥控器：倾斜、挥动和摇晃。
 作为 Wii 遥控器的手柄
 自动：游戏启动时已开启的 PS Move 将作为 Wii 遥控器（按键、体感和指针），DualShock 4 作为双节棍。
+# --- Wii input
+Wii 游戏中的手柄
+两者
+Wii 遥控器
+Wii 游戏识别到的手柄：Wii 遥控器、GameCube 手柄（Mario Kart Wii、Super Smash Bros. Brawl 等支持），或两者。

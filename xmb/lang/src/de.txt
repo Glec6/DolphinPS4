@@ -387,3 +387,8 @@ Bewegungssteuerung
 Die Bewegungssensoren des DualShock 4 bewegen die Wii Remote: neigen, schwingen und schütteln.
 Controller als Wii Remote
 Automatisch: Ein beim Spielstart eingeschalteter PS Move wird zur Wii Remote (Tasten, Bewegung und Zeiger), der DualShock 4 zum Nunchuk.
+# --- Wii input
+Controller in Wii-Spielen
+Beide
+Wii Remote
+Was ein Wii-Spiel sieht: eine Wii Remote, einen GameCube-Controller (Mario Kart Wii, Super Smash Bros. Brawl und andere unterstützen ihn) oder beide.

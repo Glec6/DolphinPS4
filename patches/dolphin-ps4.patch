@@ -7989,10 +7989,10 @@ index 0000000..c539699
 +}  // namespace PS4Net
 diff --git a/Source/Core/DolphinNoGUI/PS4Settings.cpp b/Source/Core/DolphinNoGUI/PS4Settings.cpp
 new file mode 100755
-index 0000000..fa7b026
+index 0000000..1add71f
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4Settings.cpp
-@@ -0,0 +1,556 @@
+@@ -0,0 +1,561 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -8129,6 +8129,11 @@ index 0000000..fa7b026
 +     {{"ds4", "DualShock 4"}, {"auto", "Auto"}}, "ds4", false,
 +     "Auto: a PS Move that is on when the game starts becomes the Wii Remote (buttons, motion "
 +     "and pointer), the DualShock 4 the Nunchuk."},
++    {"wii_input", "Controller in Wii Games", "System",
++     {{"both", "Both"}, {"wiimote", "Wii Remote"}, {"gamecube", "GameCube Controller"}}, "both",
++     false,
++     "What a Wii game sees: a Wii Remote, a GameCube controller (Mario Kart Wii, Super Smash Bros. "
++     "Brawl and others support one), or both."},
 +    {"sd_card", "Wii SD Card", "System", {{"on", "Inserted"}, {"off", "Removed"}}, "on", false,
 +     "A virtual SD card for Wii games and channels (saves, photos, music, homebrew)."},
 +    {"sd_sync", "SD Card Folder", "System", {{"on", "On"}, {"off", "Off"}}, "on", false,
@@ -13803,10 +13808,10 @@ index f4dc8a9..0c37736 100644
  
 diff --git a/Source/Core/DolphinNoGUI/PlatformPS4.cpp b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
 new file mode 100644
-index 0000000..15521ba
+index 0000000..4af6e5c
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
-@@ -0,0 +1,1597 @@
+@@ -0,0 +1,1607 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -14992,24 +14997,34 @@ index 0000000..15521ba
 +
 +extern "C" int ps4_pad_count;  // InputCommon/ControllerInterface/PS4Pad/PS4Pad.cpp
 +
++// The game being started is a Wii one (a Wii disc, a .wad, or Wii homebrew); set before Dolphin
++// starts.
++static bool s_wii_game = false;
++
 +// A game sees exactly the controllers that are there: player 1's port / Wii Remote always, and
 +// one more for each other signed-in user with a DualShock 4. A player who joins mid-game gets
 +// the next port (Dolphin checks the ports at every controller poll; a Wii Remote connects when
 +// its player presses a button); one who signs out is unplugged.
++// A Wii game sees both by default (like a Wii with a GameCube controller plugged in; games such as
++// Mario Kart Wii and Smash Bros. Brawl take either). Controller in Wii Games keeps just one.
 +void Platform::ApplyPS4Players()
 +{
 +  const int players = std::clamp(ps4_pad_count, 1, 4);
++  const std::string wii_input = s_wii_game ? GetPS4Option("wii_input", "both") : "both";
 +  for (int i = 0; i < 4; i++)
 +  {
-+    const auto si = i < players ? SerialInterface::SIDEVICE_GC_CONTROLLER :
-+                                  SerialInterface::SIDEVICE_NONE;
++    const auto si = i < players && wii_input != "wiimote" ? SerialInterface::SIDEVICE_GC_CONTROLLER :
++                                                            SerialInterface::SIDEVICE_NONE;
 +    if (Config::Get(Config::GetInfoForSIDevice(i)) != si)
 +      Config::SetBase(Config::GetInfoForSIDevice(i), si);
-+    const auto source = i < players ? WiimoteSource::Emulated : WiimoteSource::None;
++    const auto source =
++        i < players && wii_input != "gamecube" ? WiimoteSource::Emulated : WiimoteSource::None;
 +    if (Config::Get(Config::GetInfoForWiimoteSource(i)) != source)
 +      Config::SetBase(Config::GetInfoForWiimoteSource(i), source);
 +  }
-+  BootTrace(fmt::format("players: {} (GameCube ports / Wii Remotes in use)", players).c_str());
++  BootTrace(fmt::format("players: {} (GameCube ports / Wii Remotes in use), Wii game input: {}",
++                        players, s_wii_game ? wii_input : "-")
++                .c_str());
 +}
 +
 +void Platform::ApplyPS4MemoryCards()
@@ -15361,7 +15376,7 @@ index 0000000..15521ba
 +  // with Wii Remote Controller on Auto.
 +  {
 +    std::array<bool, 4> moves{};
-+    bool wii_game = false;
++    bool& wii_game = s_wii_game;
 +    for (const LibraryEntry& entry : GameLibrary())
 +    {
 +      if (std::filesystem::path(entry.path) != std::filesystem::path(game))
@@ -15483,10 +15498,10 @@ index 8f7f4ba..34feb8e 100644
  {
 diff --git a/Source/Core/InputCommon/ControllerInterface/PS4Pad/PS4Pad.cpp b/Source/Core/InputCommon/ControllerInterface/PS4Pad/PS4Pad.cpp
 new file mode 100644
-index 0000000..429103c
+index 0000000..3afb3d6
 --- /dev/null
 +++ b/Source/Core/InputCommon/ControllerInterface/PS4Pad/PS4Pad.cpp
-@@ -0,0 +1,561 @@
+@@ -0,0 +1,571 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -16012,6 +16027,10 @@ index 0000000..429103c
 +        {
 +          WARN_LOG_FMT(CONTROLLERINTERFACE, "scePadOpen(user {:#x}): {:#x}",
 +                       static_cast<u32>(user), static_cast<u32>(handle));
++          char line[96];
++          snprintf(line, sizeof(line), "controllers: user %#x has no DualShock 4 (scePadOpen %#x)",
++                   static_cast<unsigned>(user), static_cast<unsigned>(handle));
++          ps4_boot_trace(line);
 +          continue;
 +        }
 +        INFO_LOG_FMT(CONTROLLERINTERFACE, "DualShock 4 of user {:#x} opened (handle {})",
@@ -16024,6 +16043,12 @@ index 0000000..429103c
 +      count++;
 +    }
 +    ps4_pad_count = count;
++    {
++      char line[96];
++      snprintf(line, sizeof(line), "controllers: %zu signed-in users, %d DualShock 4 open",
++               players.size(), count);
++      ps4_boot_trace(line);
++    }
 +    // PS Move controllers (turned on before the game starts), one per player.
 +    for (size_t player = 0; player < players.size(); player++)
 +    {

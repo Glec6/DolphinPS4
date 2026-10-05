@@ -387,3 +387,8 @@ SD-карта Wii
 Датчики движения DualShock 4 двигают Wii Remote: наклоняйте, взмахивайте и трясите.
 Контроллер как Wii Remote
 Авто: PS Move, включённый при запуске игры, становится Wii Remote (кнопки, движение и указатель), а DualShock 4 — Nunchuk.
+# --- Wii input
+Контроллер в играх Wii
+Оба
+Wii Remote
+Что видит игра Wii: Wii Remote, контроллер GameCube (его поддерживают Mario Kart Wii, Super Smash Bros. Brawl и другие) или оба.

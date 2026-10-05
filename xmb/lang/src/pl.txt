@@ -387,3 +387,8 @@ Sterowanie ruchem
 Czujniki ruchu DualShock 4 poruszają Wii Remote: przechylaj, machaj i potrząsaj.
 Kontroler jako Wii Remote
 Automatycznie: PS Move włączony przy starcie gry staje się Wii Remote (przyciski, ruch i wskaźnik), a DualShock 4 Nunchukiem.
+# --- Wii input
+Kontroler w grach Wii
+Oba
+Wii Remote
+Co widzi gra Wii: Wii Remote, kontroler GameCube (obsługują go m.in. Mario Kart Wii i Super Smash Bros. Brawl) lub oba.

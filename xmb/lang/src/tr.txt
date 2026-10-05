@@ -387,3 +387,8 @@ Hareket kontrolleri
 DualShock 4'ün hareket sensörleri Wii Remote'u hareket ettirir: eğ, savur ve salla.
 Wii Remote olarak kontrolcü
 Otomatik: oyun başlarken açık olan bir PS Move Wii Remote olur (tuşlar, hareket ve işaretçi), DualShock 4 Nunchuk olur.
+# --- Wii input
+Wii oyunlarında kontrolcü
+İkisi de
+Wii Remote
+Bir Wii oyununun gördüğü: Wii Remote, GameCube kontrolcüsü (Mario Kart Wii, Super Smash Bros. Brawl ve diğerleri destekler) ya da ikisi birden.

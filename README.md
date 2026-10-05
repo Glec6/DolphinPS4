@@ -166,7 +166,7 @@ the same layout on their own controller. The pause menu belongs to player 1.
 | Video | Internal resolution up to 3x, aspect ratio, widescreen hack, letterbox zoom, frame-rate limit, V-Sync, FPS counter |
 | Graphics | Texture filtering, anisotropic filtering, anti-aliasing, fog, EFB options, shader compilation mode |
 | Performance | Emulated CPU clock (Auto or fixed), Fast / Compatible speed features, dual core, Vulkan thread, fast disc |
-| System | Game volume, Wii Nunchuk, sideways Wii Remote, audio buffer |
+| System | Game volume, Wii Nunchuk, sideways Wii Remote, controller in Wii games (Wii Remote, GameCube controller or both), motion controls, PS Move, Wii SD card, audio buffer |
 | Diagnostics | One switch for everything, or performance log, freeze reports, emulator log and profiler separately |
 
 The launcher also has switches for its sounds and clock, a cover downloader, the controls editor,
