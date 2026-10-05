@@ -3,7 +3,7 @@
 Continuar jogo
 Salvar estado
 Carregar estado
-Acessório do Wii Remote
+Extensão do Wii Remote
 Nunchuk
 Nenhum
 Wii Remote na horizontal
@@ -14,7 +14,7 @@ Trapaças
 Sair do jogo
 PAUSADO
 Selecionar
-Espaço
+Slot
 Continuar
 Alterar
 Ativar todas
@@ -23,7 +23,7 @@ Códigos Gecko
 Códigos Action Replay
 Nenhuma trapaça para este jogo
 TRAPAÇAS
-Liga/Desliga
+Ativar/Desativar
 Mover
 Voltar
 Aplicar a
@@ -47,20 +47,20 @@ Nunchuk desconectado
 Wii Remote na horizontal
 Wii Remote na vertical
 Ainda salvando, aguarde...
-Salvando no espaço {}...
-Salvo no espaço {}
-O espaço {} está vazio
-O espaço {} é de outro jogo
-O espaço {} foi salvo com {} e esta versão não consegue carregá-lo
-O espaço {} foi salvo com um Dolphin para PS4 mais antigo e não pode ser carregado
-O espaço {} foi salvo com outra versão do Dolphin e não pode ser carregado
-O espaço {} está danificado e não pode ser carregado
-Não foi possível carregar o espaço {} - voltando à lista de jogos
-Espaço {} carregado
-Espaço {} (vazio)
-Espaço {} (outra versão)
-Espaço {} (danificado)
-Espaço {}
+Salvando no slot {}...
+Salvo no slot {}
+O slot {} está vazio
+O slot {} é de outro jogo
+O slot {} foi salvo por {} e esta versão não consegue carregá-lo
+O slot {} foi salvo por uma versão mais antiga do Dolphin para PS4 e não pode ser carregado
+O slot {} foi salvo por outra versão do Dolphin e não pode ser carregado
+O slot {} está danificado e não pode ser carregado
+Não foi possível carregar o slot {} - voltando à lista de jogos
+Slot {} carregado
+Slot {} (vazio)
+Slot {} (outra versão)
+Slot {} (danificado)
+Slot {}
 Menu
 # --- Setting categories
 Vídeo
@@ -82,18 +82,18 @@ Corta a imagem na proporção escolhida em vez de adicionar faixas pretas.
 Resolução interna
 Nativa (480p)
 Imagem mais nítida em valores altos; usa a GPU.
-Limite de quadros
+Limite de FPS
 Ilimitado
 Automático (60/30)
 Limita os quadros exibidos por segundo. Automático: 60 enquanto o jogo aguenta, 30 estáveis quando não (mais estável que uma taxa que oscila).
 V-Sync
-Espera a atualização da TV (sem tearing).
+Sincroniza com a atualização da TV para evitar tearing.
 Contador de FPS
 Quadros e velocidade de emulação no canto.
 Filtragem de texturas
 Padrão
 Suave (linear)
-Nítida (mais próximo)
+Nítida (vizinho mais próximo)
 Como as texturas são suavizadas.
 Filtragem anisotrópica
 Texturas mais nítidas em ângulo; usa a GPU.
@@ -119,11 +119,11 @@ Ubershaders híbridos
 Síncrona
 Assíncrona: sem travadas, objetos podem aparecer um instante depois. Ubershaders híbridos: sem travadas e nada faltando, usa a GPU. Síncrona: espera cada shader novo.
 Frequência da CPU emulada
-Automático reduz o clock só quando a CPU é o limite.
+Automático reduz a frequência somente quando a CPU é o gargalo.
 Recursos de velocidade
 Rápido
 Compatível
-Compatível desliga os atalhos do port no fluxo de comandos se um jogo falhar ou travar.
+O modo Compatível desativa os atalhos do porte no fluxo de comandos se um jogo apresentar falhas ou travar.
 Dual Core
 Forçado
 Emula a GPU em uma thread própria.
@@ -134,15 +134,15 @@ Pausas de carregamento menores (raramente quebra um jogo).
 Gráficos de desempenho
 Gráficos de tempo de quadro e velocidade na tela.
 Idioma
-O idioma dos menus e, quando o GameCube ou o Wii têm, o dos jogos. O menu reinicia para trocar.
+Define o idioma dos menus e, quando disponível, também dos jogos de GameCube e Wii. O menu reinicia ao trocar.
 Volume do jogo
 Volume do som dos jogos.
 O que está conectado ao Wii Remote. Wii Sports e jogos parecidos precisam de Nenhum.
 Para jogos jogados com o Wii Remote na horizontal (NSMB Wii, Mario Kart Wii).
 Buffer de áudio
-Maior fica mais suave quando o jogo roda abaixo da velocidade total; menor tem menos atraso.
+Um buffer maior deixa o áudio mais suave quando o jogo roda abaixo da velocidade total; um menor reduz o atraso.
 Todos os diagnósticos
-Todas as opções abaixo de uma vez. Desligado: nada é registrado enquanto você joga.
+Ativa ou desativa todas as opções abaixo de uma só vez. Desligado: nada é registrado durante o jogo.
 Registro de desempenho
 Velocidade, FPS e travadas a cada 2 segundos (boot-trace.log).
 Relatórios de travamento
@@ -160,9 +160,9 @@ Biblioteca
 A-Z
 Jogados recentemente
 Plataforma
-Imagem, resolução, taxa de quadros
+Imagem, resolução e taxa de quadros
 Filtragem, anti-aliasing, efeitos
-Clock da CPU, recursos de velocidade, profiler
+Frequência da CPU, recursos de velocidade, profiler
 Volume do jogo, áudio
 Registros, relatórios de travamento, profiler - ligado ou desligado
 Efeitos sonoros
@@ -175,7 +175,7 @@ Pasta de jogos
 Baixar capas
 Capas do GameTDB para seus jogos
 Procurar atualizações
-Instalada: v{}
+Versão instalada: v{}
 Atualizações automáticas
 Restaurar todas as configurações
 Todas as configurações de volta ao padrão
@@ -191,7 +191,7 @@ No Slot A
 Um cartão vazio para novos salvamentos
 Novo cartão de memória
 Em uso
-Tema de cor
+Tema de cores
 Papel de parede
 Azul Dolphin
 Índigo GameCube
@@ -214,8 +214,8 @@ quando o aplicativo abre e pede confirmação
 antes de instalar.
 Cancelar
 Restaurar tudo
-Todos os jogos, gerais e por jogo,
-voltam às configurações padrão.
+Configurações gerais e de cada jogo,
+voltam aos valores padrão.
 Dolphin para PS4
 Emulador de GameCube e Wii
 Portado para o PS4 por ShiroKlein
@@ -241,7 +241,7 @@ Baixando {} de {}: {}
 Círculo fecha esta tela; o download continua.
 Baixadas: {}
 Já existentes: {}
-Fora do GameTDB: {}
+Não encontradas no GameTDB: {}
 Falharam: {}
 Suas próprias imagens: {}
 Informações
@@ -259,7 +259,7 @@ Colocar no Slot A
 {} salvamentos
 Ainda não há salvamentos neste cartão
 Aperte o botão do DualShock 4 para {}...  (5 s: cancelar)
-X: aperte um botão novo. Analógicos: Esquerda/Direita para escolher.
+X: pressione um novo botão. Analógicos: Esquerda/Direita para escolher.
 Restaura o layout padrão.
 X: abrir esta pasta.
 X: procurar jogos nesta pasta.
@@ -309,7 +309,7 @@ Baixar ({})?
 Sim
 Não
 Baixando atualização
-Mantenha o app aberto até terminar.
+Mantenha o aplicativo aberto até terminar.
 Atualização instalada
 Dolphin v{} está pronta.
 Ela inicia quando o Dolphin reiniciar.
@@ -386,9 +386,9 @@ Automático deixa o cartão do tamanho exato dos arquivos da pasta.
 Controles de movimento
 Os sensores de movimento do DualShock 4 movem o Wii Remote: incline, balance e sacuda.
 Controle como Wii Remote
-Automático: um PS Move ligado quando o jogo inicia vira o Wii Remote (botões, movimento e ponteiro) e o DualShock 4 o Nunchuk.
+Automático: um PS Move conectado ao iniciar o jogo se torna o Wii Remote (botões, movimento e ponteiro), e o DualShock 4 se torna o Nunchuk.
 # --- Wii input
 Controle em jogos de Wii
 Ambos
 Wii Remote
-O que um jogo de Wii vê: um Wii Remote, um controle de GameCube (Mario Kart Wii, Super Smash Bros. Brawl e outros aceitam) ou ambos.
+Define o que o jogo de Wii detecta: um Wii Remote, um controle de GameCube (Mario Kart Wii, Super Smash Bros. Brawl e outros aceitam) ou ambos.
