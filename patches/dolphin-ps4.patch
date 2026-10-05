@@ -2524,10 +2524,10 @@ index 8f30be8..0d6a0e4 100644
  }
  
 diff --git a/Source/Core/Core/PowerPC/Jit64/Jit.cpp b/Source/Core/Core/PowerPC/Jit64/Jit.cpp
-index 1248b1a..090f219 100644
+index 1248b1a..e77495b 100644
 --- a/Source/Core/Core/PowerPC/Jit64/Jit.cpp
 +++ b/Source/Core/Core/PowerPC/Jit64/Jit.cpp
-@@ -49,6 +49,17 @@
+@@ -49,6 +49,18 @@
  #include "Core/System.h"
  
  using namespace Gen;
@@ -2535,6 +2535,7 @@ index 1248b1a..090f219 100644
 +#ifdef __ORBIS__
 +extern "C" int ps4_fifo_batch;  // VideoCommon/Fifo.cpp (ps4.ini fifo_batch)
 +extern "C" int ps4_fifo_defer;  // VideoCommon/Fifo.cpp (ps4.ini fifo_defer)
++extern "C" void ps4_boot_trace(const char* line);  // DolphinPS4 port/ps4_crashlog.cpp
 +extern "C" int ps4_gp_fuse;     // ps4.ini jit_gp_fuse (DolphinNoGUI)
 +int ps4_gp_fuse = 1;
 +extern "C" int ps4_lazy_lfs;    // ps4.ini jit_lazy_lfs (DolphinNoGUI)
@@ -2545,7 +2546,25 @@ index 1248b1a..090f219 100644
  using namespace PowerPC;
  
  // Dolphin's PowerPC->x86_64 JIT dynamic recompiler
-@@ -430,6 +441,21 @@ void Jit64::DoNothing(UGeckoInstruction _inst)
+@@ -259,6 +271,17 @@ void Jit64::Init()
+ 
+   RefreshConfig();
+ 
++#ifdef __ORBIS__
++  // Deferred FIFO flushes broke the games that need MMU emulation (Spider-Man 2 and Call of Duty
++  // 2: Big Red One: the GPU command stream lost its place a few seconds in and the game froze),
++  // so they're off for those games; the other command-stream shortcuts stay on.
++  if (m_system.IsMMUMode() && ps4_fifo_defer)
++  {
++    ps4_fifo_defer = 0;
++    ps4_boot_trace("fifo_defer: off (the game needs MMU emulation)");
++  }
++#endif
++
+   EnableBlockLink();
+ 
+   jo.optimizeGatherPipe = true;
+@@ -430,6 +453,21 @@ void Jit64::DoNothing(UGeckoInstruction _inst)
    // Yup, just don't do anything.
  }
  
@@ -2567,7 +2586,7 @@ index 1248b1a..090f219 100644
  void Jit64::ImHere(Jit64& jit)
  {
    auto& ppc_state = jit.m_ppc_state;
-@@ -453,15 +479,211 @@ void Jit64::ImHere(Jit64& jit)
+@@ -453,15 +491,211 @@ void Jit64::ImHere(Jit64& jit)
    been_here[ppc_state.pc] = 1;
  }
  
@@ -2779,7 +2798,7 @@ index 1248b1a..090f219 100644
      FixupBranch exit = J_CC(CC_L);
      ABI_PushRegistersAndAdjustStack({}, 0);
      ABI_CallFunctionP(GPFifo::UpdateGatherPipe, &m_system.GetGPFifo());
-@@ -992,10 +1214,21 @@ bool Jit64::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
+@@ -992,10 +1226,21 @@ bool Jit64::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
      IntializeSpeculativeConstants();
    }
  
@@ -2801,7 +2820,7 @@ index 1248b1a..090f219 100644
  
      js.compilerPC = op.address;
      js.op = &op;
-@@ -1018,16 +1251,32 @@ bool Jit64::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
+@@ -1018,16 +1263,32 @@ bool Jit64::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
        bool gatherPipeIntCheck = js.fifoWriteAddresses.contains(prev_address);
  
        // Gather pipe writes using an immediate address are explicitly tracked.
@@ -2836,7 +2855,7 @@ index 1248b1a..090f219 100644
        }
  
        // Gather pipe writes can generate an exception; add an exception check.
-@@ -1155,7 +1404,12 @@ bool Jit64::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
+@@ -1155,7 +1416,12 @@ bool Jit64::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
              // prioritize the more important registers.
              gpr.PreloadRegisters(op.regsIn & (op.gprWillBeRead | op.gprWillBeWritten) &
                                   ~op.gprDiscardable);
