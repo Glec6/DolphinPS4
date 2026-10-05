@@ -15644,16 +15644,17 @@ index 8f7f4ba..34feb8e 100644
  {
 diff --git a/Source/Core/InputCommon/ControllerInterface/PS4Pad/PS4Pad.cpp b/Source/Core/InputCommon/ControllerInterface/PS4Pad/PS4Pad.cpp
 new file mode 100644
-index 0000000..e8c7219
+index 0000000..256489c
 --- /dev/null
 +++ b/Source/Core/InputCommon/ControllerInterface/PS4Pad/PS4Pad.cpp
-@@ -0,0 +1,574 @@
+@@ -0,0 +1,606 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
 +#include "InputCommon/ControllerInterface/PS4Pad/PS4Pad.h"
 +
 +#include <algorithm>
++#include <cmath>
 +#include <cstring>
 +#include <map>
 +#include <string>
@@ -15851,7 +15852,12 @@ index 0000000..e8c7219
 +    // wrong order: Sony's ScePadData is orientation, acceleration, angular velocity, so "vel" holds
 +    // the acceleration and "acell" the rotation (read the other way, a pad at rest showed zero
 +    // acceleration).
-+    ps4_pad_set_motion(m_handle, true);
++    m_motion_result = ps4_pad_set_motion(m_handle, true);
++    {
++      char line[96];
++      snprintf(line, sizeof(line), "DualShock 4 motion sensors on: %#x", static_cast<unsigned>(m_motion_result));
++      ps4_boot_trace(line);
++    }
 +    AddInput(new Motion("Accel Up",       m_state.vel.y, GRAVITY));
 +    AddInput(new Motion("Accel Down",     m_state.vel.y, -GRAVITY));
 +    AddInput(new Motion("Accel Left",     m_state.vel.x, -GRAVITY));
@@ -15886,13 +15892,36 @@ index 0000000..e8c7219
 +    {
 +      m_state = data;
 +      m_buttons = data.buttons;
-+      if (m_motion_logged < 3 && ++m_reads % 120 == 0)
++      // The sensors refused at open (the pad still settling)? Once more on the first reads.
++      if (m_motion_result != 0 && m_reads == 10)
 +      {
-+        // A few raw samples in the boot trace: units and axis directions on real hardware.
++        m_motion_result = ps4_pad_set_motion(m_handle, true);
++        char line[96];
++        snprintf(line, sizeof(line), "DualShock 4 motion sensors on (retry): %#x",
++                 static_cast<unsigned>(m_motion_result));
++        ps4_boot_trace(line);
++      }
++      // Motion samples in the boot trace whenever the readings move (up to 60 lines, at most two
++      // a second): units and axis directions on real hardware.
++      const float moved = std::abs(data.vel.x - m_logged_accel[0]) +
++                          std::abs(data.vel.y - m_logged_accel[1]) +
++                          std::abs(data.vel.z - m_logged_accel[2]) + std::abs(data.acell.x) +
++                          std::abs(data.acell.y) + std::abs(data.acell.z);
++      ++m_reads;
++      if (m_motion_logged < 60 && m_reads - m_last_logged_read >= 30 &&
++          (m_motion_logged == 0 || moved > 0.15f))
++      {
 +        m_motion_logged++;
++        m_last_logged_read = m_reads;
++        m_logged_accel[0] = data.vel.x;
++        m_logged_accel[1] = data.vel.y;
++        m_logged_accel[2] = data.vel.z;
 +        char line[200];
-+        snprintf(line, sizeof(line), "DualShock 4 motion: accel %.2f %.2f %.2f, gyro %.2f %.2f %.2f",
-+                 data.vel.x, data.vel.y, data.vel.z, data.acell.x, data.acell.y, data.acell.z);
++        snprintf(line, sizeof(line),
++                 "DualShock 4 motion: accel %.2f %.2f %.2f, gyro %.2f %.2f %.2f, orientation %.2f %.2f "
++                 "%.2f %.2f",
++                 data.vel.x, data.vel.y, data.vel.z, data.acell.x, data.acell.y, data.acell.z,
++                 data.quat.x, data.quat.y, data.quat.z, data.quat.w);
 +        ps4_boot_trace(line);
 +      }
 +    }
@@ -15925,6 +15954,9 @@ index 0000000..e8c7219
 +  OrbisPadVibeParam m_vibration{0, 0};
 +  int m_reads = 0;
 +  int m_motion_logged = 0;
++  int m_last_logged_read = 0;
++  int32_t m_motion_result = 0;
++  float m_logged_accel[3] = {};
 +};
 +
 +// A PlayStation Move motion controller, as a Wii Remote: buttons, the analog T trigger, motion
