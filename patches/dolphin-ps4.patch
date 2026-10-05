@@ -8589,10 +8589,10 @@ index 0000000..914dbb5
 +}  // namespace PS4Updater
 diff --git a/Source/Core/DolphinNoGUI/PS4XMB.cpp b/Source/Core/DolphinNoGUI/PS4XMB.cpp
 new file mode 100755
-index 0000000..70a8b54
+index 0000000..5ca1373
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4XMB.cpp
-@@ -0,0 +1,3788 @@
+@@ -0,0 +1,3800 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -8626,6 +8626,8 @@ index 0000000..70a8b54
 +#include "Common/Image.h"
 +#include "DiscIO/Enums.h"
 +#include "DiscIO/Volume.h"
++#include "DiscIO/Blob.h"
++#include "DiscIO/VolumeWad.h"
 +#include "DiscIO/VolumeDisc.h"
 +#include "Common/FileUtil.h"
 +#include "DolphinNoGUI/PS4Cheats.h"
@@ -9106,6 +9108,7 @@ index 0000000..70a8b54
 +  std::string id;
 +  std::string title;
 +  bool wii = false;
++  bool wad = false;  // WiiWare / Virtual Console / channel (a .wad file)
 +  int discs = 1;
 +  uint16_t revision = 0;
 +  ImTextureID banner{};
@@ -9412,6 +9415,8 @@ index 0000000..70a8b54
 +    game.path = disc.path;
 +    game.id = disc.game_id;
 +    game.revision = disc.revision;
++    game.wad = disc.wad;
++    game.wii = disc.wad;
 +    game.title = disc.title.empty() ? std::filesystem::path(disc.path).stem().string() : disc.title;
 +    for (const std::string& id : {disc.game_id, disc.game_id.substr(0, 4)})
 +    {
@@ -9482,14 +9487,18 @@ index 0000000..70a8b54
 +{
 +  for (Game& game : m_games)
 +  {
-+    std::unique_ptr<DiscIO::VolumeDisc> disc = DiscIO::CreateDisc(game.path);
-+    if (!disc)
++    // GameCube discs and Wii title packages carry a banner; Wii discs only in a NAND.
++    std::unique_ptr<DiscIO::Volume> volume =
++        game.wad ? std::unique_ptr<DiscIO::Volume>(DiscIO::CreateWAD(game.path)) :
++                   std::unique_ptr<DiscIO::Volume>(DiscIO::CreateDisc(game.path));
++    if (!volume)
 +      continue;
-+    game.wii = disc->GetVolumeType() == DiscIO::Platform::WiiDisc;
-+    if (game.wii)
++    if (!game.wad)
++      game.wii = volume->GetVolumeType() == DiscIO::Platform::WiiDisc;
++    if (game.wii && !game.wad)
 +      continue;
 +    u32 width = 0, height = 0;
-+    const std::vector<u32> banner = disc->GetBanner(&width, &height);
++    const std::vector<u32> banner = volume->GetBanner(&width, &height);
 +    if (banner.empty() || width == 0 || height == 0)
 +      continue;
 +    std::vector<u8> rgba(banner.size() * 4);
@@ -9557,7 +9566,7 @@ index 0000000..70a8b54
 +    std::string lower = name;
 +    std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
 +    for (const char* extension :
-+         {".iso", ".gcm", ".ciso", ".gcz", ".wbfs", ".wia", ".rvz", ".nkit.iso"})
++         {".iso", ".gcm", ".ciso", ".gcz", ".wbfs", ".wia", ".rvz", ".nkit.iso", ".wad"})
 +    {
 +      const size_t length = std::strlen(extension);
 +      if (lower.size() > length && lower.compare(lower.size() - length, length, extension) == 0)
@@ -10397,7 +10406,10 @@ index 0000000..70a8b54
 +        m_panel.options.clear();
 +        m_panel.lines = {game.title,
 +                         "",
-+                         std::string("Platform: ") + (game.wii ? "Wii" : "GameCube"),
++                         std::string("Platform: ") +
++                             (game.wad ? "Wii (WiiWare / Virtual Console / channel)" :
++                              game.wii ? "Wii" :
++                                         "GameCube"),
 +                         "Game ID: " + game.id,
 +                         "Discs: " + std::to_string(game.discs),
 +                         "File: " + std::filesystem::path(game.path).filename().string()};
@@ -12383,10 +12395,10 @@ index 0000000..70a8b54
 +}  // namespace PS4XMB
 diff --git a/Source/Core/DolphinNoGUI/PS4XMB.h b/Source/Core/DolphinNoGUI/PS4XMB.h
 new file mode 100755
-index 0000000..2e8d1a4
+index 0000000..b5979d4
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4XMB.h
-@@ -0,0 +1,43 @@
+@@ -0,0 +1,44 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -12411,6 +12423,7 @@ index 0000000..2e8d1a4
 +  uint16_t revision = 0;
 +  int disc = 0;  // 0 = Disc 1
 +  std::string title;
++  bool wad = false;  // a Wii title package (WiiWare, Virtual Console, channels)
 +};
 +
 +// Returned by Run when the app should close (to install an update's package).
@@ -13080,10 +13093,10 @@ index f4dc8a9..0c37736 100644
  
 diff --git a/Source/Core/DolphinNoGUI/PlatformPS4.cpp b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
 new file mode 100644
-index 0000000..da37056
+index 0000000..50e9c49
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
-@@ -0,0 +1,1365 @@
+@@ -0,0 +1,1393 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -13126,6 +13139,8 @@ index 0000000..da37056
 +#include "DolphinNoGUI/PS4Settings.h"
 +#include "DolphinNoGUI/PS4XMB.h"
 +#include "DiscIO/Volume.h"
++#include "DiscIO/Blob.h"
++#include "DiscIO/VolumeWad.h"
 +#include "DiscIO/VolumeDisc.h"
 +#include "Core/Config/MainSettings.h"
 +#include "Core/Config/WiimoteSettings.h"
@@ -13907,12 +13922,22 @@ index 0000000..da37056
 +  u16 revision = 0;
 +  int disc = 0;  // 0 = Disc 1
 +  std::string title;
++  bool wad = false;
 +};
 +
++bool HasExtension(const std::string& name, const char* extension)
++{
++  std::string lower = name;
++  std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
++  const size_t length = std::strlen(extension);
++  return lower.size() > length && lower.compare(lower.size() - length, length, extension) == 0;
++}
++
++// Disc images and Wii title packages (.wad: WiiWare, Virtual Console, channels).
 +bool IsDiscImage(const std::string& name)
 +{
-+  static const std::array<std::string, 8> extensions = {".iso", ".gcm",  ".ciso", ".gcz",
-+                                                        ".wbfs", ".wia", ".rvz",  ".nkit.iso"};
++  static const std::array<std::string, 9> extensions = {".iso", ".gcm",  ".ciso", ".gcz", ".wbfs",
++                                                        ".wia", ".rvz",  ".nkit.iso", ".wad"};
 +  std::string lower = name;
 +  std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
 +  for (const std::string& extension : extensions)
@@ -13935,7 +13960,22 @@ index 0000000..da37056
 +      continue;
 +    LibraryEntry game;
 +    game.path = entry.path().string();
-+    if (std::unique_ptr<DiscIO::VolumeDisc> disc = DiscIO::CreateDisc(game.path))
++    if (HasExtension(name, ".wad"))
++    {
++      // Dolphin installs it into the emulated Wii's storage when it starts (BootParameters).
++      game.wad = true;
++      if (std::unique_ptr<DiscIO::VolumeWAD> wad = DiscIO::CreateWAD(game.path))
++      {
++        game.game_id = wad->GetGameID();
++        game.revision = wad->GetRevision().value_or(0);
++        const auto names = wad->GetLongNames();
++        const auto english = names.find(DiscIO::Language::English);
++        game.title = english != names.end() ? english->second :
++                     names.empty()           ? std::string() :
++                                               names.begin()->second;
++      }
++    }
++    else if (std::unique_ptr<DiscIO::VolumeDisc> disc = DiscIO::CreateDisc(game.path))
 +    {
 +      game.game_id = disc->GetGameID();
 +      game.revision = disc->GetRevision().value_or(0);
@@ -14346,7 +14386,8 @@ index 0000000..da37056
 +    const PS4XMB::ScanFunction scan = [](const std::string& games_dir) {
 +      std::vector<PS4XMB::LibraryDisc> library;
 +      for (const LibraryEntry& entry : ScanLibrary(games_dir))
-+        library.push_back({entry.path, entry.game_id, entry.revision, entry.disc, entry.title});
++        library.push_back(
++            {entry.path, entry.game_id, entry.revision, entry.disc, entry.title, entry.wad});
 +      return library;
 +    };
 +    game = PS4XMB::Run(scan, PS4_DATA_DIR_PATH, AssetsDir(), AppVersion());
