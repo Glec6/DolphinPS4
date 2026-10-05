@@ -400,3 +400,11 @@ Keine Riivolution-Mods für dieses Spiel.
 Kopiere die SD-Karten-Dateien des Mods
 (seinen riivolution-Ordner und den Rest) nach
 Gilt ab dem nächsten Spielstart.
+# --- Cheat download
+Codes herunterladen
+Wird heruntergeladen...
+{} gefunden, {} neu
+Keine online
+Fehler (HTTP {})
+Fehler (keine Verbindung)
+Lädt die Gecko-Codes dieses Spiels aus dem Internet (codes.rc24.xyz). Neue werden ausgeschaltet hinzugefügt.

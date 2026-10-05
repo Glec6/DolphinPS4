@@ -400,3 +400,11 @@ Geen Riivolution-mods voor deze game.
 Kopieer de SD-kaartbestanden van de mod
 (de riivolution-map en de rest) naar
 Geldt vanaf de volgende keer dat de game start.
+# --- Cheat download
+Codes downloaden
+Bezig met downloaden...
+{} gevonden, {} nieuw
+Geen online
+Mislukt (HTTP {})
+Mislukt (geen verbinding)
+Haalt de Gecko-codes van deze game van internet (codes.rc24.xyz). Nieuwe worden uitgeschakeld toegevoegd.

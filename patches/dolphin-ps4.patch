@@ -895,6 +895,36 @@ index 0000000..90decba
 +  void* m_surface = nullptr;
 +  void* m_context = nullptr;
 +};
+diff --git a/Source/Core/Common/HttpRequest.cpp b/Source/Core/Common/HttpRequest.cpp
+index 94a4664..c152f31 100644
+--- a/Source/Core/Common/HttpRequest.cpp
++++ b/Source/Core/Common/HttpRequest.cpp
+@@ -13,6 +13,10 @@
+ #include "Common/ScopeGuard.h"
+ #include "Common/StringUtil.h"
+ 
++#ifdef __ORBIS__
++extern "C" const char* ps4_assets_dir();  // DolphinNoGUI/PlatformPS4.cpp
++#endif
++
+ namespace Common
+ {
+ class HttpRequest::Impl final
+@@ -147,6 +151,14 @@ HttpRequest::Impl::Impl(std::chrono::milliseconds timeout_ms, ProgressCallback c
+       m_curl.get(), CURLOPT_LOW_SPEED_TIME,
+       static_cast<long>(std::chrono::duration_cast<std::chrono::seconds>(timeout_ms).count()));
+   curl_easy_setopt(m_curl.get(), CURLOPT_LOW_SPEED_LIMIT, 1);
++#ifdef __ORBIS__
++  // The PS4 has no CA bundle curl can find: the app's own (xmb/cacert.pem, as the updater and the
++  // cover downloader use), so HTTPS works (Gecko code downloads).
++  {
++    static const std::string ca_file = std::string(ps4_assets_dir()) + "/xmb/cacert.pem";
++    curl_easy_setopt(m_curl.get(), CURLOPT_CAINFO, ca_file.c_str());
++  }
++#endif
+ }
+ 
+ bool HttpRequest::Impl::IsValid() const
 diff --git a/Source/Core/Common/LinearDiskCache.h b/Source/Core/Common/LinearDiskCache.h
 index 061f7d4..bde3303 100644
 --- a/Source/Core/Common/LinearDiskCache.h
@@ -5014,14 +5044,16 @@ index 3bf40ea..f6ff708 100644
      fprintf(stderr, "Could not boot the specified file\n");
 diff --git a/Source/Core/DolphinNoGUI/PS4Cheats.cpp b/Source/Core/DolphinNoGUI/PS4Cheats.cpp
 new file mode 100755
-index 0000000..f21328e
+index 0000000..588b816
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4Cheats.cpp
-@@ -0,0 +1,85 @@
+@@ -0,0 +1,124 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
 +#include "DolphinNoGUI/PS4Cheats.h"
++
++#include <algorithm>
 +
 +#include "Common/FileUtil.h"
 +#include "Common/IniFile.h"
@@ -5040,6 +5072,43 @@ index 0000000..f21328e
 +
 +List::List() : m_codes(new Codes)
 +{
++}
++
++List::Download List::FetchOnline(const std::string& game_id)
++{
++  Download result;
++  auto fetched = Gecko::DownloadCodes(game_id);
++  if (!fetched)
++  {
++    result.http_code = fetched.error();
++    return result;
++  }
++  result.ok = true;
++  auto codes = std::make_shared<std::vector<Gecko::GeckoCode>>(std::move(*fetched));
++  for (const auto& code : *codes)
++    result.names.push_back(code.name);
++  result.codes = codes;
++  return result;
++}
++
++size_t List::AddDownloaded(const Download& download)
++{
++  if (!download.ok || !download.codes)
++    return 0;
++  const auto& codes = *static_cast<const std::vector<Gecko::GeckoCode>*>(download.codes.get());
++  size_t added = 0;
++  for (Gecko::GeckoCode code : codes)
++  {
++    if (std::find(m_codes->gecko.begin(), m_codes->gecko.end(), code) != m_codes->gecko.end())
++      continue;
++    code.user_defined = true;  // kept in User/GameSettings/<ID>.ini like Dolphin's download
++    code.enabled = false;
++    m_codes->gecko.push_back(std::move(code));
++    added++;
++  }
++  if (added)
++    Save();
++  return added;
 +}
 +
 +List::~List()
@@ -5105,10 +5174,10 @@ index 0000000..f21328e
 +}  // namespace PS4Cheats
 diff --git a/Source/Core/DolphinNoGUI/PS4Cheats.h b/Source/Core/DolphinNoGUI/PS4Cheats.h
 new file mode 100755
-index 0000000..3771619
+index 0000000..276a9b6
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4Cheats.h
-@@ -0,0 +1,49 @@
+@@ -0,0 +1,63 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -5120,6 +5189,7 @@ index 0000000..3771619
 +#pragma once
 +
 +#include <cstdint>
++#include <memory>
 +#include <string>
 +#include <vector>
 +
@@ -5148,6 +5218,19 @@ index 0000000..3771619
 +  void SetAll(bool enabled);
 +  // Game process: makes the current choices active in the running game.
 +  void ApplyToRunningGame() const;
++
++  // Online codes (the WiiRD database mirror Dolphin uses): fetched on any thread (network), then
++  // added on the menu's thread - the new ones, off, saved with the user's own codes.
++  struct Download
++  {
++    bool ok = false;
++    int http_code = 0;
++    std::vector<std::string> names;  // fetched codes, for counting
++    std::shared_ptr<void> codes;     // std::vector<Gecko::GeckoCode>
++  };
++  static Download FetchOnline(const std::string& game_id);
++  // Returns how many were new.
++  size_t AddDownloaded(const Download& download);
 +
 +private:
 +  void Save() const;
@@ -9434,10 +9517,10 @@ index 0000000..914dbb5
 +}  // namespace PS4Updater
 diff --git a/Source/Core/DolphinNoGUI/PS4XMB.cpp b/Source/Core/DolphinNoGUI/PS4XMB.cpp
 new file mode 100755
-index 0000000..1693129
+index 0000000..860788b
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4XMB.cpp
-@@ -0,0 +1,4216 @@
+@@ -0,0 +1,4276 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -10079,6 +10162,7 @@ index 0000000..1693129
 +  void BuildControlRows();
 +  void OpenCheatsList(const Game& game);
 +  void BuildCheatRows();
++  void UpdateCheatDownload();
 +  void OpenRiivolutionList(const Game& game);
 +  void BuildRiivolutionRows();
 +  void SaveRiivolutionConfig();
@@ -10181,6 +10265,11 @@ index 0000000..1693129
 +  // Cheats panel.
 +  PS4Cheats::List m_cheats;
 +  std::string m_cheats_game;
++  // Download Codes on the Cheats page: a background fetch and its result line.
++  std::thread m_cheat_dl_thread;
++  std::atomic<bool> m_cheat_dl_busy{false}, m_cheat_dl_done{false};
++  PS4Cheats::List::Download m_cheat_dl;
++  std::string m_cheat_dl_status;
 +  // Riivolution Patches page: the mods (XMLs) for the game, their options as chosen.
 +  std::vector<DiscIO::Riivolution::Disc> m_riivolution;
 +  std::string m_riivolution_game;
@@ -10971,6 +11060,22 @@ index 0000000..1693129
 +    BuildCheatRows();
 +    return;
 +  }
++  if (row.key == "cheatdl")
++  {
++    if (m_cheat_dl_busy || direction <= 0)
++      return;
++    if (m_cheat_dl_thread.joinable())
++      m_cheat_dl_thread.join();
++    m_cheat_dl_busy = true;
++    m_cheat_dl_done = false;
++    const std::string game = m_cheats_game;
++    m_cheat_dl_thread = std::thread([this, game] {
++      m_cheat_dl = PS4Cheats::List::FetchOnline(game);
++      m_cheat_dl_done = true;
++    });
++    BuildCheatRows();
++    return;
++  }
 +  if (row.key.rfind("riiv:", 0) == 0)
 +  {
 +    // riiv:<mod>:<section>:<option>: Off (0) and the option's choices (1-based), in turn.
@@ -11162,10 +11267,42 @@ index 0000000..1693129
 +  Log("riivolution: choices saved for " + id);
 +}
 +
++// Download Codes finished: the new codes join the list (off), the row says how it went.
++void Menu::UpdateCheatDownload()
++{
++  if (!m_cheat_dl_done.exchange(false))
++    return;
++  if (m_cheat_dl_thread.joinable())
++    m_cheat_dl_thread.join();
++  m_cheat_dl_busy = false;
++  if (!m_cheat_dl.ok)
++  {
++    m_cheat_dl_status = m_cheat_dl.http_code > 0 ?
++                            "Failed (HTTP " + std::to_string(m_cheat_dl.http_code) + ")" :
++                            "Failed (no connection)";
++  }
++  else if (m_cheat_dl.names.empty())
++  {
++    m_cheat_dl_status = "None online";
++  }
++  else
++  {
++    const size_t added = m_cheats.AddDownloaded(m_cheat_dl);
++    m_cheat_dl_status = std::to_string(m_cheat_dl.names.size()) + " found, " +
++                        std::to_string(added) + " new";
++  }
++  Log("cheats: download for " + m_cheats_game + ": " + m_cheat_dl_status);
++  if (m_panel.open && m_panel.title == "Cheats")
++    BuildCheatRows();
++  Play(m_cheat_dl.ok ? "confirm" : "back");
++}
++
 +void Menu::BuildCheatRows()
 +{
 +  std::vector<SettingRow> rows;
 +  const auto entries = m_cheats.Entries();
++  rows.push_back({"Download Codes", m_cheat_dl_busy ? "Downloading..." : m_cheat_dl_status,
++                  "cheatdl"});
 +  if (!entries.empty())
 +  {
 +    rows.push_back({"Enable All", "", "cheatall:on"});
@@ -12252,6 +12389,8 @@ index 0000000..1693129
 +                  "  -  saved " + DateText(save.modified);
 +        }
 +      }
++      else if (row.key == "cheatdl")
++        help = "Gets this game's Gecko codes from the internet (codes.rc24.xyz). New ones are added switched off.";
 +      else if (row.key.rfind("cheat:", 0) == 0 || row.key.rfind("cheatall:", 0) == 0)
 +        help = "Applies the next time the game starts, or now from the in-game menu (L3+R3).";
 +      else if (row.key.rfind("riiv:", 0) == 0)
@@ -13595,6 +13734,7 @@ index 0000000..1693129
 +    }
 +    UpdateCoverDownload();
 +    UpdateUpdater(dt);
++    UpdateCheatDownload();
 +
 +    m_display.BeginFrame();
 +    ImGui::NewFrame();
@@ -13622,6 +13762,9 @@ index 0000000..1693129
 +  m_update_cancel = true;
 +  if (m_update_thread.joinable())
 +    m_update_thread.join();
++  // A code download still going (a game was started): its few seconds, not a crash on exit.
++  if (m_cheat_dl_thread.joinable())
++    m_cheat_dl_thread.join();
 +  if (m_update_exit)
 +    result = EXIT_APP;
 +  if (m_update_restart)

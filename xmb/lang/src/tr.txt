@@ -400,3 +400,11 @@ Bu oyun için Riivolution modu yok.
 Modun SD kart dosyalarını
 (riivolution klasörünü ve diğerlerini) şuraya kopyalayın:
 Oyun bir sonraki açılışta uygulanır.
+# --- Cheat download
+Kodları indir
+İndiriliyor...
+{} bulundu, {} yeni
+Çevrimiçi yok
+Başarısız (HTTP {})
+Başarısız (bağlantı yok)
+Bu oyunun Gecko kodlarını internetten alır (codes.rc24.xyz). Yeni olanlar kapalı olarak eklenir.

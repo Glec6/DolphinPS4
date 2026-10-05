@@ -400,3 +400,11 @@ Brak modów Riivolution dla tej gry.
 Skopiuj pliki z karty SD moda
 (folder riivolution i resztę) do
 Zadziała przy następnym uruchomieniu gry.
+# --- Cheat download
+Pobierz kody
+Pobieranie...
+znaleziono {}, nowych {}
+Brak online
+Błąd (HTTP {})
+Błąd (brak połączenia)
+Pobiera kody Gecko tej gry z internetu (codes.rc24.xyz). Nowe są dodawane jako wyłączone.

@@ -400,3 +400,11 @@ Riivolution 补丁
 将模组的 SD 卡文件
 （riivolution 文件夹及其余文件）复制到
 下次启动游戏时生效。
+# --- Cheat download
+下载代码
+正在下载...
+找到 {} 个，新增 {} 个
+网上没有
+失败（HTTP {}）
+失败（无连接）
+从网上获取此游戏的 Gecko 代码（codes.rc24.xyz）。新代码以关闭状态添加。

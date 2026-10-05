@@ -400,3 +400,11 @@ Nessuna mod Riivolution per questo gioco.
 Copia i file SD della mod
 (la sua cartella riivolution e il resto) in
 Si applica al prossimo avvio del gioco.
+# --- Cheat download
+Scarica codici
+Download in corso...
+{} trovati, {} nuovi
+Nessuno online
+Errore (HTTP {})
+Errore (nessuna connessione)
+Scarica i codici Gecko di questo gioco da internet (codes.rc24.xyz). I nuovi vengono aggiunti disattivati.
