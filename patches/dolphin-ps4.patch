@@ -15644,10 +15644,10 @@ index 8f7f4ba..34feb8e 100644
  {
 diff --git a/Source/Core/InputCommon/ControllerInterface/PS4Pad/PS4Pad.cpp b/Source/Core/InputCommon/ControllerInterface/PS4Pad/PS4Pad.cpp
 new file mode 100644
-index 0000000..e4640be
+index 0000000..da5afa3
 --- /dev/null
 +++ b/Source/Core/InputCommon/ControllerInterface/PS4Pad/PS4Pad.cpp
-@@ -0,0 +1,642 @@
+@@ -0,0 +1,656 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -15935,6 +15935,19 @@ index 0000000..e4640be
 +                 static_cast<unsigned>(m_motion_result));
 +        ps4_boot_trace(line);
 +      }
++      // The raw sample (bytes 12-75: where the motion data should be) once a second for the first
++      // 40 seconds: if the layout differs from OpenOrbis's struct, the bytes that change when the
++      // pad is tilted show where the motion really is.
++      if (m_raw_logs < 40 && m_reads % 60 == 30)
++      {
++        m_raw_logs++;
++        const auto* bytes = reinterpret_cast<const u8*>(&data);
++        char line[256];
++        int at = snprintf(line, sizeof(line), "DualShock 4 raw +12:");
++        for (size_t i = 12; i < 76 && i < sizeof(data) && at < static_cast<int>(sizeof(line)) - 4; i++)
++          at += snprintf(line + at, sizeof(line) - at, "%s%02x", i % 4 == 0 ? " " : "", bytes[i]);
++        ps4_boot_trace(line);
++      }
 +      // Motion samples in the boot trace whenever the readings move (up to 60 lines, at most two
 +      // a second): units and axis directions on real hardware.
 +      const float moved = std::abs(data.vel.x - m_logged_accel[0]) +
@@ -15992,6 +16005,7 @@ index 0000000..e4640be
 +  int32_t m_motion_result = 0;
 +  int m_read_logs = 0;
 +  int m_empty_reads = 0;
++  int m_raw_logs = 0;
 +  float m_logged_accel[3] = {};
 +};
 +
