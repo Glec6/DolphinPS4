@@ -250,6 +250,7 @@ A range means the frame rate depends on what's on screen.
 | Pokémon Colosseum | GameCube | PS4, 13.52 | – | 30 FPS in gameplay and cutscenes (60 in menus), 100% speed |
 | Pokémon XD: Gale of Darkness | GameCube | PS4, 13.52 | – | 25–30 FPS, heavier scenes ~20, playable |
 | Sonic Adventure 2: Battle | GameCube | PS4, 13.52 | – | 30–60 FPS (mostly in the 30s), works normally, playable |
+| Prince of Persia: Warrior Within | GameCube | PS4, 13.02 | 480p (native) | 15–24 FPS |
 | Super Paper Mario | Wii | – | 1080p | 50–60 FPS, stable, playable |
 | "Pokémon Stadium" (name as reported) | – | – | 1080p | 30 FPS, a small drop at the start of battles, saves work |
 | Super Smash Bros. Brawl | Wii | PS4 Slim, 11.00 | 1080p | 60 FPS, stutters on some stages, no crashes |
