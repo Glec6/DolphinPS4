@@ -253,6 +253,7 @@ A range means the frame rate depends on what's on screen.
 | Prince of Persia: Warrior Within | GameCube | PS4, 13.02 | 480p (native) | 15–24 FPS |
 | Mario Party 7 | GameCube | PS4 Pro, 11.00 (Boost Mode on) | – | 45–60 FPS, very stable |
 | Mario Power Tennis | GameCube | PS4 Pro, 11.00 (Boost Mode on) | – | 45–60 FPS, very stable |
+| Shrek 2 | GameCube | PS4 (original), 9.00 | 720p (2x) | 30 FPS, playable; some drops in cutscenes |
 | Super Paper Mario | Wii | – | 1080p | 50–60 FPS, stable, playable |
 | "Pokémon Stadium" (name as reported) | – | – | 1080p | 30 FPS, a small drop at the start of battles, saves work |
 | Super Smash Bros. Brawl | Wii | PS4 Slim, 11.00 | 1080p | 60 FPS, stutters on some stages, no crashes |
@@ -260,6 +261,7 @@ A range means the frame rate depends on what's on screen.
 | PokéPark 2: Wonders Beyond | Wii | PS4, 13.52 | – | 30 FPS, 100% speed; turn on *Sideways Wii Remote* for the D-pad |
 | Donkey Kong Country Returns (USA) | Wii | PS4 (original), 11.00 | – | 40–45 FPS |
 | Bomberman Blast | Wii (WiiWare) | PS4 (original) | – | 49 of 60 FPS, stable, playable; some textures sometimes disappear, no crashes |
+| Project Zero 2: Wii Edition | Wii | – | – | ~30 FPS in empty corridors, 13–17 FPS in fights with several enemies: not recommended |
 | Crash of the Titans | Wii | PS4 Pro, 13.52 | 1080p | Doesn't start: loops at the beginning |
 
 Tested a game that isn't listed? Tell us on the [Discord](https://discord.gg/QwtU8ZaCth) or in an
