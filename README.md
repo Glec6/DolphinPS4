@@ -305,6 +305,20 @@ A range means the frame rate depends on what's on screen.
 | ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Contra ReBirth (USA) | Wii (WiiWare) | – | – | Stable 60 FPS with default settings |
 | ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Sonic the Hedgehog 4: Episode I (USA) | Wii (WiiWare) | – | – | 30–60 FPS with default settings, playable |
 | ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | "Pokémon Stadium" (name as reported) | – | – | 1080p | 30 FPS, a small drop at the start of battles, saves work |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Pokémon Colosseum | GameCube | PS4 Slim 9.00 | 1080p | 1080p it works at 30 fps, could get more maybe out of 720p
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Sonic Riders | GameCube | PS4 Pro 13.52 | 1080p | Runs well in some places at 1080p, places with heavy reflections dip down to 50-35 fps| 
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Mario Strikers | GameCube | PS4 Slim 9.00 | 1080p | Runs perfect , 1080p 60fps most of the time. Very clean and very fast | 
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Happy feet | Wii | PS4 Slim | 720p | Running Very well | 
+| ![Ingame](https://img.shields.io/badge/Ingame-f9b32f?style=flat-square) | 007 From Russia with Love | GameCube | PS4 Slim 13.02 | – | Game freeze after the opening cutscene, gets stuck on loading.
+| ![Ingame](https://img.shields.io/badge/Ingame-f9b32f?style=flat-square) | Virtua Striker 3 | GameCube | PS4 Pro | – | Perfect until the match starts, then unplayable due to the game running extremely slowly. |
+| ![Ingame](https://img.shields.io/badge/Ingame-f9b32f?style=flat-square) | The Simpsons Road Rage | GameCube | PS4 Fat 9.00 | 720p | It loads everything cinematics, menus but when selecting the character it freezes |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Newer Super Mario Bros Wii | Wii | PS4 slim | 720p | The game runs well in the menus, and cutscene runs at 45 to 50 fps gameplay runs from 55-60 fps |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | The Legend of Zelda: Skyward Sword | Wii | PS4 fat | 480p | Ran a consistent 30 fps |
+
+
+
+
+
 
 Tested a game that isn't listed? Tell us on the [Discord](https://discord.gg/QwtU8ZaCth) or in an
 [issue](https://github.com/iHaiDeeZ/DolphinPS4/issues): the game, your console and firmware, the
