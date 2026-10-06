@@ -211,90 +211,102 @@ Everything the app creates sits in **`/data/DolphinPS4/`**:
 
 ## Game compatibility
 
-Measured on a launch-model PS4, average frames per second while playing:
+Each game has a status, like [RPCS3's compatibility list](https://rpcs3.net/compatibility):
 
-| Game | System | FPS |
-|---|---|---|
-| Super Mario Sunshine | GameCube | 30 (its normal rate) |
-| Resident Evil 4 | GameCube | 30 (its normal rate) |
-| The Legend of Zelda: Twilight Princess | GameCube | 30 (its normal rate) |
-| Mortal Kombat: Deadly Alliance | GameCube | 60 |
-| Crash Nitro Kart | GameCube | 60 |
-| Crash Tag Team Racing | GameCube | 60 |
-| Sonic Adventure DX | GameCube | 60 |
-| Shadow the Hedgehog | GameCube | 30–60 |
-| Worms 3D | GameCube | ~55 |
-| Super Smash Bros. Melee | GameCube | 36–60 |
-| Crash Bandicoot: The Wrath of Cortex | GameCube | 20–60 |
-| FIFA Street 2 | GameCube | ~34 |
-| Spider-Man 2 | GameCube | 15–29 (its normal rate is 30) |
-| Call of Duty 2: Big Red One | GameCube | 15–20 (its normal rate is 30) |
-| Super Mario Galaxy | Wii | 40–57 |
-| Wii Sports | Wii | ~40 |
-| Wii Sports Resort | Wii | ~37 |
-| Bully: Scholarship Edition | Wii | 15–30 (its normal rate is 30) |
+| Status | Meaning |
+|---|---|
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Runs well enough to play through |
+| ![Ingame](https://img.shields.io/badge/Ingame-f9b32f?style=flat-square) | Gets into the game, but slowdowns, glitches or freezes get in the way |
+| ![Intro](https://img.shields.io/badge/Intro-e08a1e?style=flat-square) | Shows the intro or menus, but doesn't get into the game |
+| ![Loadable](https://img.shields.io/badge/Loadable-e74c3c?style=flat-square) | Starts, but stays on a black screen |
+| ![Nothing](https://img.shields.io/badge/Nothing-455556?style=flat-square) | Doesn't start, or closes right away |
+
+**Tested by us** on a launch-model PS4, average frames per second while playing:
+
+| Status | Game | System | FPS |
+|---|---|---|---|
+| ![Ingame](https://img.shields.io/badge/Ingame-f9b32f?style=flat-square) | Call of Duty 2: Big Red One | GameCube | 15–20 (its normal rate is 30) |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Crash Bandicoot: The Wrath of Cortex | GameCube | 20–60 |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Crash Nitro Kart | GameCube | 60 |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Crash Tag Team Racing | GameCube | 60 |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | FIFA Street 2 | GameCube | ~34 |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | The Legend of Zelda: Twilight Princess | GameCube | 30 (its normal rate) |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Mortal Kombat: Deadly Alliance | GameCube | 60 |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Resident Evil 4 | GameCube | 30 (its normal rate) |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Shadow the Hedgehog | GameCube | 30–60 |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Sonic Adventure DX | GameCube | 60 |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Spider-Man 2 | GameCube | 15–29 (its normal rate is 30) |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Super Mario Sunshine | GameCube | 30 (its normal rate) |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Super Smash Bros. Melee | GameCube | 36–60 |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Teenage Mutant Ninja Turtles (2003) | GameCube | 50–60 |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | TMNT (2007, Europe) | GameCube | 25 (the PAL version's normal rate); thin lines in some cutscenes |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Worms 3D | GameCube | ~55 |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Bully: Scholarship Edition | Wii | 15–30 (its normal rate is 30) |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Crash of the Titans | Wii | 25–30 with its recommended settings (its normal rate is 30) |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Super Mario Galaxy | Wii | 40–57 |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Wii Sports | Wii | ~40 |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Wii Sports Resort | Wii | ~37 |
 
 A range means the frame rate depends on what's on screen.
 
 **Reported by testers** on the [Discord](https://discord.gg/QwtU8ZaCth):
 
-| Game | System | Console | Resolution | Result |
-|---|---|---|---|---|
-| Super Smash Bros. Melee (Akaneia / ACE mod) | GameCube | PS4 Slim, 11.00 | 1080p | 60 FPS, very stable, no stutters or crashes |
-| Dragon Ball Z: Budokai | GameCube | PS4 Slim, 12.52 | 1080p | 60 FPS, stable, no stutters or crashes |
-| The Legend of Zelda: Four Swords Adventures | GameCube | PS4 Slim, 11.02 | 1080p | Steady 60 FPS most of the time |
-| The Legend of Zelda: Twilight Princess | GameCube | PS4 Slim, 12.52 | 1080p | 28 FPS, stable, no stutters or freezes |
-| Spider-Man 2 | GameCube | PS4 Slim, 12.52 | 1080p | ~25 FPS, dips to 80% speed, some stutters, no crashes |
-| Dead to Rights | GameCube | PS4 Slim, 12.52 | 720p | 45–50 FPS, speed dips, some stutters, no crashes |
-| Mario Kart: Double Dash!! | GameCube | PS4 Pro, 9.60 | 1080p | 60 FPS, very smooth, no stutters or crashes |
-| Pokémon Colosseum | GameCube | PS4, 13.52 | – | 30 FPS in gameplay and cutscenes (60 in menus), 100% speed |
-| Pokémon XD: Gale of Darkness | GameCube | PS4, 13.52 | – | 25–30 FPS, heavier scenes ~20, playable |
-| Sonic Adventure 2: Battle | GameCube | PS4, 13.52 | – | 30–60 FPS (mostly in the 30s), works normally, playable |
-| Prince of Persia: Warrior Within | GameCube | PS4, 13.02 | 480p (native) | 15–24 FPS |
-| Mario Party 7 | GameCube | PS4 Pro, 11.00 (Boost Mode on) | – | 45–60 FPS, very stable |
-| Mario Power Tennis | GameCube | PS4 Pro, 11.00 (Boost Mode on) | – | 45–60 FPS, very stable |
-| Shrek 2 | GameCube | PS4 (original), 9.00 | 720p (2x) | 30 FPS, playable; some drops in cutscenes |
-| Sonic Heroes | GameCube | – | – | 60 FPS |
-| Sonic Gems Collection | GameCube | PS4 Pro, 13.52 | 1080p | Sonic R and Sonic CD run great; Sonic the Fighters crashes at the SEGA screen |
-| Sphinx and the Cursed Mummy | GameCube | PS4 Pro, 6.72 | 1080p (3x), 2x anti-aliasing | 50 FPS with *Speed Features: Compatible* (with Fast: a black screen instead of the THQ logo) |
-| 007: Everything or Nothing | GameCube | – | – | 27–30 FPS, stable, runs really well |
-| X2: Wolverine's Revenge | GameCube | PS4 Slim | 2x | Full speed; a minor issue with the purple loading screen |
-| The Incredible Hulk: Ultimate Destruction | GameCube | – | – | 97–100% speed, some noticeable FPS drops, playable |
-| Shrek: Extra Large | GameCube | – | 480p | 30–60 FPS, some stuttering |
-| SpongeBob SquarePants: Battle for Bikini Bottom (Deluxe mod) | GameCube | – | 480p | Playable, but the frame rate is unsteady with frequent slowdowns |
-| Ultimate Spider-Man | GameCube | – | Native | Many FPS drops, even at native resolution |
-| Tony Hawk's Underground | GameCube | – | – | Very low frame rate |
-| Metal Gear Solid: The Twin Snakes (Europe) | GameCube | – | – | Runs fine at the start, then freezes (around the elevator) |
-| Super Paper Mario | Wii | – | 1080p | 50–60 FPS, stable, playable |
-| "Pokémon Stadium" (name as reported) | – | – | 1080p | 30 FPS, a small drop at the start of battles, saves work |
-| Super Smash Bros. Brawl | Wii | PS4 Slim, 11.00 | 1080p | 60 FPS, stutters on some stages, no crashes |
-| Mario Kart Wii | Wii | PS4 Slim, 11.00 | 1080p | 40–50 FPS, sometimes full speed, some stutters, no crashes |
-| PokéPark 2: Wonders Beyond | Wii | PS4, 13.52 | – | 30 FPS, 100% speed; turn on *Sideways Wii Remote* for the D-pad |
-| Donkey Kong Country Returns (USA) | Wii | PS4 (original), 11.00 | – | 40–45 FPS |
-| Bomberman Blast | Wii (WiiWare) | PS4 (original) | – | 49 of 60 FPS, stable, playable; some textures sometimes disappear, no crashes |
-| Project Zero 2: Wii Edition | Wii | – | – | ~30 FPS in empty corridors, 13–17 FPS in fights with several enemies: not recommended |
-| New Super Mario Bros. Wii | Wii | PS4 Slim, 9.00 | 720p | 60 FPS with V-Sync off; lag spikes on power-ups at 1080p and in local co-op |
-| Super Mario Galaxy | Wii | – | – | 45–60 FPS, 35–45 when a lot is on screen |
-| Super Mario Galaxy 2 | Wii | PS4 (original) | – | 35–45 FPS |
-| Mario Party 9 | Wii | PS4 Pro | – | 30–50 FPS |
-| Animal Crossing: City Folk | Wii | PS4 Slim, 11.00 | – | 30–40 FPS, mostly ~40 |
-| Wii Sports Resort (USA) | Wii | – | – | 60 FPS, slow in some game modes; motion controls work |
-| Tatsunoko vs. Capcom: Ultimate All-Stars (USA) | Wii | PS4 (original), 11.00 | – | Stable, playable |
-| Guitar Hero III: Legends of Rock (USA) | Wii | – | – | 60 FPS, but the game runs slow |
-| Sonic Unleashed | Wii | PS4 Slim, 13.52 | – | 22–27 FPS (70–90% speed) with default settings, no crashes |
-| Spider-Man: Edge of Time | Wii | PS4 Slim | 2x | Works perfectly; turn V-Sync off to fix graphics issues |
-| Michael Jackson: The Experience | Wii | – | 480p / 720p | Stable 60 FPS |
-| Dragon Ball Z: Budokai Tenkaichi 3 | Wii | – | 480p (native) | Runs well with a bit of lag; 720p is decent |
-| Inazuma Eleven GO Strikers 2013 | Wii | – | Native | Special techniques work; performance is mixed |
-| Arc Rise Fantasia (USA) | Wii | – | – | 12–30 FPS with default settings, somewhat playable |
-| Angry Birds Trilogy | Wii | PS4 Slim, 11.00 | – | 20–30 FPS, not very stable, playable |
-| The Smurfs: Dance Party | Wii | – | – | Runs with no problems |
-| Bad Piggies (as reported) | Wii | – | – | Runs decently |
-| Sonic the Hedgehog 4: Episode I (USA) | Wii (WiiWare) | – | – | 30–60 FPS with default settings, playable |
-| Contra ReBirth (USA) | Wii (WiiWare) | – | – | Stable 60 FPS with default settings |
-| Far Cry Vengeance | Wii | – | – | Freezes at the title screen |
-| Rayman Raving Rabbids 2 | Wii | – | – | The emulator closes right away |
-| Crash of the Titans | Wii | PS4 Pro, 13.52 | 1080p | Doesn't start: loops at the beginning |
+| Status | Game | System | Console | Resolution | Result |
+|---|---|---|---|---|---|
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | 007: Everything or Nothing | GameCube | – | – | 27–30 FPS, stable, runs really well |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Dead to Rights | GameCube | PS4 Slim, 12.52 | 720p | 45–50 FPS, speed dips, some stutters, no crashes |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Dragon Ball Z: Budokai | GameCube | PS4 Slim, 12.52 | 1080p | 60 FPS, stable, no stutters or crashes |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | The Incredible Hulk: Ultimate Destruction | GameCube | – | – | 97–100% speed, some noticeable FPS drops, playable |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | The Legend of Zelda: Four Swords Adventures | GameCube | PS4 Slim, 11.02 | 1080p | Steady 60 FPS most of the time |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | The Legend of Zelda: Twilight Princess | GameCube | PS4 Slim, 12.52 | 1080p | 28 FPS, stable, no stutters or freezes |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Mario Kart: Double Dash!! | GameCube | PS4 Pro, 9.60 | 1080p | 60 FPS, very smooth, no stutters or crashes |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Mario Party 7 | GameCube | PS4 Pro, 11.00 (Boost Mode on) | – | 45–60 FPS, very stable |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Mario Power Tennis | GameCube | PS4 Pro, 11.00 (Boost Mode on) | – | 45–60 FPS, very stable |
+| ![Ingame](https://img.shields.io/badge/Ingame-f9b32f?style=flat-square) | Metal Gear Solid: The Twin Snakes (Europe) | GameCube | – | – | Runs fine at the start, then freezes (around the elevator) |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Pokémon Colosseum | GameCube | PS4, 13.52 | – | 30 FPS in gameplay and cutscenes (60 in menus), 100% speed |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Pokémon XD: Gale of Darkness | GameCube | PS4, 13.52 | – | 25–30 FPS, heavier scenes ~20, playable |
+| ![Ingame](https://img.shields.io/badge/Ingame-f9b32f?style=flat-square) | Prince of Persia: Warrior Within | GameCube | PS4, 13.02 | 480p (native) | 15–24 FPS |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Shrek 2 | GameCube | PS4 (original), 9.00 | 720p (2x) | 30 FPS, playable; some drops in cutscenes |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Shrek: Extra Large | GameCube | – | 480p | 30–60 FPS, some stuttering |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Sonic Adventure 2: Battle | GameCube | PS4, 13.52 | – | 30–60 FPS (mostly in the 30s), works normally, playable |
+| ![Ingame](https://img.shields.io/badge/Ingame-f9b32f?style=flat-square) | Sonic Gems Collection | GameCube | PS4 Pro, 13.52 | 1080p | Sonic R and Sonic CD run great; Sonic the Fighters crashes at the SEGA screen |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Sonic Heroes | GameCube | – | – | 60 FPS |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Sphinx and the Cursed Mummy | GameCube | PS4 Pro, 6.72 | 1080p (3x), 2x anti-aliasing | 50 FPS with *Speed Features: Compatible* (with Fast: a black screen instead of the THQ logo) |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Spider-Man 2 | GameCube | PS4 Slim, 12.52 | 1080p | ~25 FPS, dips to 80% speed, some stutters, no crashes |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | SpongeBob SquarePants: Battle for Bikini Bottom (Deluxe mod) | GameCube | – | 480p | Playable, but the frame rate is unsteady with frequent slowdowns |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Super Smash Bros. Melee (Akaneia / ACE mod) | GameCube | PS4 Slim, 11.00 | 1080p | 60 FPS, very stable, no stutters or crashes |
+| ![Ingame](https://img.shields.io/badge/Ingame-f9b32f?style=flat-square) | Tony Hawk's Underground | GameCube | – | – | Very low frame rate |
+| ![Ingame](https://img.shields.io/badge/Ingame-f9b32f?style=flat-square) | Ultimate Spider-Man | GameCube | – | Native | Many FPS drops, even at native resolution |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | X2: Wolverine's Revenge | GameCube | PS4 Slim | 2x | Full speed; a minor issue with the purple loading screen |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Angry Birds Trilogy | Wii | PS4 Slim, 11.00 | – | 20–30 FPS, not very stable, playable |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Animal Crossing: City Folk | Wii | PS4 Slim, 11.00 | – | 30–40 FPS, mostly ~40 |
+| ![Ingame](https://img.shields.io/badge/Ingame-f9b32f?style=flat-square) | Arc Rise Fantasia (USA) | Wii | – | – | 12–30 FPS with default settings, somewhat playable |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Bad Piggies (as reported) | Wii | – | – | Runs decently |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Donkey Kong Country Returns (USA) | Wii | PS4 (original), 11.00 | – | 40–45 FPS |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Dragon Ball Z: Budokai Tenkaichi 3 | Wii | – | 480p (native) | Runs well with a bit of lag; 720p is decent |
+| ![Intro](https://img.shields.io/badge/Intro-e08a1e?style=flat-square) | Far Cry Vengeance | Wii | – | – | Freezes at the title screen |
+| ![Ingame](https://img.shields.io/badge/Ingame-f9b32f?style=flat-square) | Guitar Hero III: Legends of Rock (USA) | Wii | – | – | 60 FPS, but the game runs slow |
+| ![Ingame](https://img.shields.io/badge/Ingame-f9b32f?style=flat-square) | Inazuma Eleven GO Strikers 2013 | Wii | – | Native | Special techniques work; performance is mixed |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Mario Kart Wii | Wii | PS4 Slim, 11.00 | 1080p | 40–50 FPS, sometimes full speed, some stutters, no crashes |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Mario Party 9 | Wii | PS4 Pro | – | 30–50 FPS |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Michael Jackson: The Experience | Wii | – | 480p / 720p | Stable 60 FPS |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | New Super Mario Bros. Wii | Wii | PS4 Slim, 9.00 | 720p | 60 FPS with V-Sync off; lag spikes on power-ups at 1080p and in local co-op |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | PokéPark 2: Wonders Beyond | Wii | PS4, 13.52 | – | 30 FPS, 100% speed; turn on *Sideways Wii Remote* for the D-pad |
+| ![Ingame](https://img.shields.io/badge/Ingame-f9b32f?style=flat-square) | Project Zero 2: Wii Edition | Wii | – | – | ~30 FPS in empty corridors, 13–17 FPS in fights with several enemies: not recommended |
+| ![Nothing](https://img.shields.io/badge/Nothing-455556?style=flat-square) | Rayman Raving Rabbids 2 | Wii | – | – | The emulator closes right away |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | The Smurfs: Dance Party | Wii | – | – | Runs with no problems |
+| ![Ingame](https://img.shields.io/badge/Ingame-f9b32f?style=flat-square) | Sonic Unleashed | Wii | PS4 Slim, 13.52 | – | 22–27 FPS (70–90% speed) with default settings, no crashes |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Spider-Man: Edge of Time | Wii | PS4 Slim | 2x | Works perfectly; turn V-Sync off to fix graphics issues |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Super Mario Galaxy | Wii | – | – | 45–60 FPS, 35–45 when a lot is on screen |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Super Mario Galaxy 2 | Wii | PS4 (original) | – | 35–45 FPS |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Super Paper Mario | Wii | – | 1080p | 50–60 FPS, stable, playable |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Super Smash Bros. Brawl | Wii | PS4 Slim, 11.00 | 1080p | 60 FPS, stutters on some stages, no crashes |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Tatsunoko vs. Capcom: Ultimate All-Stars (USA) | Wii | PS4 (original), 11.00 | – | Stable, playable |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Wii Sports Resort (USA) | Wii | – | – | 60 FPS, slow in some game modes; motion controls work |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Bomberman Blast | Wii (WiiWare) | PS4 (original) | – | 49 of 60 FPS, stable, playable; some textures sometimes disappear, no crashes |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Contra ReBirth (USA) | Wii (WiiWare) | – | – | Stable 60 FPS with default settings |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Sonic the Hedgehog 4: Episode I (USA) | Wii (WiiWare) | – | – | 30–60 FPS with default settings, playable |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | "Pokémon Stadium" (name as reported) | – | – | 1080p | 30 FPS, a small drop at the start of battles, saves work |
 
 Tested a game that isn't listed? Tell us on the [Discord](https://discord.gg/QwtU8ZaCth) or in an
 [issue](https://github.com/iHaiDeeZ/DolphinPS4/issues): the game, your console and firmware, the
