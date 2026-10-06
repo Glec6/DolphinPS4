@@ -15085,10 +15085,10 @@ index f4dc8a9..0c37736 100644
  
 diff --git a/Source/Core/DolphinNoGUI/PlatformPS4.cpp b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
 new file mode 100644
-index 0000000..340de0b
+index 0000000..64032bf
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
-@@ -0,0 +1,1792 @@
+@@ -0,0 +1,1772 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -16463,34 +16463,14 @@ index 0000000..340de0b
 +
 +// Dolphin's JIT writes the game's code as x86 code into memory mapped read/write/execute and runs
 +// it. GoldHEN allows that; a console whose jailbreak doesn't crashes on the first translated block
-+// (a PS4 Pro report, v03.10: SIGSEGV at the start of the JIT area). Tried once at start-up with a
-+// tiny function in the same kind of mapping; a fault comes back here instead of crashing.
-+static sigjmp_buf s_exec_test_jump;
-+static void ExecTestFault(int)
-+{
-+  siglongjmp(s_exec_test_jump, 1);
-+}
++// (a PS4 Pro report, v03.10: SIGSEGV at the start of the JIT area). port/ps4_runtime.cpp tries
++// each way of mapping such memory once at start-up (a fault comes back there instead of crashing)
++// and maps Dolphin's executable memory the first way that worked; the results go to the boot trace.
++extern "C" int ps4_exec_probe();
 +
 +static bool ExecutableMemoryWorks()
 +{
-+  constexpr size_t SIZE = 0x4000;
-+  void* page = mmap(nullptr, SIZE, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_ANON | MAP_PRIVATE, -1, 0);
-+  if (page == MAP_FAILED)
-+    return false;
-+  static const unsigned char code[] = {0xB8, 0x34, 0x12, 0x00, 0x00, 0xC3};  // mov eax, 0x1234; ret
-+  std::memcpy(page, code, sizeof(code));
-+  struct sigaction fault = {}, old_segv = {}, old_bus = {};
-+  fault.sa_handler = ExecTestFault;
-+  sigemptyset(&fault.sa_mask);
-+  sigaction(SIGSEGV, &fault, &old_segv);
-+  sigaction(SIGBUS, &fault, &old_bus);
-+  volatile int result = 0;
-+  if (sigsetjmp(s_exec_test_jump, 1) == 0)
-+    result = reinterpret_cast<int (*)()>(page)();
-+  sigaction(SIGSEGV, &old_segv, nullptr);
-+  sigaction(SIGBUS, &old_bus, nullptr);
-+  munmap(page, SIZE);
-+  return result == 0x1234;
++  return ps4_exec_probe() >= 0;
 +}
 +
 +static void StartDownloadedUpdate()
@@ -21294,7 +21274,7 @@ index 82bf1f2..0fb51d2 100644
  private:
    VkPipeline m_pipeline;
 diff --git a/Source/Core/VideoBackends/Vulkan/VKSwapChain.cpp b/Source/Core/VideoBackends/Vulkan/VKSwapChain.cpp
-index 370e22d..18c06b5 100644
+index 370e22d..ec8ed63 100644
 --- a/Source/Core/VideoBackends/Vulkan/VKSwapChain.cpp
 +++ b/Source/Core/VideoBackends/Vulkan/VKSwapChain.cpp
 @@ -4,14 +4,19 @@
@@ -21607,7 +21587,21 @@ index 370e22d..18c06b5 100644
    VkResult res = vkAcquireNextImageKHR(g_vulkan_context->GetDevice(), m_swap_chain, UINT64_MAX,
                                         g_command_buffer_mgr->GetCurrentCommandBufferSemaphore(),
                                         VK_NULL_HANDLE, &m_current_swap_chain_image_index);
-@@ -612,6 +856,10 @@ bool SwapChain::RecreateSurface(void* native_handle)
+@@ -532,6 +776,13 @@ bool SwapChain::SetVSync(bool enabled)
+ 
+   // Recreate the swap chain with the new present mode.
+   m_vsync_enabled = enabled;
++#ifdef __ORBIS__
++  // PS4: vsync is only the flip mode of the next flips; the video-out buffers stay as they are
++  // (registering them again failed: "Failed to re-configure swap chain images" after turning
++  // vsync on in the in-game menu, v03.44).
++  s_vsync = enabled;
++  return true;
++#endif
+   return RecreateSwapChain();
+ }
+ 
+@@ -612,6 +863,10 @@ bool SwapChain::RecreateSurface(void* native_handle)
  
  void SwapChain::DestroySurface()
  {
