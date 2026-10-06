@@ -256,6 +256,7 @@ A range means the frame rate depends on what's on screen.
 | Super Smash Bros. Brawl | Wii | PS4 Slim, 11.00 | 1080p | 60 FPS, stutters on some stages, no crashes |
 | Mario Kart Wii | Wii | PS4 Slim, 11.00 | 1080p | 40–50 FPS, sometimes full speed, some stutters, no crashes |
 | PokéPark 2: Wonders Beyond | Wii | PS4, 13.52 | – | 30 FPS, 100% speed; turn on *Sideways Wii Remote* for the D-pad |
+| Donkey Kong Country Returns (USA) | Wii | PS4 (original), 11.00 | – | 40–45 FPS |
 | Crash of the Titans | Wii | PS4 Pro, 13.52 | 1080p | Doesn't start: loops at the beginning |
 
 Tested a game that isn't listed? Tell us on the [Discord](https://discord.gg/QwtU8ZaCth) or in an
