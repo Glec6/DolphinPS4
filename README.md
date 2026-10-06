@@ -254,6 +254,17 @@ A range means the frame rate depends on what's on screen.
 | Mario Party 7 | GameCube | PS4 Pro, 11.00 (Boost Mode on) | – | 45–60 FPS, very stable |
 | Mario Power Tennis | GameCube | PS4 Pro, 11.00 (Boost Mode on) | – | 45–60 FPS, very stable |
 | Shrek 2 | GameCube | PS4 (original), 9.00 | 720p (2x) | 30 FPS, playable; some drops in cutscenes |
+| Sonic Heroes | GameCube | – | – | 60 FPS |
+| Sonic Gems Collection | GameCube | PS4 Pro, 13.52 | 1080p | Sonic R and Sonic CD run great; Sonic the Fighters crashes at the SEGA screen |
+| Sphinx and the Cursed Mummy | GameCube | PS4 Pro, 6.72 | 1080p (3x), 2x anti-aliasing | 50 FPS with *Speed Features: Compatible* (with Fast: a black screen instead of the THQ logo) |
+| 007: Everything or Nothing | GameCube | – | – | 27–30 FPS, stable, runs really well |
+| X2: Wolverine's Revenge | GameCube | PS4 Slim | 2x | Full speed; a minor issue with the purple loading screen |
+| The Incredible Hulk: Ultimate Destruction | GameCube | – | – | 97–100% speed, some noticeable FPS drops, playable |
+| Shrek: Extra Large | GameCube | – | 480p | 30–60 FPS, some stuttering |
+| SpongeBob SquarePants: Battle for Bikini Bottom (Deluxe mod) | GameCube | – | 480p | Playable, but the frame rate is unsteady with frequent slowdowns |
+| Ultimate Spider-Man | GameCube | – | Native | Many FPS drops, even at native resolution |
+| Tony Hawk's Underground | GameCube | – | – | Very low frame rate |
+| Metal Gear Solid: The Twin Snakes (Europe) | GameCube | – | – | Runs fine at the start, then freezes (around the elevator) |
 | Super Paper Mario | Wii | – | 1080p | 50–60 FPS, stable, playable |
 | "Pokémon Stadium" (name as reported) | – | – | 1080p | 30 FPS, a small drop at the start of battles, saves work |
 | Super Smash Bros. Brawl | Wii | PS4 Slim, 11.00 | 1080p | 60 FPS, stutters on some stages, no crashes |
@@ -262,6 +273,27 @@ A range means the frame rate depends on what's on screen.
 | Donkey Kong Country Returns (USA) | Wii | PS4 (original), 11.00 | – | 40–45 FPS |
 | Bomberman Blast | Wii (WiiWare) | PS4 (original) | – | 49 of 60 FPS, stable, playable; some textures sometimes disappear, no crashes |
 | Project Zero 2: Wii Edition | Wii | – | – | ~30 FPS in empty corridors, 13–17 FPS in fights with several enemies: not recommended |
+| New Super Mario Bros. Wii | Wii | PS4 Slim, 9.00 | 720p | 60 FPS with V-Sync off; lag spikes on power-ups at 1080p and in local co-op |
+| Super Mario Galaxy | Wii | – | – | 45–60 FPS, 35–45 when a lot is on screen |
+| Super Mario Galaxy 2 | Wii | PS4 (original) | – | 35–45 FPS |
+| Mario Party 9 | Wii | PS4 Pro | – | 30–50 FPS |
+| Animal Crossing: City Folk | Wii | PS4 Slim, 11.00 | – | 30–40 FPS, mostly ~40 |
+| Wii Sports Resort (USA) | Wii | – | – | 60 FPS, slow in some game modes; motion controls work |
+| Tatsunoko vs. Capcom: Ultimate All-Stars (USA) | Wii | PS4 (original), 11.00 | – | Stable, playable |
+| Guitar Hero III: Legends of Rock (USA) | Wii | – | – | 60 FPS, but the game runs slow |
+| Sonic Unleashed | Wii | PS4 Slim, 13.52 | – | 22–27 FPS (70–90% speed) with default settings, no crashes |
+| Spider-Man: Edge of Time | Wii | PS4 Slim | 2x | Works perfectly; turn V-Sync off to fix graphics issues |
+| Michael Jackson: The Experience | Wii | – | 480p / 720p | Stable 60 FPS |
+| Dragon Ball Z: Budokai Tenkaichi 3 | Wii | – | 480p (native) | Runs well with a bit of lag; 720p is decent |
+| Inazuma Eleven GO Strikers 2013 | Wii | – | Native | Special techniques work; performance is mixed |
+| Arc Rise Fantasia (USA) | Wii | – | – | 12–30 FPS with default settings, somewhat playable |
+| Angry Birds Trilogy | Wii | PS4 Slim, 11.00 | – | 20–30 FPS, not very stable, playable |
+| The Smurfs: Dance Party | Wii | – | – | Runs with no problems |
+| Bad Piggies (as reported) | Wii | – | – | Runs decently |
+| Sonic the Hedgehog 4: Episode I (USA) | Wii (WiiWare) | – | – | 30–60 FPS with default settings, playable |
+| Contra ReBirth (USA) | Wii (WiiWare) | – | – | Stable 60 FPS with default settings |
+| Far Cry Vengeance | Wii | – | – | Freezes at the title screen |
+| Rayman Raving Rabbids 2 | Wii | – | – | The emulator closes right away |
 | Crash of the Titans | Wii | PS4 Pro, 13.52 | 1080p | Doesn't start: loops at the beginning |
 
 Tested a game that isn't listed? Tell us on the [Discord](https://discord.gg/QwtU8ZaCth) or in an
