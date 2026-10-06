@@ -180,6 +180,11 @@ The best settings found for each game live in
 starts online, so a game's fix or speed-up reaches everyone without a new release. Your own
 settings (the menu, `ps4.ini`) always win over it.
 
+Before a covered game's first start, Dolphin asks whether to use its recommended settings
+(Yes / No). *Settings → Game Settings Center* shows the source, the last update, **Update Now**,
+and your games with recommended settings, each switchable between *Used* and *Not used* (also at
+the top of the game's own Game Settings).
+
 ### Cheats
 
 Triangle on a game → **Cheats** (or L3 + R3 → Cheats while playing).

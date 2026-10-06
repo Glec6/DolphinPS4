@@ -408,3 +408,23 @@ Nessuno online
 Errore (HTTP {})
 Errore (nessuna connessione)
 Scarica i codici Gecko di questo gioco da internet (codes.rc24.xyz). I nuovi vengono aggiunti disattivati.
+# --- Settings center
+Centro impostazioni giochi
+Impostazioni consigliate per gioco, da GitHub
+Origine
+Ultimo aggiornamento
+Giochi coperti
+Aggiorna ora
+Aggiornamento...
+Aggiornato
+Aggiornato all'ultima versione
+Errore (non è un file di impostazioni)
+I tuoi giochi
+Ancora nessuno dei tuoi giochi
+Copia nell'app
+Impostazioni consigliate
+Usarle per questo gioco?
+Usate
+Non usate
+Chiedi all'avvio
+Scarica ora le impostazioni consigliate più recenti da GitHub (Dolphin lo fa anche a ogni avvio).

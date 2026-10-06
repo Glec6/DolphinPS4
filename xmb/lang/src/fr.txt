@@ -408,3 +408,23 @@ Aucun en ligne
 Échec (HTTP {})
 Échec (pas de connexion)
 Récupère les codes Gecko de ce jeu sur internet (codes.rc24.xyz). Les nouveaux sont ajoutés désactivés.
+# --- Settings center
+Centre de réglages des jeux
+Réglages recommandés par jeu, depuis GitHub
+Source
+Dernière mise à jour
+Jeux couverts
+Mettre à jour
+Mise à jour...
+Mis à jour
+À jour
+Échec (pas un fichier de réglages)
+Vos jeux
+Aucun de vos jeux pour l'instant
+Copie de l'app
+Réglages recommandés
+Les utiliser pour ce jeu ?
+Utilisés
+Non utilisés
+Demander au lancement
+Télécharge maintenant les derniers réglages recommandés depuis GitHub (Dolphin le fait aussi à chaque démarrage).

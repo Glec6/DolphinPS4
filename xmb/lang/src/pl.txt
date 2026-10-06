@@ -408,3 +408,23 @@ Brak online
 Błąd (HTTP {})
 Błąd (brak połączenia)
 Pobiera kody Gecko tej gry z internetu (codes.rc24.xyz). Nowe są dodawane jako wyłączone.
+# --- Settings center
+Centrum ustawień gier
+Zalecane ustawienia dla każdej gry, z GitHuba
+Źródło
+Ostatnia aktualizacja
+Obsługiwane gry
+Aktualizuj teraz
+Aktualizowanie...
+Zaktualizowano
+Aktualne
+Błąd (to nie plik ustawień)
+Twoje gry
+Jeszcze żadna z twoich gier
+Kopia w aplikacji
+Zalecane ustawienia
+Użyć ich w tej grze?
+Używane
+Nieużywane
+Pytaj przy uruchomieniu
+Pobiera teraz najnowsze zalecane ustawienia z GitHuba (Dolphin robi to też przy każdym uruchomieniu).

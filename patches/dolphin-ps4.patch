@@ -9537,10 +9537,10 @@ index 0000000..914dbb5
 +}  // namespace PS4Updater
 diff --git a/Source/Core/DolphinNoGUI/PS4XMB.cpp b/Source/Core/DolphinNoGUI/PS4XMB.cpp
 new file mode 100755
-index 0000000..9c63112
+index 0000000..d6800bf
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4XMB.cpp
-@@ -0,0 +1,4332 @@
+@@ -0,0 +1,4659 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -9589,6 +9589,14 @@ index 0000000..9c63112
 +#include "DolphinNoGUI/PS4Glyphs.h"
 +#include "DolphinNoGUI/PS4Lang.h"
 +#include "DolphinNoGUI/PS4Net.h"
++
++// PlatformPS4.cpp: the players' answers to the game settings center, per game.
++namespace PS4Center
++{
++std::string Choice(const std::string& game_id);
++void SetChoice(const std::string& game_id, bool use);
++void Reload();
++}  // namespace PS4Center
 +#include "DolphinNoGUI/PS4MemoryCards.h"
 +#include "DolphinNoGUI/PS4Settings.h"
 +#include "DolphinNoGUI/PS4Updater.h"
@@ -10118,6 +10126,7 @@ index 0000000..9c63112
 +  SET_AUTO_UPDATE,   // Automatic Updates on/off
 +  SET_UPDATE,        // the update panel: prompt, progress, result
 +  SET_GAMES_DIR,     // Game Folder: a folder browser
++  SET_CENTER,        // Game Settings Center: the recommended settings per game
 +  SET_STYLE,         // Menu Style: Library or XMB
 +  SET_LANGUAGE,      // Language: the menus' (and games') language, a list of all of them
 +  SET_MEMCARD,       // a memory card: Slot A and the saves on it
@@ -10199,6 +10208,21 @@ index 0000000..9c63112
 +  void OpenFolderBrowser(const std::string& path);
 +  void StartUpdateCheck(bool manual);
 +  void FetchGameSettings();
++  struct CenterEntry
++  {
++    std::string id;
++    std::string comment;
++    std::vector<std::pair<std::string, std::string>> values;
++  };
++  void LoadCenter();
++  const CenterEntry* CenterFor(const std::string& game_id) const;
++  static std::string CenterSummary(const CenterEntry& entry);
++  std::string CenterChoiceLabel(const std::string& game_id) const;
++  void OpenCenterPage();
++  void BuildCenterRows();
++  void AskCenter(int game);
++  static std::vector<std::string> WrapLines(const std::string& text, size_t width);
++  void UpdateCenterFetch();
 +  void StartUpdateDownload();
 +  void UpdateUpdater(float dt);
 +  void ShowUpdatePanel();
@@ -10289,6 +10313,12 @@ index 0000000..9c63112
 +  PS4Cheats::List m_cheats;
 +  std::string m_cheats_game;
 +  std::thread m_settings_thread;  // the game settings center download
++  std::vector<CenterEntry> m_center;
++  bool m_center_fetched_copy = false;
++  std::atomic<bool> m_settings_busy{false}, m_settings_done{false};
++  std::mutex m_center_mutex;
++  std::string m_center_status;  // Update Now's result
++  int m_center_ask_game = -1;   // the game waiting for the Recommended Settings answer
 +  // Download Codes on the Cheats page: a background fetch and its result line.
 +  std::thread m_cheat_dl_thread;
 +  std::atomic<bool> m_cheat_dl_busy{false}, m_cheat_dl_done{false};
@@ -10734,6 +10764,8 @@ index 0000000..9c63112
 +  settings.push_back({"Clock", m_prefs.clock ? "On" : "Off", -1, -1, SET_CLOCK});
 +  settings.push_back({"Controls", "Remap the GameCube and Wii buttons", -1, -1, SET_CONTROLS});
 +  settings.push_back({"Game Folder", GamesFolder(), -1, -1, SET_GAMES_DIR});
++  settings.push_back({"Game Settings Center", "Recommended settings per game, from GitHub", -1, -1,
++                      SET_CENTER});
 +  settings.push_back({"Download Covers", "Box art from GameTDB for your games", -1, -1,
 +                      SET_COVERS});
 +  settings.push_back({"Check for Updates", "Installed: v" + m_version, -1, -1, SET_UPDATE_CHECK});
@@ -10881,6 +10913,9 @@ index 0000000..9c63112
 +  case SET_GAMES_DIR:
 +    OpenFolderBrowser(GamesFolder());
 +    return;
++  case SET_CENTER:
++    OpenCenterPage();
++    return;
 +  case SET_UPDATE_CHECK:
 +    m_panel.setting = SET_UPDATE;
 +    StartUpdateCheck(true);
@@ -10941,6 +10976,13 @@ index 0000000..9c63112
 +{
 +  std::vector<SettingRow> rows;
 +  const std::string& game = m_panel.game_id;
++  if (!game.empty() && CenterFor(game))
++  {
++    SettingRow row{"Recommended Settings",
++                   PS4Center::Choice(game) == "no" ? "Not used" : "Used", "center:this"};
++    row.tag = PS4Center::Choice(game) == "no" ? -1 : 1;
++    rows.push_back(std::move(row));
++  }
 +  if (!game.empty())
 +  {
 +    rows.push_back({"Apply To", PS4Settings::IsCustom(game) ? "This Game" : "All Games", "", false,
@@ -10999,6 +11041,32 @@ index 0000000..9c63112
 +    return;
 +  const SettingRow& row = m_panel.rows[m_panel.selected];
 +  const std::string& game = m_panel.game_id;
++  if (row.key == "center:update")
++  {
++    if (direction > 0 && !m_settings_busy && !m_settings_thread.joinable())
++      FetchGameSettings();
++    BuildCenterRows();
++    return;
++  }
++  if (row.key.rfind("center:game:", 0) == 0)
++  {
++    const size_t i = std::strtoul(row.key.c_str() + 12, nullptr, 10);
++    if (i < m_games.size())
++    {
++      PS4Center::SetChoice(m_games[i].id, PS4Center::Choice(m_games[i].id) == "no");
++      Log("game settings center: " + m_games[i].id + " " + PS4Center::Choice(m_games[i].id));
++    }
++    BuildCenterRows();
++    return;
++  }
++  if (row.key == "center:this")
++  {
++    PS4Center::SetChoice(game, PS4Center::Choice(game) == "no");
++    BuildSettingRows();
++    return;
++  }
++  if (row.key == "center:info")
++    return;
 +  if (m_panel.setting == SET_MEMCARD)
 +  {
 +    // Cross on "Put in Slot A"; the saves are only shown (their details below the list).
@@ -11571,6 +11639,20 @@ index 0000000..9c63112
 +      m_panel.selected++;
 +      Play("move");
 +    }
++    if ((pressed & BTN_CROSS) && m_panel.title == "Recommended Settings" &&
++        m_center_ask_game >= 0 && m_center_ask_game < static_cast<int>(m_games.size()))
++    {
++      const int game = m_center_ask_game;
++      m_center_ask_game = -1;
++      const bool use = m_panel.options[m_panel.selected] == "Yes";
++      PS4Center::SetChoice(m_games[game].id, use);
++      Log("game settings center: " + m_games[game].id + (use ? " yes" : " no"));
++      m_panel.open = false;
++      Item item;
++      item.game = game;
++      ActivateItem(item);  // answered: starts now
++      return;
++    }
 +    if ((pressed & BTN_CROSS) && m_panel.setting == SET_UPDATE)
 +    {
 +      const std::string& choice = m_panel.options[m_panel.selected];
@@ -11794,6 +11876,12 @@ index 0000000..9c63112
 +// Cross on an item (both styles).
 +void Menu::ActivateItem(const Item& item)
 +{
++  if (item.game >= 0 && CenterFor(m_games[item.game].id) &&
++      PS4Center::Choice(m_games[item.game].id).empty())
++  {
++    AskCenter(item.game);
++    return;
++  }
 +  if (item.game >= 0)
 +  {
 +    m_launch = item.game;
@@ -12412,6 +12500,22 @@ index 0000000..9c63112
 +                  std::to_string(save.blocks) + (save.blocks == 1 ? " block" : " blocks") +
 +                  "  -  saved " + DateText(save.modified);
 +        }
++      }
++      else if (row.key == "center:update")
++        help = "Downloads the latest recommended settings from GitHub now (Dolphin also does it at every start).";
++      else if (row.key.rfind("center:game:", 0) == 0)
++      {
++        const size_t i = std::strtoul(row.key.c_str() + 12, nullptr, 10);
++        if (i < m_games.size())
++        {
++          if (const CenterEntry* entry = CenterFor(m_games[i].id))
++            help = CenterSummary(*entry) + ". " + entry->comment;
++        }
++      }
++      else if (row.key == "center:this")
++      {
++        if (const CenterEntry* entry = CenterFor(m_panel.game_id))
++          help = CenterSummary(*entry) + ". " + entry->comment;
 +      }
 +      else if (row.key == "cheatdl")
 +        help = "Gets this game's Gecko codes from the internet (codes.rc24.xyz). New ones are added switched off.";
@@ -13322,6 +13426,7 @@ index 0000000..9c63112
 +// the center's header line replaces the copy, written through a temporary file.
 +void Menu::FetchGameSettings()
 +{
++  m_settings_busy = true;
 +  m_settings_thread = std::thread([this] {
 +    PS4Net::Request request;
 +    request.url = "https://raw.githubusercontent.com/iHaiDeeZ/DolphinPS4/main/xmb/game-settings.ini";
@@ -13335,21 +13440,29 @@ index 0000000..9c63112
 +          return text.size() < 512 * 1024;
 +        },
 +        nullptr, &error);
++    auto report = [this](const std::string& status_text) {
++      std::lock_guard lock(m_center_mutex);
++      m_center_status = status_text;
++      m_settings_done = true;
++    };
 +    if (status != 200)
 +    {
 +      Log("game settings: not fetched (" + (error.empty() ? "HTTP " + std::to_string(status) : error) +
 +          ")");
++      report("Failed (no connection)");
 +      return;
 +    }
 +    if (text.rfind("# Dolphin for PS4 - game settings center", 0) != 0)
 +    {
 +      Log("game settings: the download isn't a settings center file, kept the old one");
++      report("Failed (not a settings file)");
 +      return;
 +    }
 +    const std::string path = m_data_dir + "/game-settings.ini";
 +    if (ReadFile(path) == text)
 +    {
 +      Log("game settings: up to date");
++      report("Up to date");
 +      return;
 +    }
 +    const std::string temp = path + ".new";
@@ -13362,8 +13475,220 @@ index 0000000..9c63112
 +      if (written && std::rename(temp.c_str(), path.c_str()) == 0)
 +        Log("game settings: updated from GitHub (" + std::to_string(text.size()) + " bytes)");
 +    }
++    report("Updated");
 +  });
 +}
++
++// --- Game settings center --------------------------------------------------------------------
++// The best settings per game (xmb/game-settings.ini on GitHub, fetched at every start). Shown in
++// Settings -> Game Settings Center; before a covered game's first start the player is asked
++// whether to use them (PlatformPS4.cpp applies them unless the answer was No).
++
++void Menu::LoadCenter()
++{
++  m_center.clear();
++  const std::string fetched = m_data_dir + "/game-settings.ini";
++  std::string text = ReadFile(fetched);
++  m_center_fetched_copy = text.rfind("# Dolphin for PS4 - game settings center", 0) == 0;
++  if (!m_center_fetched_copy)
++    text = ReadFile(m_assets_dir + "/xmb/game-settings.ini");
++  CenterEntry* current = nullptr;
++  size_t start = 0;
++  while (start < text.size())
++  {
++    size_t end = text.find('\n', start);
++    if (end == std::string::npos)
++      end = text.size();
++    std::string line = text.substr(start, end - start);
++    start = end + 1;
++    while (!line.empty() && (line.back() == '\r' || line.back() == ' '))
++      line.pop_back();
++    if (line.size() > 2 && line.front() == '[' && line.back() == ']')
++    {
++      m_center.push_back({line.substr(1, line.size() - 2), {}, {}});
++      current = &m_center.back();
++      continue;
++    }
++    if (!current || line.empty())
++      continue;
++    if (line[0] == '#')
++    {
++      if (current->values.empty())
++        current->comment += (current->comment.empty() ? "" : " ") + line.substr(line.size() > 1 ? 2 : 1);
++      continue;
++    }
++    const size_t equals = line.find('=');
++    if (equals != std::string::npos)
++      current->values.emplace_back(line.substr(0, equals), line.substr(equals + 1));
++  }
++}
++
++// The entry for a game: its own ID, else its 3-character (every region) one.
++const Menu::CenterEntry* Menu::CenterFor(const std::string& game_id) const
++{
++  const CenterEntry* found = nullptr;
++  for (const CenterEntry& entry : m_center)
++  {
++    if (entry.id == game_id)
++      return &entry;
++    if (game_id.size() >= 3 && entry.id == game_id.substr(0, 3))
++      found = &entry;
++  }
++  return found;
++}
++
++// What an entry changes, in words.
++std::string Menu::CenterSummary(const CenterEntry& entry)
++{
++  std::vector<std::string> parts;
++  bool shortcut = false;
++  for (const auto& [key, value] : entry.values)
++  {
++    if (key == "speed_mode")
++      parts.push_back(value == "fast" ? "Speed Features Fast" : "Speed Features Compatible");
++    else if (key == "fifo_defer" || key == "jit_gp_fuse" || key == "jit_lazy_lfs" || key == "fifo_batch")
++    {
++      if (value == "off" && !shortcut)
++      {
++        parts.push_back("speed shortcuts adjusted");
++        shortcut = true;
++      }
++    }
++    else if (key == "sync_on_idle")
++      parts.push_back(value == "off" ? "idle sync off" : "idle sync on");
++    else if (key == "cpu_clock_min")
++      parts.push_back("clock floor " + value + "%");
++    else if (key == "cpu_clock")
++      parts.push_back("CPU clock " + value + "%");
++    else if (key == "dual_core")
++      parts.push_back("dual core");
++    else if (key == "perfmon")
++      parts.push_back("performance counters " + value);
++    else if (key == "zoom")
++      parts.push_back("letterbox zoom");
++    else if (key == "manual_texture_sampling")
++      parts.push_back("exact texture sampling");
++    else if (key == "tex_hash_once")
++      continue;
++    else if (key == "wii_extension")
++      parts.push_back(value == "none" ? "no Nunchuk" : "Nunchuk");
++    else if (key == "wii_sideways")
++      parts.push_back(value == "on" ? "sideways Wii Remote" : "upright Wii Remote");
++    else
++      parts.push_back(key + " " + value);
++  }
++  std::string text;
++  for (const std::string& part : parts)
++    text += (text.empty() ? "" : ", ") + part;
++  return text;
++}
++
++std::string Menu::CenterChoiceLabel(const std::string& game_id) const
++{
++  const std::string choice = PS4Center::Choice(game_id);
++  return choice == "no" ? "Not used" : choice == "yes" ? "Used" : "Ask at start";
++}
++
++void Menu::OpenCenterPage()
++{
++  m_panel = {};
++  m_panel.open = true;
++  m_panel.setting = SET_CENTER;
++  m_panel.title = "Game Settings Center";
++  BuildCenterRows();
++  m_panel.selected = 0;
++  MoveSettingRow(0);
++}
++
++void Menu::BuildCenterRows()
++{
++  std::vector<SettingRow> rows;
++  rows.push_back({"Source", "GitHub: iHaiDeeZ/DolphinPS4", "center:info"});
++  std::string updated = "Copy in the app";
++  if (m_center_fetched_copy)
++  {
++    struct stat st;
++    if (stat((m_data_dir + "/game-settings.ini").c_str(), &st) == 0)
++      updated = DateText(static_cast<int64_t>(st.st_mtime));
++  }
++  rows.push_back({"Last Update", updated, "center:info"});
++  rows.push_back({"Games Covered", std::to_string(m_center.size()), "center:info"});
++  {
++    std::lock_guard lock(m_center_mutex);
++    rows.push_back({"Update Now", m_settings_busy ? "Updating..." : m_center_status, "center:update"});
++  }
++  rows.push_back({"Your Games", "", "", true});
++  size_t mine = 0;
++  for (size_t i = 0; i < m_games.size(); i++)
++  {
++    if (!CenterFor(m_games[i].id))
++      continue;
++    SettingRow row{m_games[i].title, CenterChoiceLabel(m_games[i].id),
++                   "center:game:" + std::to_string(i)};
++    row.tag = PS4Center::Choice(m_games[i].id) == "no" ? -1 : 1;
++    rows.push_back(std::move(row));
++    mine++;
++  }
++  if (mine == 0)
++    rows.push_back({"None of your games yet", "", "", true});
++  m_panel.rows = std::move(rows);
++}
++
++// "Use the recommended settings?" before a covered game's first start.
++void Menu::AskCenter(int game)
++{
++  const CenterEntry* entry = CenterFor(m_games[game].id);
++  m_panel = {};
++  m_panel.open = true;
++  m_panel.title = "Recommended Settings";
++  m_panel.lines = {"", m_games[game].title, ""};
++  for (const std::string& line : WrapLines(CenterSummary(*entry), 34))
++    m_panel.lines.push_back(line);
++  m_panel.lines.push_back("");
++  m_panel.lines.push_back("Use them for this game?");
++  m_panel.options = {"Yes", "No"};
++  m_center_ask_game = game;
++  Play("menu");
++}
++
++std::vector<std::string> Menu::WrapLines(const std::string& text, size_t width)
++{
++  std::vector<std::string> lines;
++  std::string line;
++  size_t start = 0;
++  while (start < text.size())
++  {
++    size_t end = text.find(' ', start);
++    if (end == std::string::npos)
++      end = text.size();
++    const std::string word = text.substr(start, end - start);
++    if (!line.empty() && line.size() + 1 + word.size() > width)
++    {
++      lines.push_back(line);
++      line.clear();
++    }
++    line += (line.empty() ? "" : " ") + word;
++    start = end + 1;
++  }
++  if (!line.empty())
++    lines.push_back(line);
++  return lines;
++}
++
++// Update Now finished (or the start-up fetch): the page and the menu's values follow.
++void Menu::UpdateCenterFetch()
++{
++  if (!m_settings_done.exchange(false))
++    return;
++  if (m_settings_thread.joinable())
++    m_settings_thread.join();
++  m_settings_busy = false;
++  LoadCenter();
++  PS4Center::Reload();
++  if (m_panel.open && m_panel.setting == SET_CENTER)
++    BuildCenterRows();
++}
++
 +
 +void Menu::StartUpdateCheck(bool manual)
 +{
@@ -13771,6 +14096,7 @@ index 0000000..9c63112
 +  RemoveOldUpdates();
 +  if (m_prefs.auto_update)
 +    StartUpdateCheck(false);
++  LoadCenter();
 +  FetchGameSettings();
 +  // Covers missing for any game are fetched in the background every time the app opens.
 +  for (const Game& game : m_games)
@@ -13809,6 +14135,7 @@ index 0000000..9c63112
 +    UpdateCoverDownload();
 +    UpdateUpdater(dt);
 +    UpdateCheatDownload();
++    UpdateCenterFetch();
 +
 +    m_display.BeginFrame();
 +    ImGui::NewFrame();
@@ -14579,10 +14906,10 @@ index f4dc8a9..0c37736 100644
  
 diff --git a/Source/Core/DolphinNoGUI/PlatformPS4.cpp b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
 new file mode 100644
-index 0000000..de29bcf
+index 0000000..68266a3
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
-@@ -0,0 +1,1674 @@
+@@ -0,0 +1,1786 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -14821,6 +15148,38 @@ index 0000000..de29bcf
 +// it from GitHub at every start (PS4XMB.cpp); that copy is used when it's a settings center file,
 +// else the one in the package.
 +std::string s_game_settings_source;
++// The center's per-game sections, kept apart from ps4.ini's so a player's No can leave them out.
++std::map<std::string, std::map<std::string, std::string>> s_center_options;
++// The players' answers to "Use the recommended settings?": game ID -> "yes" / "no" (none yet:
++// used - the menu asks before a game's first start; a game started without the menu uses them).
++const std::string CENTER_CHOICES = std::string(PS4_DATA_DIR_PATH) + "/game-settings-choices.ini";
++std::map<std::string, std::string> s_center_choices;
++
++void LoadCenterChoices()
++{
++  s_center_choices.clear();
++  if (FILE* file = fopen(CENTER_CHOICES.c_str(), "r"))
++  {
++    char line[128];
++    while (fgets(line, sizeof(line), file))
++    {
++      std::string text = line;
++      while (!text.empty() && (text.back() == '\n' || text.back() == '\r' || text.back() == ' '))
++        text.pop_back();
++      const size_t equals = text.find('=');
++      if (!text.empty() && text[0] != '#' && equals != std::string::npos)
++        s_center_choices[text.substr(0, equals)] = text.substr(equals + 1);
++    }
++    fclose(file);
++  }
++}
++
++bool CenterUsed(const std::string& game_id)
++{
++  const auto it = s_center_choices.find(game_id);
++  return it == s_center_choices.end() || it->second != "no";
++}
++
 +bool IsGameSettingsFile(const std::string& path)
 +{
 +  FILE* file = fopen(path.c_str(), "r");
@@ -14841,7 +15200,15 @@ index 0000000..de29bcf
 +  const std::string fetched = std::string(PS4_DATA_DIR_PATH) + "/game-settings.ini";
 +  s_game_settings_source =
 +      IsGameSettingsFile(fetched) ? fetched : AssetsDir() + "/xmb/game-settings.ini";
-+  LoadOptionsFile(s_game_settings_source, true);
++  {
++    // Into s_center_options instead of s_game_options.
++    auto others = std::move(s_game_options);
++    s_game_options.clear();
++    LoadOptionsFile(s_game_settings_source, true);
++    s_center_options = std::move(s_game_options);
++    s_game_options = std::move(others);
++  }
++  LoadCenterChoices();
 +  LoadOptionsFile(std::string(PS4_DATA_DIR_PATH) + "/ps4.ini");
 +}
 +
@@ -14849,6 +15216,19 @@ index 0000000..de29bcf
 +std::string GameOption(const std::string& game_id, const std::string& key)
 +{
 +  std::string value;
++  // The settings center first (when the player uses it for this game), then ps4.ini's sections.
++  if (CenterUsed(game_id))
++  {
++    for (const std::string& id : {game_id.substr(0, 3), game_id})
++    {
++      const auto section = s_center_options.find(id);
++      if (section == s_center_options.end())
++        continue;
++      const auto it = section->second.find(key);
++      if (it != section->second.end())
++        value = it->second;
++    }
++  }
 +  for (const std::string& id : {game_id.substr(0, 3), game_id})
 +  {
 +    const auto section = s_game_options.find(id);
@@ -16176,6 +16556,25 @@ index 0000000..de29bcf
 +      if (std::filesystem::path(entry.path) != std::filesystem::path(game) ||
 +          entry.game_id.size() < 3)
 +        continue;
++      // The game settings center's recommended settings (unless the player said No), then
++      // ps4.ini's per-game sections.
++      const bool center_used = CenterUsed(entry.game_id);
++      for (const std::string& id : {entry.game_id.substr(0, 3), entry.game_id})
++      {
++        const auto section = s_center_options.find(id);
++        if (section == s_center_options.end())
++          continue;
++        if (!center_used)
++        {
++          BootTrace(("game settings center: [" + id + "] not used (player's choice)").c_str());
++          continue;
++        }
++        for (const auto& [key, value] : section->second)
++        {
++          s_options[key] = value;
++          BootTrace(("center [" + id + "] " + key + "=" + value).c_str());
++        }
++      }
 +      for (const std::string& id : {entry.game_id.substr(0, 3), entry.game_id})
 +      {
 +        const auto section = s_game_options.find(id);
@@ -16257,6 +16656,46 @@ index 0000000..de29bcf
 +  }
 +  return args;
 +}
++
++// The game settings center for the menu (PS4XMB.cpp): the players' answers.
++namespace PS4Center
++{
++std::string Choice(const std::string& game_id)
++{
++  const auto it = s_center_choices.find(game_id);
++  return it == s_center_choices.end() ? std::string() : it->second;
++}
++
++void SetChoice(const std::string& game_id, bool use)
++{
++  s_center_choices[game_id] = use ? "yes" : "no";
++  const std::string temp = CENTER_CHOICES + ".new";
++  if (FILE* file = fopen(temp.c_str(), "w"))
++  {
++    fprintf(file, "# Dolphin for PS4: the game settings center, used (yes) or not (no) per game\n");
++    for (const auto& [id, choice] : s_center_choices)
++      fprintf(file, "%s=%s\n", id.c_str(), choice.c_str());
++    fflush(file);
++    fsync(fileno(file));
++    fclose(file);
++    std::rename(temp.c_str(), CENTER_CHOICES.c_str());
++  }
++}
++
++// After a new copy was downloaded: the menu's per-game values follow it.
++void Reload()
++{
++  // Only the center: the global options and ps4.ini's sections stay as they were loaded.
++  const std::string fetched = std::string(PS4_DATA_DIR_PATH) + "/game-settings.ini";
++  s_game_settings_source =
++      IsGameSettingsFile(fetched) ? fetched : AssetsDir() + "/xmb/game-settings.ini";
++  auto others = std::move(s_game_options);
++  s_game_options.clear();
++  LoadOptionsFile(s_game_settings_source, true);
++  s_center_options = std::move(s_game_options);
++  s_game_options = std::move(others);
++}
++}  // namespace PS4Center
 diff --git a/Source/Core/InputCommon/CMakeLists.txt b/Source/Core/InputCommon/CMakeLists.txt
 index 5cc6b66..67933de 100644
 --- a/Source/Core/InputCommon/CMakeLists.txt

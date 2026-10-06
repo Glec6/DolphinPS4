@@ -408,3 +408,23 @@ Ninguno en línea
 Error (HTTP {})
 Error (sin conexión)
 Obtiene los códigos Gecko de este juego de internet (codes.rc24.xyz). Los nuevos se añaden desactivados.
+# --- Settings center
+Centro de ajustes de juegos
+Ajustes recomendados por juego, desde GitHub
+Origen
+Última actualización
+Juegos incluidos
+Actualizar ahora
+Actualizando...
+Actualizado
+Al día
+Error (no es un archivo de ajustes)
+Tus juegos
+Ninguno de tus juegos todavía
+Copia de la app
+Ajustes recomendados
+¿Usarlos para este juego?
+Usados
+No usados
+Preguntar al iniciar
+Descarga ahora los ajustes recomendados más recientes de GitHub (Dolphin también lo hace en cada inicio).

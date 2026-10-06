@@ -408,3 +408,23 @@ Geen online
 Mislukt (HTTP {})
 Mislukt (geen verbinding)
 Haalt de Gecko-codes van deze game van internet (codes.rc24.xyz). Nieuwe worden uitgeschakeld toegevoegd.
+# --- Settings center
+Spelinstellingencentrum
+Aanbevolen instellingen per game, van GitHub
+Bron
+Laatste update
+Games met instellingen
+Nu bijwerken
+Bijwerken...
+Bijgewerkt
+Actueel
+Mislukt (geen instellingenbestand)
+Jouw games
+Nog geen van je games
+Kopie in de app
+Aanbevolen instellingen
+Gebruiken voor deze game?
+Gebruikt
+Niet gebruikt
+Vragen bij starten
+Downloadt nu de nieuwste aanbevolen instellingen van GitHub (Dolphin doet dat ook bij elke start).

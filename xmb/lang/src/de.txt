@@ -408,3 +408,23 @@ Keine online
 Fehler (HTTP {})
 Fehler (keine Verbindung)
 Lädt die Gecko-Codes dieses Spiels aus dem Internet (codes.rc24.xyz). Neue werden ausgeschaltet hinzugefügt.
+# --- Settings center
+Spieleinstellungs-Zentrale
+Empfohlene Einstellungen pro Spiel, von GitHub
+Quelle
+Letzte Aktualisierung
+Abgedeckte Spiele
+Jetzt aktualisieren
+Wird aktualisiert...
+Aktualisiert
+Aktuell
+Fehler (keine Einstellungsdatei)
+Deine Spiele
+Noch keines deiner Spiele
+Kopie in der App
+Empfohlene Einstellungen
+Für dieses Spiel verwenden?
+Verwendet
+Nicht verwendet
+Beim Start fragen
+Lädt jetzt die neuesten empfohlenen Einstellungen von GitHub (Dolphin macht das auch bei jedem Start).

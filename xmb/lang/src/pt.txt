@@ -409,3 +409,23 @@ Nenhum online
 Falha (HTTP {})
 Falha (sem conexão)
 Baixa os códigos Gecko deste jogo da internet (codes.rc24.xyz). Os novos são adicionados desativados.
+# --- Settings center
+Central de configurações de jogos
+Configurações recomendadas por jogo, do GitHub
+Origem
+Última atualização
+Jogos cobertos
+Atualizar agora
+Atualizando...
+Atualizado
+Em dia
+Falha (não é um arquivo de configurações)
+Seus jogos
+Nenhum dos seus jogos ainda
+Cópia do app
+Configurações recomendadas
+Usar neste jogo?
+Usadas
+Não usadas
+Perguntar ao iniciar
+Baixa agora as configurações recomendadas mais recentes do GitHub (o Dolphin também faz isso a cada início).

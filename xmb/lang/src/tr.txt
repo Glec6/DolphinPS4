@@ -408,3 +408,23 @@ Kodları indir
 Başarısız (HTTP {})
 Başarısız (bağlantı yok)
 Bu oyunun Gecko kodlarını internetten alır (codes.rc24.xyz). Yeni olanlar kapalı olarak eklenir.
+# --- Settings center
+Oyun ayarları merkezi
+Oyun başına önerilen ayarlar, GitHub'dan
+Kaynak
+Son güncelleme
+Kapsanan oyunlar
+Şimdi güncelle
+Güncelleniyor...
+Güncellendi
+Güncel
+Başarısız (ayar dosyası değil)
+Oyunların
+Henüz oyunlarından hiçbiri
+Uygulamadaki kopya
+Önerilen ayarlar
+Bu oyunda kullanılsın mı?
+Kullanılıyor
+Kullanılmıyor
+Başlarken sor
+En yeni önerilen ayarları şimdi GitHub'dan indirir (Dolphin bunu her açılışta da yapar).

@@ -410,3 +410,23 @@ None online
 Failed (HTTP {})
 Failed (no connection)
 Gets this game's Gecko codes from the internet (codes.rc24.xyz). New ones are added switched off.
+# --- Settings center
+Game Settings Center
+Recommended settings per game, from GitHub
+Source
+Last Update
+Games Covered
+Update Now
+Updating...
+Updated
+Up to date
+Failed (not a settings file)
+Your Games
+None of your games yet
+Copy in the app
+Recommended Settings
+Use them for this game?
+Used
+Not used
+Ask at start
+Downloads the latest recommended settings from GitHub now (Dolphin also does it at every start).
