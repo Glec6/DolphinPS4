@@ -211,8 +211,6 @@ Everything the app creates sits in **`/data/DolphinPS4/`**:
 
 ## Game compatibility
 
-Each game has a status, like [RPCS3's compatibility list](https://rpcs3.net/compatibility):
-
 | Status | Meaning |
 |---|---|
 | ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Runs well enough to play through |
