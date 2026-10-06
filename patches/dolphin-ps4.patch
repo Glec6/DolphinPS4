@@ -3650,6 +3650,26 @@ index 612161b..fbee84f 100644
  
      PPCAnalyst::BlockStats st;
      PPCAnalyst::BlockRegStats gpa;
+diff --git a/Source/Core/Core/PowerPC/JitCommon/JitCache.h b/Source/Core/Core/PowerPC/JitCommon/JitCache.h
+index 8860a42..72090fb 100644
+--- a/Source/Core/Core/PowerPC/JitCommon/JitCache.h
++++ b/Source/Core/Core/PowerPC/JitCommon/JitCache.h
+@@ -148,7 +148,15 @@ public:
+   // The size of the fast map is determined like this:
+   // ((4 GiB guest memory space) / (4-byte alignment) * sizeof(JitBlock*)) << (3 feature flag bits)
+   static constexpr u64 FAST_BLOCK_MAP_SIZE = 0x10'0000'0000;
++#ifdef __ORBIS__
++  // PS4: the large entry points map (a 64 GiB lazy region) can't be reserved, so every block
++  // lookup goes through this table. 0x10000 slots cover 256 KiB of code before addresses collide;
++  // Crash of the Titans' code spans ~4 MiB, and each collision fell back to the C++ dispatcher.
++  // 1M slots (8 MiB) cover 4 MiB of code without collisions.
++  static constexpr u32 FAST_BLOCK_MAP_FALLBACK_ELEMENTS = 0x100000;
++#else
+   static constexpr u32 FAST_BLOCK_MAP_FALLBACK_ELEMENTS = 0x10000;
++#endif
+   static constexpr u32 FAST_BLOCK_MAP_FALLBACK_MASK = FAST_BLOCK_MAP_FALLBACK_ELEMENTS - 1;
+ 
+   explicit JitBaseBlockCache(JitBase& jit);
 diff --git a/Source/Core/Core/PowerPC/MMU.cpp b/Source/Core/Core/PowerPC/MMU.cpp
 index 940e93c..391b70a 100644
 --- a/Source/Core/Core/PowerPC/MMU.cpp
