@@ -173,6 +173,22 @@ the same layout on their own controller. The pause menu belongs to player 1.
 The launcher also has switches for its sounds and clock, a cover downloader, the controls editor,
 **Reset All Settings** and **About**.
 
+### Game settings center
+
+The best settings found for each game live in
+[`xmb/game-settings.ini`](xmb/game-settings.ini). Dolphin downloads it from GitHub every time it
+starts online, so a game's fix or speed-up reaches everyone without a new release. Your own
+settings (the menu, `ps4.ini`) always win over it.
+
+### Cheats
+
+Triangle on a game → **Cheats** (or L3 + R3 → Cheats while playing).
+
+- **Download Codes** fetches the game's Gecko codes from the internet. New codes arrive switched off.
+- **Your own codes:** add them to `/data/DolphinPS4/User/GameSettings/<GAME ID>.ini` (for example
+  `GMSE01.ini`, not a `.txt`), under a `[Gecko]` or `[ActionReplay]` line, each code starting
+  with a `$Name` line. They then appear in the list to switch on.
+
 ## Your files
 
 Everything the app creates sits in **`/data/DolphinPS4/`**:
@@ -185,6 +201,7 @@ Everything the app creates sits in **`/data/DolphinPS4/`**:
 - `settings.ini`: your settings, global and per game
 - `xmb.ini`: launcher preferences (theme, wallpaper, sounds, last game)
 - `ps4.ini`: optional advanced switches, layered on top of the built-in defaults
+- `game-settings.ini`: the game settings center's latest copy (downloaded; don't edit)
 - `*.log` and `*-stacks*.txt`: logs and freeze reports for bug reports
 
 ## Game compatibility

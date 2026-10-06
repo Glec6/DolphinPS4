@@ -9517,10 +9517,10 @@ index 0000000..914dbb5
 +}  // namespace PS4Updater
 diff --git a/Source/Core/DolphinNoGUI/PS4XMB.cpp b/Source/Core/DolphinNoGUI/PS4XMB.cpp
 new file mode 100755
-index 0000000..860788b
+index 0000000..9c63112
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4XMB.cpp
-@@ -0,0 +1,4276 @@
+@@ -0,0 +1,4332 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -9541,6 +9541,7 @@ index 0000000..860788b
 +#include <mutex>
 +#include <span>
 +#include <thread>
++#include <unistd.h>
 +
 +#include <sys/stat.h>
 +
@@ -9567,6 +9568,7 @@ index 0000000..860788b
 +#include "DolphinNoGUI/PS4Covers.h"
 +#include "DolphinNoGUI/PS4Glyphs.h"
 +#include "DolphinNoGUI/PS4Lang.h"
++#include "DolphinNoGUI/PS4Net.h"
 +#include "DolphinNoGUI/PS4MemoryCards.h"
 +#include "DolphinNoGUI/PS4Settings.h"
 +#include "DolphinNoGUI/PS4Updater.h"
@@ -10176,6 +10178,7 @@ index 0000000..860788b
 +  void LoadBanners();
 +  void OpenFolderBrowser(const std::string& path);
 +  void StartUpdateCheck(bool manual);
++  void FetchGameSettings();
 +  void StartUpdateDownload();
 +  void UpdateUpdater(float dt);
 +  void ShowUpdatePanel();
@@ -10265,6 +10268,7 @@ index 0000000..860788b
 +  // Cheats panel.
 +  PS4Cheats::List m_cheats;
 +  std::string m_cheats_game;
++  std::thread m_settings_thread;  // the game settings center download
 +  // Download Codes on the Cheats page: a background fetch and its result line.
 +  std::thread m_cheat_dl_thread;
 +  std::atomic<bool> m_cheat_dl_busy{false}, m_cheat_dl_done{false};
@@ -13292,6 +13296,55 @@ index 0000000..860788b
 +// ---------------------------------------------------------------------------------------------
 +// Updates.
 +
++// The game settings center: the best settings per game, kept on GitHub so tuning reaches every
++// console without a new release. Fetched in the background at every start; the game process reads
++// /data/DolphinPS4/game-settings.ini (PlatformPS4.cpp LoadOptions). Only a file that starts with
++// the center's header line replaces the copy, written through a temporary file.
++void Menu::FetchGameSettings()
++{
++  m_settings_thread = std::thread([this] {
++    PS4Net::Request request;
++    request.url = "https://raw.githubusercontent.com/iHaiDeeZ/DolphinPS4/main/xmb/game-settings.ini";
++    request.ca_file = m_assets_dir + "/xmb/cacert.pem";
++    request.timeout_seconds = 20;
++    std::string text, error;
++    const long status = PS4Net::Get(
++        request,
++        [&](const char* data, size_t size) {
++          text.append(data, size);
++          return text.size() < 512 * 1024;
++        },
++        nullptr, &error);
++    if (status != 200)
++    {
++      Log("game settings: not fetched (" + (error.empty() ? "HTTP " + std::to_string(status) : error) +
++          ")");
++      return;
++    }
++    if (text.rfind("# Dolphin for PS4 - game settings center", 0) != 0)
++    {
++      Log("game settings: the download isn't a settings center file, kept the old one");
++      return;
++    }
++    const std::string path = m_data_dir + "/game-settings.ini";
++    if (ReadFile(path) == text)
++    {
++      Log("game settings: up to date");
++      return;
++    }
++    const std::string temp = path + ".new";
++    if (FILE* file = fopen(temp.c_str(), "wb"))
++    {
++      const bool written = fwrite(text.data(), 1, text.size(), file) == text.size();
++      fflush(file);
++      fsync(fileno(file));
++      fclose(file);
++      if (written && std::rename(temp.c_str(), path.c_str()) == 0)
++        Log("game settings: updated from GitHub (" + std::to_string(text.size()) + " bytes)");
++    }
++  });
++}
++
 +void Menu::StartUpdateCheck(bool manual)
 +{
 +  m_update_manual = m_update_manual || manual;
@@ -13698,6 +13751,7 @@ index 0000000..860788b
 +  RemoveOldUpdates();
 +  if (m_prefs.auto_update)
 +    StartUpdateCheck(false);
++  FetchGameSettings();
 +  // Covers missing for any game are fetched in the background every time the app opens.
 +  for (const Game& game : m_games)
 +  {
@@ -13765,6 +13819,8 @@ index 0000000..860788b
 +  // A code download still going (a game was started): its few seconds, not a crash on exit.
 +  if (m_cheat_dl_thread.joinable())
 +    m_cheat_dl_thread.join();
++  if (m_settings_thread.joinable())
++    m_settings_thread.join();
 +  if (m_update_exit)
 +    result = EXIT_APP;
 +  if (m_update_restart)
@@ -14503,10 +14559,10 @@ index f4dc8a9..0c37736 100644
  
 diff --git a/Source/Core/DolphinNoGUI/PlatformPS4.cpp b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
 new file mode 100644
-index 0000000..7e83361
+index 0000000..de29bcf
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
-@@ -0,0 +1,1647 @@
+@@ -0,0 +1,1674 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -14707,7 +14763,8 @@ index 0000000..7e83361
 +}
 +
 +// Reads one options file into s_options / s_game_options (later files override earlier ones).
-+void LoadOptionsFile(const std::string& path)
++// sections_only: only its [GAME ID] sections (the game settings center can't change globals).
++void LoadOptionsFile(const std::string& path, bool sections_only = false)
 +{
 +  FILE* file = fopen(path.c_str(), "r");
 +  if (!file)
@@ -14728,18 +14785,43 @@ index 0000000..7e83361
 +    if (text.empty() || text[0] == '#' || text[0] == ';' || equals == std::string::npos)
 +      continue;
 +    if (section.empty())
-+      s_options[text.substr(0, equals)] = text.substr(equals + 1);
++    {
++      if (!sections_only)
++        s_options[text.substr(0, equals)] = text.substr(equals + 1);
++    }
 +    else
++    {
 +      s_game_options[section][text.substr(0, equals)] = text.substr(equals + 1);
++    }
 +  }
 +  fclose(file);
 +}
 +
-+// The built-in defaults shipped with the app (tuned values, per-game fixes), then the user's
-+// /data/DolphinPS4/ps4.ini on top.
++// The game settings center (xmb/game-settings.ini): the best settings per game. The menu fetches
++// it from GitHub at every start (PS4XMB.cpp); that copy is used when it's a settings center file,
++// else the one in the package.
++std::string s_game_settings_source;
++bool IsGameSettingsFile(const std::string& path)
++{
++  FILE* file = fopen(path.c_str(), "r");
++  if (!file)
++    return false;
++  char line[128] = {};
++  const bool ok = fgets(line, sizeof(line), file) &&
++                  std::string(line).rfind("# Dolphin for PS4 - game settings center", 0) == 0;
++  fclose(file);
++  return ok;
++}
++
++// The built-in defaults shipped with the app (tuned global values), the game settings center's
++// per-game sections, then the user's /data/DolphinPS4/ps4.ini on top.
 +void LoadOptions()
 +{
 +  LoadOptionsFile(AssetsDir() + "/xmb/ps4-defaults.ini");
++  const std::string fetched = std::string(PS4_DATA_DIR_PATH) + "/game-settings.ini";
++  s_game_settings_source =
++      IsGameSettingsFile(fetched) ? fetched : AssetsDir() + "/xmb/game-settings.ini";
++  LoadOptionsFile(s_game_settings_source, true);
 +  LoadOptionsFile(std::string(PS4_DATA_DIR_PATH) + "/ps4.ini");
 +}
 +
@@ -15948,6 +16030,7 @@ index 0000000..7e83361
 +    s_options[key] = value;
 +  for (const auto& [key, value] : s_options)
 +    BootTrace(("option " + key + "=" + value).c_str());
++  BootTrace(("game settings center: " + s_game_settings_source).c_str());
 +  ps4_jit_in_system_pool = GetPS4Option("jit_memory", "system") == "system" ? 1 : 0;
 +
 +  const std::string user_dir = std::string(PS4_DATA_DIR_PATH) + "/User";
