@@ -1,0 +1,106 @@
+name: Build Dolphin PS4
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: ubuntu:latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          apt-get update
+          apt-get install -y \
+            clang-21 \
+            lld \
+            llvm-ar \
+            cmake \
+            ninja-build \
+            python3 \
+            python3-pip \
+            git \
+            curl \
+            meson \
+            mako \
+            glslang-tools
+
+      - name: Install Python packages
+        run: |
+          pip install Pillow PyYAML
+
+      - name: Setup OpenOrbis toolchain
+        run: |
+          # This assumes you have the OpenOrbis toolchain available
+          # You may need to store it in your repository or download it
+          mkdir -p /opt/pacbrew/ps4/openorbis
+          # Add setup commands here
+
+      - name: Create build directory structure
+        run: |
+          mkdir -p ~/dolphinps4-build/src ~/dolphinps4-build/sysroot ~/dolphinps4-build/build ~/dolphinps4-build/out
+
+      - name: Build sysroot - libc++
+        run: |
+          cd $GITHUB_WORKSPACE
+          ./toolchain/build-libcxx.sh
+
+      - name: Build sysroot - runtime
+        run: |
+          cd $GITHUB_WORKSPACE
+          ./toolchain/build-runtime.sh
+
+      - name: Setup Dolphin source
+        run: |
+          git clone https://github.com/dolphin-emu/dolphin ~/dolphinps4-build/src/dolphin
+          cd ~/dolphinps4-build/src/dolphin
+          git checkout 771fb154059c5812d6a715a23226249cc42877a2
+          git submodule update --init --recursive
+          git apply $GITHUB_WORKSPACE/patches/dolphin-ps4.patch
+
+      - name: Setup Mesa
+        run: |
+          cp -r $GITHUB_WORKSPACE/src/mesa ~/dolphinps4-build/src/ || \
+          git clone https://github.com/mesa/mesa ~/dolphinps4-build/src/mesa
+          cd ~/dolphinps4-build/src/mesa
+          git checkout mesa-26.0.8
+          git apply $GITHUB_WORKSPACE/patches/mesa-ps4.patch
+
+      - name: Build Mesa
+        run: |
+          cd $GITHUB_WORKSPACE
+          ./scripts/build-mesa.sh setup
+
+      - name: Configure Dolphin
+        run: |
+          cd $GITHUB_WORKSPACE
+          ./scripts/configure-dolphin.sh
+
+      - name: Build Dolphin
+        run: |
+          cd $GITHUB_WORKSPACE
+          ./scripts/build-dolphin.sh
+
+      - name: Package Dolphin
+        run: |
+          cd $GITHUB_WORKSPACE
+          DOLPHIN_PS4_VERSION=02.95 ./scripts/package-dolphin.sh
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dolphin-ps4-pkg
+          path: ~/dolphinps4-build/out/*.pkg
+
+      - name: Create Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: ~/dolphinps4-build/out/*.pkg
