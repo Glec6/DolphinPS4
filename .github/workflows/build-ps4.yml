@@ -29,11 +29,13 @@ jobs:
             clang \
             lld \
             libssl-dev
-
-      - name: Set up OpenOrbis PS4 Toolchain
+            
+      - name: Download & Extract OpenOrbis Toolchain
         run: |
-          # Clone the official OpenOrbis PS4 Toolchain repository
-          git clone --recursive https://github.com/OpenOrbis/PS4-Toolchain.git /opt/toolchain
+          sudo mkdir -p /opt/toolchain
+          # Download latest OpenOrbis release archive
+          curl -sL https://github.com/OpenOrbis/PS4-Toolchain/releases/download/v1.0/toolchain.tar.gz | sudo tar -xz -C /opt/toolchain
+          
           echo "OO_PS4_TOOLCHAIN=/opt/toolchain" >> $GITHUB_ENV
           echo "/opt/toolchain/bin" >> $GITHUB_PATH
         
