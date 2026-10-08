@@ -32,11 +32,11 @@ jobs:
 
       - name: Set up OpenOrbis PS4 Toolchain
         run: |
-          # Download and set up the PS4 toolchain / OpenOrbis SDK
-          git clone --recursive https://github.com/OpenOrbis/toolchain.git /opt/toolchain
+          # Clone the official OpenOrbis PS4 Toolchain repository
+          git clone --recursive https://github.com/OpenOrbis/PS4-Toolchain.git /opt/toolchain
           echo "OO_PS4_TOOLCHAIN=/opt/toolchain" >> $GITHUB_ENV
           echo "/opt/toolchain/bin" >> $GITHUB_PATH
-
+        
       - name: Build DolphinPS4 Binary
         run: |
           mkdir build && cd build
