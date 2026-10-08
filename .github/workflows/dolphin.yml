@@ -1,0 +1,83 @@
+name: Build DolphinPS4
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential cmake ninja-build git curl python3 python3-pip \
+            clang-14 lld-14 llvm-14 \
+            meson pkg-config python3-yaml python3-pil
+
+      - name: Install PS4 toolchain
+        run: |
+          mkdir -p /opt/pacbrew
+          # Replace this with your actual toolchain installation method
+          # Example:
+          # sudo git clone https://github.com/... /opt/pacbrew
+          # or install the OpenOrbis toolchain where expected
+          ls /opt/pacbrew || true
+          ls /opt/pacbrew/ps4/openorbis || true
+
+      - name: Prepare build tree
+        run: |
+          mkdir -p ~/dolphinps4-build/src ~/dolphinps4-build/build ~/dolphinps4-build/out
+          echo "PS4_BUILD_ROOT=$HOME/dolphinps4-build" >> $GITHUB_ENV
+
+      - name: Build libc++ sysroot
+        run: |
+          cd $GITHUB_WORKSPACE
+          ./toolchain/build-libcxx.sh
+
+      - name: Build PS4 runtime
+        run: |
+          cd $GITHUB_WORKSPACE
+          ./toolchain/build-runtime.sh
+
+      - name: Clone Dolphin and patch
+        run: |
+          git clone https://github.com/dolphin-emu/dolphin ~/dolphinps4-build/src/dolphin
+          cd ~/dolphinps4-build/src/dolphin
+          git checkout 771fb154059c5812d6a715a23226249cc42877a2
+          git submodule update --init --recursive
+          git apply $GITHUB_WORKSPACE/patches/dolphin-ps4.patch
+
+      - name: Build Mesa
+        run: |
+          cd $GITHUB_WORKSPACE
+          ./scripts/build-mesa.sh setup
+
+      - name: Configure Dolphin
+        run: |
+          cd $GITHUB_WORKSPACE
+          ./scripts/configure-dolphin.sh
+
+      - name: Build Dolphin
+        run: |
+          cd $GITHUB_WORKSPACE
+          ./scripts/build-dolphin.sh
+
+      - name: Package Dolphin .pkg
+        run: |
+          cd $GITHUB_WORKSPACE
+          DOLPHIN_PS4_VERSION=01.00 ./scripts/package-dolphin.sh
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dolphinps4-pkg
+          path: ~/dolphinps4-build/out/*
