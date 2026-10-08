@@ -33,9 +33,11 @@ jobs:
       - name: Download & Extract OpenOrbis Toolchain
         run: |
           sudo mkdir -p /opt/toolchain
-          # Download latest OpenOrbis release archive
-          curl -sL https://github.com/OpenOrbis/PS4-Toolchain/releases/download/v1.0/toolchain.tar.gz | sudo tar -xz -C /opt/toolchain
-          
+          # -L follows redirects, -f fails fast on HTTP errors (e.g., 404)
+          curl -fL -o toolchain.tar.gz https://github.com/OpenOrbis/PS4-Toolchain/releases/download/v1.0.0/toolchain.tar.gz
+          sudo tar -xzf toolchain.tar.gz -C /opt/toolchain
+          rm toolchain.tar.gz
+
           echo "OO_PS4_TOOLCHAIN=/opt/toolchain" >> $GITHUB_ENV
           echo "/opt/toolchain/bin" >> $GITHUB_PATH
         
