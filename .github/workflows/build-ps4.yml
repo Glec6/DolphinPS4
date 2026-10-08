@@ -1,0 +1,134 @@
+name: Build DolphinPS4
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-dolphinps4:
+    name: Build package
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 240
+
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      PS4_BUILD_ROOT: ${{ runner.temp }}/dolphinps4-build
+      DOLPHIN_PS4_VERSION: 01.00
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Verify dependencies and toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v cmake
+          command -v ninja
+          command -v python3
+          command -v curl
+          command -v git
+          command -v clang || true
+          test -d /opt/pacbrew/ps4/openorbis || {
+            echo "Missing OpenOrbis/PacBrew toolchain at /opt/pacbrew/ps4/openorbis"
+            echo "Install it on this self-hosted runner before running the workflow."
+            exit 1
+          }
+
+      - name: Install Ubuntu build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            ninja-build \
+            git \
+            curl \
+            python3 \
+            python3-pip \
+            python3-pil \
+            meson \
+            pkg-config \
+            python3-yaml \
+            clang-14 \
+            lld-14 \
+            llvm-14
+
+          sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-14 100
+          sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-14 100
+          sudo update-alternatives --install /usr/bin/ld.lld ld.lld /usr/bin/ld.lld-14 100
+
+      - name: Prepare build tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$PS4_BUILD_ROOT/src" "$PS4_BUILD_ROOT/build" "$PS4_BUILD_ROOT/out" "$PS4_BUILD_ROOT/sysroot"
+          echo "PS4_BUILD_ROOT=$PS4_BUILD_ROOT" >> "$GITHUB_ENV"
+
+      - name: Build libc++ sysroot
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE"
+          ./toolchain/build-libcxx.sh
+
+      - name: Build PS4 runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE"
+          ./toolchain/build-runtime.sh
+
+      - name: Clone Dolphin and apply PS4 patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -d "$PS4_BUILD_ROOT/src/dolphin/.git" ]; then
+            git clone https://github.com/dolphin-emu/dolphin "$PS4_BUILD_ROOT/src/dolphin"
+          fi
+          cd "$PS4_BUILD_ROOT/src/dolphin"
+          git fetch --all --tags
+          git checkout 771fb154059c5812d6a715a23226249cc42877a2
+          git submodule update --init --recursive
+          git apply "$GITHUB_WORKSPACE/patches/dolphin-ps4.patch"
+
+      - name: Build Mesa (RADV) for PS4
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE"
+          ./scripts/build-mesa.sh setup
+
+      - name: Configure Dolphin build
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE"
+          ./scripts/configure-dolphin.sh
+
+      - name: Build Dolphin
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE"
+          ./scripts/build-dolphin.sh
+
+      - name: Package PS4 .pkg
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE"
+          ./scripts/package-dolphin.sh
+
+      - name: Upload generated package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dolphinps4-pkg
+          path: |
+            ${{ env.PS4_BUILD_ROOT }}/out/*
+          if-no-files-found: error
