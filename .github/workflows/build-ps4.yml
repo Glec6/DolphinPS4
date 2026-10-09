@@ -36,11 +36,11 @@ jobs:
           cd $GITHUB_WORKSPACE/DolphinPS4
           find toolchain scripts -type f -exec chmod +x {} +
 
-      - name: Rename data folder to MK64Wii
+      - name: Rename data folder to MK64
         run: |
           cd $GITHUB_WORKSPACE/DolphinPS4
           grep -rIl "/data/DolphinPS4" --exclude-dir=.git patches port scripts toolchain \
-            | xargs sed -i 's#/data/DolphinPS4#/data/MK64Wii#g'
+            | xargs sed -i 's#/data/DolphinPS4#/data/MK64#g'
 
       - name: Set version from tag
         if: startsWith(github.ref, 'refs/tags/')
