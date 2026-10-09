@@ -1,4 +1,4 @@
-name: Build DolphinPS4
+name: Build MK64 DolphinPS4
 
 on:
   push:
@@ -20,7 +20,8 @@ jobs:
     env:
       OPENORBIS: /opt/pacbrew/ps4/openorbis
       DOLPHIN_PS4_VERSION: ${{ github.event.inputs.dolphin_ps4_version || '02.95' }}
-      BUILD_ROOT: ${{ github.workspace }}/dolphinps4-build
+      # The project's scripts expect the build tree in the home directory
+      BUILD_ROOT: /home/runner/dolphinps4-build
     steps:
       - name: Check out DolphinPS4
         uses: actions/checkout@v4
@@ -43,6 +44,7 @@ jobs:
           sudo apt -yq install git build-essential cmake zip \
             pacman-package-manager makepkg libarchive-tools autoconf libtool \
             nasm curl ninja-build glslang-tools python3-pip python3-venv
+          mkdir -p $BUILD_ROOT
           python3 -m venv $BUILD_ROOT/mesa-venv
           source $BUILD_ROOT/mesa-venv/bin/activate
           pip install meson mako pyyaml
@@ -60,7 +62,7 @@ jobs:
       - name: Cache Mesa build tree
         uses: actions/cache@v4
         with:
-          path: ${{ env.BUILD_ROOT }}/src/mesa
+          path: /home/runner/dolphinps4-build/src/mesa
           key: mesa-26.0.8-${{ runner.os }}
 
       - name: Clone and patch upstream Dolphin
@@ -93,7 +95,7 @@ jobs:
 
       - name: Collect .pkg into workspace root
         run: |
-          find $GITHUB_WORKSPACE -mindepth 2 -name '*.pkg' -exec cp -v {} $GITHUB_WORKSPACE/ \;
+          find $GITHUB_WORKSPACE /home/runner/dolphinps4-build -mindepth 2 -name '*.pkg' -exec cp -v {} $GITHUB_WORKSPACE/ \;
           ls -la $GITHUB_WORKSPACE/*.pkg
 
       - name: Release
