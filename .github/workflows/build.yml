@@ -46,7 +46,17 @@ jobs:
           sudo apt -yq install git build-essential cmake zip \
             pacman-package-manager makepkg libarchive-tools autoconf libtool \
             nasm curl ninja-build glslang-tools python3-pip python3-venv \
-            python3-pil wget lsb-release software-properties-common gnupg
+            python3-pil wget lsb-release software-properties-common gnupg \
+            bison flex pkg-config
+
+      - name: Install Mesa Python tools (meson, mako, pyyaml)
+        run: |
+          mkdir -p $PSB
+          python3 -m venv $PSB/mesa-venv
+          $PSB/mesa-venv/bin/pip install meson mako pyyaml
+          # Put the venv first on PATH for every later step
+          echo "$PSB/mesa-venv/bin" >> $GITHUB_PATH
+          $PSB/mesa-venv/bin/meson --version
 
       - name: Install clang 21 and LLVM tools (LLVM apt repo)
         run: |
