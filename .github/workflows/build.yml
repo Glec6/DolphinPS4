@@ -49,11 +49,12 @@ jobs:
             python3-pil wget lsb-release software-properties-common gnupg \
             bison flex pkg-config
 
-      - name: Install Mesa Python tools (meson, mako, pyyaml)
+      - name: Install Mesa Python tools (meson, mako, pyyaml, packaging)
         run: |
           mkdir -p $PSB
           python3 -m venv $PSB/mesa-venv
-          $PSB/mesa-venv/bin/pip install meson mako pyyaml
+          # Mesa's meson.build needs 'packaging' (or distutils, gone in Python 3.12)
+          $PSB/mesa-venv/bin/pip install meson mako pyyaml packaging setuptools
           # Put the venv first on PATH for every later step
           echo "$PSB/mesa-venv/bin" >> $GITHUB_PATH
           $PSB/mesa-venv/bin/meson --version
