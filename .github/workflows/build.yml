@@ -108,7 +108,12 @@ jobs:
           git submodule update --init --recursive
           git apply $GITHUB_WORKSPACE/DolphinPS4/patches/dolphin-ps4.patch
 
-      - name: Step 3 - Mesa 26.0.8 (checkout, patch, setup)
+      - name: Step 3a - libdrm 2.4.125 source (Mesa expects it in src/libdrm)
+        run: |
+          git clone --branch libdrm-2.4.125 --depth 1 https://gitlab.freedesktop.org/mesa/drm.git $PSB/src/libdrm
+          ls -la $PSB/src/libdrm/xf86drm.h
+
+      - name: Step 3b - Mesa 26.0.8 (checkout, patch, setup)
         run: |
           git clone --branch mesa-26.0.8 --depth 1 https://gitlab.freedesktop.org/mesa/mesa.git $PSB/src/mesa
           cd $PSB/src/mesa
