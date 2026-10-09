@@ -1,4 +1,4 @@
-name: Build MK64 DolphinPS4
+name: Build DolphinPS4
 
 on:
   push:
@@ -17,22 +17,17 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-24.04
+    timeout-minutes: 360
     env:
       OPENORBIS: /opt/pacbrew/ps4/openorbis
       DOLPHIN_PS4_VERSION: ${{ github.event.inputs.dolphin_ps4_version || '02.95' }}
-      # The project's scripts expect the build tree in the home directory
-      BUILD_ROOT: /home/runner/dolphinps4-build
+      # BUILDING.md: the build tree lives at ~/dolphinps4-build
+      PSB: /home/runner/dolphinps4-build
     steps:
       - name: Check out DolphinPS4
         uses: actions/checkout@v4
         with:
           path: DolphinPS4
-
-      - name: Show repo layout (debug)
-        run: |
-          cd $GITHUB_WORKSPACE/DolphinPS4
-          ls -la
-          find . -maxdepth 2 \( -name '*.patch' -o -name '*.sh' -o -name 'BUILDING*' \) -not -path './.git/*'
 
       - name: Set version from tag
         if: startsWith(github.ref, 'refs/tags/')
@@ -43,13 +38,26 @@ jobs:
           sudo apt -yq update
           sudo apt -yq install git build-essential cmake zip \
             pacman-package-manager makepkg libarchive-tools autoconf libtool \
-            nasm curl ninja-build glslang-tools python3-pip python3-venv
-          mkdir -p $BUILD_ROOT
-          python3 -m venv $BUILD_ROOT/mesa-venv
-          source $BUILD_ROOT/mesa-venv/bin/activate
-          pip install meson mako pyyaml
+            nasm curl ninja-build glslang-tools python3-pip python3-venv \
+            python3-pil wget lsb-release software-properties-common gnupg
 
-      - name: Install ps4 toolchain
+      - name: Install clang 21 and LLVM tools (LLVM apt repo)
+        run: |
+          wget -q https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 21
+          sudo apt -yq install clang-21 lld-21 llvm-21
+          # Give the unversioned tool names that the scripts may call
+          for t in llvm-ar llvm-ranlib llvm-nm llvm-objcopy llvm-strip ld.lld; do
+            if [ -x /usr/bin/$t-21 ] && ! command -v $t >/dev/null; then
+              sudo ln -s /usr/bin/$t-21 /usr/local/bin/$t
+            fi
+          done
+          clang-21 --version
+          clang++-21 --version
+          ninja --version
+
+      - name: Install ps4 toolchain (OpenOrbis from PacBrew)
         run: |
           sudo tee -a /etc/pacman.conf > /dev/null <<EOF
           [pacbrew]
@@ -59,43 +67,51 @@ jobs:
           sudo pacman -Syu
           sudo pacman --noconfirm -S ps4-openorbis ps4-openorbis-portlibs
 
-      - name: Cache Mesa build tree
+      - name: Cache PS4 sysroot (libc++ 21 and runtime)
+        id: sysroot_cache
         uses: actions/cache@v4
         with:
-          path: /home/runner/dolphinps4-build/src/mesa
-          key: mesa-26.0.8-${{ runner.os }}
+          path: /home/runner/dolphinps4-build/sysroot
+          key: ps4-sysroot-${{ runner.os }}-${{ hashFiles('DolphinPS4/toolchain/**', 'DolphinPS4/port/**') }}
 
-      - name: Clone and patch upstream Dolphin
+      - name: Step 1 - Build sysroot (libc++ and runtime)
+        if: steps.sysroot_cache.outputs.cache-hit != 'true'
         run: |
-          mkdir -p $BUILD_ROOT/src
-          git clone https://github.com/dolphin-emu/dolphin $BUILD_ROOT/src/dolphin
-          cd $BUILD_ROOT/src/dolphin
+          cd $GITHUB_WORKSPACE/DolphinPS4
+          bash toolchain/build-libcxx.sh
+          bash toolchain/build-runtime.sh
+
+      - name: Step 2 - Dolphin source (checkout and patch)
+        run: |
+          mkdir -p $PSB/src
+          git clone https://github.com/dolphin-emu/dolphin $PSB/src/dolphin
+          cd $PSB/src/dolphin
           git checkout 771fb154059c5812d6a715a23226249cc42877a2
           git submodule update --init --recursive
           git apply $GITHUB_WORKSPACE/DolphinPS4/patches/dolphin-ps4.patch
 
-      - name: Fetch and patch Mesa 26.0.8
+      - name: Step 3 - Mesa 26.0.8 (checkout, patch, setup)
         run: |
-          if [ ! -d "$BUILD_ROOT/src/mesa/.git" ]; then
-            git clone --branch mesa-26.0.8 --depth 1 https://gitlab.freedesktop.org/mesa/mesa.git $BUILD_ROOT/src/mesa
-          fi
-          cd $BUILD_ROOT/src/mesa
+          git clone --branch mesa-26.0.8 --depth 1 https://gitlab.freedesktop.org/mesa/mesa.git $PSB/src/mesa
+          cd $PSB/src/mesa
           git apply $GITHUB_WORKSPACE/DolphinPS4/patches/mesa-ps4.patch
-
-      - name: Configure Dolphin
-        run: |
-          source $BUILD_ROOT/mesa-venv/bin/activate
           cd $GITHUB_WORKSPACE/DolphinPS4
-          bash ./scripts/configure-dolphin.sh
+          bash scripts/build-mesa.sh setup
 
-      - name: Package Dolphin
+      - name: Step 4 - Configure and build Dolphin
+        run: |
+          cd $GITHUB_WORKSPACE/DolphinPS4
+          bash scripts/configure-dolphin.sh
+          bash scripts/build-dolphin.sh
+
+      - name: Step 5 - Package
         run: |
           cd $GITHUB_WORKSPACE/DolphinPS4
           DOLPHIN_PS4_VERSION=$DOLPHIN_PS4_VERSION bash scripts/package-dolphin.sh
 
       - name: Collect .pkg into workspace root
         run: |
-          find $GITHUB_WORKSPACE /home/runner/dolphinps4-build -mindepth 2 -name '*.pkg' -exec cp -v {} $GITHUB_WORKSPACE/ \;
+          cp -v $PSB/out/*.pkg $GITHUB_WORKSPACE/
           ls -la $GITHUB_WORKSPACE/*.pkg
 
       - name: Release
