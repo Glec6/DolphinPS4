@@ -84,22 +84,27 @@ jobs:
         run: |
           source $BUILD_ROOT/mesa-venv/bin/activate
           cd $GITHUB_WORKSPACE/DolphinPS4
-          ./scripts/configure-dolphin.sh
+          bash ./scripts/configure-dolphin.sh
 
       - name: Package Dolphin
         run: |
           cd $GITHUB_WORKSPACE/DolphinPS4
-          DOLPHIN_PS4_VERSION=$DOLPHIN_PS4_VERSION scripts/package-dolphin.sh
+          DOLPHIN_PS4_VERSION=$DOLPHIN_PS4_VERSION bash scripts/package-dolphin.sh
 
-      - name: Attach .pkg to GitHub release
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: Collect .pkg into workspace root
+        run: |
+          find $GITHUB_WORKSPACE -mindepth 2 -name '*.pkg' -exec cp -v {} $GITHUB_WORKSPACE/ \;
+          ls -la $GITHUB_WORKSPACE/*.pkg
+
+      - name: Release
         uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
         with:
-          files: ${{ env.BUILD_ROOT }}/out/*.pkg
+          files: '*.pkg'
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Upload .pkg as build artifact
+      - name: Force Save PS4 PKG to Summary Page
         uses: actions/upload-artifact@v4
         with:
-          name: DolphinPS4-${{ env.DOLPHIN_PS4_VERSION }}
-          path: ${{ env.BUILD_ROOT }}/out/*.pkg
+          name: custom-dolphin-ps4-pkg
+          path: "**/*.pkg"
