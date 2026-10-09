@@ -51,7 +51,7 @@ cp -r "$HERE/../xmb" "$STAGE/xmb"
 echo "$VERSION" > "$STAGE/xmb/version.txt"
 # Vulkan (RADV on GNM) runs under the plain homebrew identity (4.5 GiB of direct memory);
 # SFO_STYLE=retroarch + PS4_PAID 0x3100000000000002 for the OpenGL (Piglet) backend.
-PKG="$(SFO_STYLE="${SFO_STYLE:-plain}" "$HERE/make-pkg.sh" "$STAGE" DLPH00015 "Mario Kart Double Dash" "$VERSION" MKDD "$PS4_BUILD_ROOT/out" | tail -1)"
+PKG="$(SFO_STYLE="${SFO_STYLE:-plain}" "$HERE/make-pkg.sh" "$STAGE" DLPH00016 "Super Mario Sunshine" "$VERSION" SMSun "$PS4_BUILD_ROOT/out" | tail -1)"
 ls -la "$PKG"
 # The update archive for the in-app updater (PS4Updater.h): the program, the menu files and Sys,
 # unpacked into /data/DolphinPS4/app. The Sony modules and sce_sys stay in the installed package.
