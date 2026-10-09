@@ -40,7 +40,7 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE/DolphinPS4
           grep -rIl "/data/DolphinPS4" --exclude-dir=.git patches port scripts toolchain \
-            | xargs sed -i 's#/data/DolphinPS4#/data/NHLHitz#g'
+            | xargs sed -i 's#/data/DolphinPS4#/data/MKDD#g'
 
       - name: Set version from tag
         if: startsWith(github.ref, 'refs/tags/')
