@@ -249,10 +249,11 @@ Everything the app creates sits in **`/data/DolphinPS4/`**:
 | ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Teenage Mutant Ninja Turtles (2003) | GameCube | 50–60 |
 | ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | TMNT (2007, Europe) | GameCube | 25 (the PAL version's normal rate); thin lines in some cutscenes |
 | ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Worms 3D | GameCube | ~55 |
-| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Bully: Scholarship Edition | Wii | 18–30 with its recommended settings (its normal rate is 30); busy streets ~20 |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Bully: Scholarship Edition | Wii | 18–30 with its recommended settings (its normal rate is 30); busy streets and fights ~20–25, no slow motion |
 | ![Ingame](https://img.shields.io/badge/Ingame-f9b32f?style=flat-square) | Call of Duty: Modern Warfare 3 | Wii | 12–25 with its recommended settings (its normal rate is 30); freezes ~45 s into the first level without them |
 | ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Crash of the Titans | Wii | 25–30 with its recommended settings (its normal rate is 30) |
 | ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Mario Kart Wii | Wii | 45–50 in races with its recommended settings (its normal rate is 60) |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Sonic and the Black Knight | Wii | 50–60 with its recommended settings; one heavy scene 25–40 |
 | ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Super Mario Galaxy | Wii | 40–60 (average ~56); don't turn on graphics mods: Bloom Removal halved its speed |
 | ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Wii Sports | Wii | ~40 |
 | ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Wii Sports Resort | Wii | ~37 |
