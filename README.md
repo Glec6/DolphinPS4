@@ -235,6 +235,7 @@ Everything the app creates sits in **`/data/DolphinPS4/`**:
 | ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | The Legend of Zelda: Twilight Princess | GameCube | 30 (its normal rate) |
 | ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Metroid Prime | GameCube | ~48 with its recommended settings (its normal rate is 60) |
 | ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Mortal Kombat: Deadly Alliance | GameCube | 60 |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | NBA Street Vol. 2 | GameCube | 55–60 at full speed; thin lines over the picture without its recommended settings |
 | ![Ingame](https://img.shields.io/badge/Ingame-f9b32f?style=flat-square) | NBA Street V3 | GameCube | ~42 in matches with its recommended settings (~70% speed, a little slow motion); menus 60 |
 | ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Need for Speed: Most Wanted | GameCube | 25–35 in races with its recommended settings (2x, no lines over the videos); cutscenes 13–30 |
 | ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Resident Evil Zero | GameCube | 25 (the European version's normal rate) at full speed with its recommended settings |
