@@ -223,13 +223,14 @@ Everything the app creates sits in **`/data/DolphinPS4/`**:
 
 | Status | Game | System | FPS |
 |---|---|---|---|
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Baten Kaitos: Eternal Wings and the Lost Ocean | GameCube | 30 (its normal rate), full speed with its recommended settings |
 | ![Ingame](https://img.shields.io/badge/Ingame-f9b32f?style=flat-square) | Call of Duty 2: Big Red One | GameCube | 15–20 (its normal rate is 30) |
 | ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Chicken Little | GameCube | 30 (its normal rate); video cutscenes need its recommended settings |
 | ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Crash Bandicoot: The Wrath of Cortex | GameCube | 20–60 |
 | ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Crash Nitro Kart | GameCube | 60 |
 | ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Crash Tag Team Racing | GameCube | 60 |
 | ![Ingame](https://img.shields.io/badge/Ingame-f9b32f?style=flat-square) | Disney's Donald Duck: Goin' Quackers | GameCube | 60 in light areas; heavy areas 30–55 (60–95% speed) with its recommended settings |
-| ![Ingame](https://img.shields.io/badge/Ingame-f9b32f?style=flat-square) | F-Zero GX | GameCube | 13–21 in races with its recommended settings (its normal rate is 60); faster in the next update |
+| ![Ingame](https://img.shields.io/badge/Ingame-f9b32f?style=flat-square) | F-Zero GX | GameCube | ~29 in races with its recommended settings (its normal rate is 60) |
 | ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | FIFA Street 2 | GameCube | ~34 |
 | ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | The Hulk | GameCube | 20–30 at full speed (Dolphin's own patch caps the frame rate: the game has audio and gameplay bugs when it runs uncapped) |
 | ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Killer7 | GameCube | 30 (its normal rate), full speed; froze on older versions without its recommended settings |
