@@ -4562,7 +4562,7 @@ index 51c3fff..07e988f 100644
 +  ps4_add_eboot(dolphin-nogui)
 +endif()
 diff --git a/Source/Core/DolphinNoGUI/MainNoGUI.cpp b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
-index 3bf40ea..fc30fe5 100644
+index 3bf40ea..f6ff708 100644
 --- a/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 +++ b/Source/Core/DolphinNoGUI/MainNoGUI.cpp
 @@ -2,10 +2,17 @@
@@ -4610,7 +4610,7 @@ index 3bf40ea..fc30fe5 100644
  #include "UICommon/CommandLineParse.h"
  #ifdef USE_DISCORD_PRESENCE
  #include "UICommon/DiscordPresence.h"
-@@ -31,6 +50,44 @@
+@@ -31,6 +50,42 @@
  
  static std::unique_ptr<Platform> s_platform;
  
@@ -4622,8 +4622,6 @@ index 3bf40ea..fc30fe5 100644
 +extern "C" int ps4_cpu_thread_core, ps4_gpu_thread_core, ps4_thread_priority;  // Core/Core.cpp
 +extern "C" void ps4_sampler_start();  // DolphinPS4 port/ps4_sampler.cpp
 +extern "C" int ps4_fifo_batch;  // VideoCommon/Fifo.cpp
-+extern "C" int ps4_vk_dynamic_vertex_loader;
-+int ps4_vk_dynamic_vertex_loader = 1;  // VideoBackends/Vulkan/VulkanContext.cpp
 +extern "C" int ps4_fifo_defer;  // VideoCommon/Fifo.cpp
 +extern "C" int ps4_perfmon;     // Core/PowerPC/PowerPC.cpp
 +extern "C" int ps4_gp_fuse;     // Core/PowerPC/Jit64/Jit.cpp
@@ -4655,7 +4653,7 @@ index 3bf40ea..fc30fe5 100644
  static void signal_handler(int)
  {
    constexpr char message[] = "A signal was received. A second signal will force Dolphin to stop.\n";
-@@ -173,6 +230,10 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
+@@ -173,6 +228,10 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
    if (platform_name == "macos" || platform_name.empty())
      return Platform::CreateMacOSPlatform();
  #endif
@@ -4666,7 +4664,7 @@ index 3bf40ea..fc30fe5 100644
  
    if (platform_name == "headless" || platform_name.empty())
      return Platform::CreateHeadlessPlatform();
-@@ -184,8 +245,17 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
+@@ -184,8 +243,17 @@ static std::unique_ptr<Platform> GetPlatform(const optparse::Values& options)
  #define main app_main
  #endif
  
@@ -4685,7 +4683,7 @@ index 3bf40ea..fc30fe5 100644
    const auto parser =
        CommandLineParse::CreateParser(CommandLineParse::ParserOptions::OmitGUIOptions);
    parser->add_option("-p", "--platform")
-@@ -207,6 +277,10 @@ int main(const int argc, char* argv[])
+@@ -207,6 +275,10 @@ int main(const int argc, char* argv[])
  #ifdef __APPLE__
                  ,
                  "macos"
@@ -4696,7 +4694,7 @@ index 3bf40ea..fc30fe5 100644
  #endif
        });
  
-@@ -270,7 +344,337 @@ int main(const int argc, char* argv[])
+@@ -270,7 +342,325 @@ int main(const int argc, char* argv[])
  
    UICommon::SetUserDirectory(user_directory);
    UICommon::Init();
@@ -4825,14 +4823,6 @@ index 3bf40ea..fc30fe5 100644
 +      Config::SetBase(Config::GFX_SHADER_COMPILER_THREADS, threads);
 +      Config::SetBase(Config::GFX_SHADER_PRECOMPILER_THREADS, threads);
 +    }
-+    else if (video != "opengl" && shader_compile == "uber")
-+    {
-+      // shader_compile=uber: ubershaders only. They read the TEV setup from constants instead of
-+      // having it compiled in: TMNT (2007)'s jungle came out blue/purple with specialized shaders on
-+      // PS4 and right with these (game settings center). They cost GPU time.
-+      Config::SetBase(Config::GFX_SHADER_COMPILATION_MODE,
-+                      ShaderCompilationMode::SynchronousUberShaders);
-+    }
 +    else
 +    {
 +      Config::SetBase(Config::GFX_SHADER_COMPILATION_MODE, ShaderCompilationMode::Synchronous);
@@ -4861,10 +4851,6 @@ index 3bf40ea..fc30fe5 100644
 +    // 32 bytes (VideoCommon/Fifo.cpp). Faster for games that send lots of GPU commands (Crash);
 +    // FIFO watermark interrupts are then checked per batch.
 +    ps4_fifo_batch = Platform::GetPS4Option("fifo_batch", "off") == "on";
-+    // vk_dynamic_vertex_loader=off: ubershaders read vertices through the vertex fetch hardware
-+    // like specialized shaders (reading them in the shader made TMNT drop to 1-20 FPS).
-+    ps4_vk_dynamic_vertex_loader =
-+        Platform::GetPS4Option("vk_dynamic_vertex_loader", "on") == "on";
 +    // perfmon=off: ignore the emulated CPU's performance counters (see PowerPC.cpp).
 +    ps4_perfmon = Platform::GetPS4Option("perfmon", "on") == "on";
 +    // jit_gp_fuse=off: the JIT updates the gather pipe pointer after every write again.
@@ -5034,7 +5020,7 @@ index 3bf40ea..fc30fe5 100644
  
    Common::ScopeGuard ui_common_guard([] {
      UICommon::ShutdownControllers();
-@@ -284,6 +688,12 @@ int main(const int argc, char* argv[])
+@@ -284,6 +674,12 @@ int main(const int argc, char* argv[])
    }
  
    auto core_state_changed_hook = Core::AddOnStateChangedCallback([](const Core::State state) {
@@ -5047,7 +5033,7 @@ index 3bf40ea..fc30fe5 100644
      if (state == Core::State::Uninitialized)
        s_platform->Stop();
    });
-@@ -303,6 +713,28 @@ int main(const int argc, char* argv[])
+@@ -303,6 +699,28 @@ int main(const int argc, char* argv[])
  
    DolphinAnalytics::Instance().ReportDolphinStart("nogui");
  
@@ -5277,10 +5263,10 @@ index 0000000..276a9b6
 +}  // namespace PS4Cheats
 diff --git a/Source/Core/DolphinNoGUI/PS4Controls.cpp b/Source/Core/DolphinNoGUI/PS4Controls.cpp
 new file mode 100755
-index 0000000..e9b0ba4
+index 0000000..dc56381
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4Controls.cpp
-@@ -0,0 +1,633 @@
+@@ -0,0 +1,587 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -5356,9 +5342,31 @@ index 0000000..e9b0ba4
 +Nunchuk/Stick/Down = `Left Y+`
 +Nunchuk/Stick/Left = `Left X-`
 +Nunchuk/Stick/Right = `Left X+`
-+Nunchuk/Shake/X = L3
-+Nunchuk/Shake/Y = L3
-+Nunchuk/Shake/Z = L3
++Classic/Buttons/A = Cross
++Classic/Buttons/B = Circle
++Classic/Buttons/X = Square
++Classic/Buttons/Y = Triangle
++Classic/Buttons/ZL = L1
++Classic/Buttons/ZR = R1
++Classic/Buttons/- = L3
++Classic/Buttons/+ = Options
++Classic/Buttons/Home = Touchpad
++Classic/Left Stick/Up = `Left Y-`
++Classic/Left Stick/Down = `Left Y+`
++Classic/Left Stick/Left = `Left X-`
++Classic/Left Stick/Right = `Left X+`
++Classic/Right Stick/Up = `Right Y-`
++Classic/Right Stick/Down = `Right Y+`
++Classic/Right Stick/Left = `Right X-`
++Classic/Right Stick/Right = `Right X+`
++Classic/Triggers/L = L2
++Classic/Triggers/R = R2
++Classic/Triggers/L-Analog = L2
++Classic/Triggers/R-Analog = R2
++Classic/D-Pad/Up = `Pad N`
++Classic/D-Pad/Down = `Pad S`
++Classic/D-Pad/Left = `Pad W`
++Classic/D-Pad/Right = `Pad E`
 +)";
 +
 +const std::vector<Binding> GC_BINDINGS = {
@@ -5397,51 +5405,30 @@ index 0000000..e9b0ba4
 +    {"Nunchuk/Buttons/C", "Nunchuk C", false},
 +    {"Nunchuk/Buttons/Z", "Nunchuk Z", false},
 +    {"Nunchuk/Stick", "Nunchuk Stick", true},
-+    {"Nunchuk/Shake", "Nunchuk Shake", false},
++    {"Classic/Buttons/A", "Classic A", false},
++    {"Classic/Buttons/B", "Classic B", false},
++    {"Classic/Buttons/X", "Classic X", false},
++    {"Classic/Buttons/Y", "Classic Y", false},
++    {"Classic/Buttons/ZL", "Classic ZL", false},
++    {"Classic/Buttons/ZR", "Classic ZR", false},
++    {"Classic/Buttons/-", "Classic -", false},
++    {"Classic/Buttons/+", "Classic +", false},
++    {"Classic/Buttons/Home", "Classic Home", false},
++    {"Classic/Left Stick", "Classic Left Stick", true},
++    {"Classic/Right Stick", "Classic Right Stick", true},
++    {"Classic/Triggers/L", "Classic L", false},
++    {"Classic/Triggers/R", "Classic R", false},
++    {"Classic/Triggers/L-Analog", "Classic L (analog)", false},
++    {"Classic/Triggers/R-Analog", "Classic R (analog)", false},
++    {"Classic/D-Pad", "Classic D-Pad", true},
 +};
 +
 +std::string s_user_dir = "/data/DolphinPS4/User";
-+std::string s_edit_game;  // the menu edits this game's own layout ("": the normal one)
-+
-+// The files Dolphin reads (the normal layout, or a game's while that game runs).
-+std::string LivePath(Device device)
-+{
-+  return s_user_dir + (device == Device::GameCube ? "/Config/GCPadNew.ini" :
-+                                                    "/Config/WiimoteNew.ini");
-+}
-+
-+std::string ProfileDir()
-+{
-+  return s_user_dir + "/Config/PS4Controls";
-+}
-+
-+std::string GamePath(Device device, const std::string& game_id)
-+{
-+  return ProfileDir() + "/" + game_id + (device == Device::GameCube ? "-GCPad.ini" : "-Wiimote.ini");
-+}
-+
-+// The normal layout while a game's own is in place.
-+std::string BackupPath(Device device)
-+{
-+  return ProfileDir() + (device == Device::GameCube ? "/_normal-GCPad.ini" : "/_normal-Wiimote.ini");
-+}
 +
 +std::string Path(Device device)
 +{
-+  return s_edit_game.empty() ? LivePath(device) : GamePath(device, s_edit_game);
-+}
-+
-+bool Exists(const std::string& path)
-+{
-+  struct stat st;
-+  return stat(path.c_str(), &st) == 0;
-+}
-+
-+// Shake groups ("Shake", "Nunchuk/Shake") are three keys with the same input.
-+bool IsShake(const Binding& binding)
-+{
-+  const std::string key = binding.key;
-+  return key == "Shake" || key == "Nunchuk/Shake";
++  return s_user_dir + (device == Device::GameCube ? "/Config/GCPadNew.ini" :
++                                                    "/Config/WiimoteNew.ini");
 +}
 +
 +const char* Section(Device device)
@@ -5549,7 +5536,7 @@ index 0000000..e9b0ba4
 +
 +const char* DeviceName(Device device)
 +{
-+  return device == Device::GameCube ? "GameCube Controller" : "Wii Remote + Nunchuk";
++  return device == Device::GameCube ? "GameCube Controller" : "Wii Remote + Extensions";
 +}
 +
 +void SetUserDirectory(const std::string& user_dir)
@@ -5561,23 +5548,6 @@ index 0000000..e9b0ba4
 +{
 +  mkdir(s_user_dir.c_str(), 0777);
 +  mkdir((s_user_dir + "/Config").c_str(), 0777);
-+  mkdir(ProfileDir().c_str(), 0777);
-+  // Layouts from before the Nunchuk shake input: L3, which nothing else uses in Wii games.
-+  {
-+    Common::IniFile ini;
-+    if (ini.Load(LivePath(Device::Wii)))
-+    {
-+      Common::IniFile::Section* section = ini.GetSection("Wiimote1");
-+      std::string shake;
-+      if (section && !section->Get("Nunchuk/Shake/X", &shake))
-+      {
-+        section->Set("Nunchuk/Shake/X", std::string("L3"));
-+        section->Set("Nunchuk/Shake/Y", std::string("L3"));
-+        section->Set("Nunchuk/Shake/Z", std::string("L3"));
-+        SaveIni(ini, LivePath(Device::Wii));
-+      }
-+    }
-+  }
 +  WriteIfMissing(Path(Device::GameCube), GCPAD_DEFAULTS, "GCPad1");
 +  WriteIfMissing(Path(Device::Wii), WIIMOTE_DEFAULTS, "Wiimote1");
 +  // The GameCube L / R clicks came from the DualShock 4's digital L2 / R2, which switch on early
@@ -5602,6 +5572,39 @@ index 0000000..e9b0ba4
 +    }
 +    if (changed)
 +      SaveIni(ini, Path(Device::GameCube));
++  }
++  // Older installs predate Classic Controller support. If no Classic mapping exists at all,
++  // seed the defaults once while preserving every existing Wii Remote / Nunchuk binding.
++  {
++    Common::IniFile ini;
++    ini.Load(Path(Device::Wii));
++    Common::IniFile::Section* section = ini.GetOrCreateSection(Section(Device::Wii));
++    std::string classic_a;
++    if (!section->Get("Classic/Buttons/A", &classic_a))
++    {
++      constexpr const char* defaults[][2] = {
++          {"Classic/Buttons/A", "Cross"},       {"Classic/Buttons/B", "Circle"},
++          {"Classic/Buttons/X", "Square"},      {"Classic/Buttons/Y", "Triangle"},
++          {"Classic/Buttons/ZL", "L1"},         {"Classic/Buttons/ZR", "R1"},
++          {"Classic/Buttons/-", "L3"},          {"Classic/Buttons/+", "Options"},
++          {"Classic/Buttons/Home", "Touchpad"},
++          {"Classic/Left Stick/Up", "`Left Y-`"},
++          {"Classic/Left Stick/Down", "`Left Y+`"},
++          {"Classic/Left Stick/Left", "`Left X-`"},
++          {"Classic/Left Stick/Right", "`Left X+`"},
++          {"Classic/Right Stick/Up", "`Right Y-`"},
++          {"Classic/Right Stick/Down", "`Right Y+`"},
++          {"Classic/Right Stick/Left", "`Right X-`"},
++          {"Classic/Right Stick/Right", "`Right X+`"},
++          {"Classic/Triggers/L", "L2"},         {"Classic/Triggers/R", "R2"},
++          {"Classic/Triggers/L-Analog", "L2"},  {"Classic/Triggers/R-Analog", "R2"},
++          {"Classic/D-Pad/Up", "`Pad N`"},   {"Classic/D-Pad/Down", "`Pad S`"},
++          {"Classic/D-Pad/Left", "`Pad W`"}, {"Classic/D-Pad/Right", "`Pad E`"},
++      };
++      for (const auto& [key, value] : defaults)
++        section->Set(key, std::string(value));
++      SaveIni(ini, Path(Device::Wii));
++    }
 +  }
 +  SyncPlayers(Device::GameCube);
 +  SyncPlayers(Device::Wii);
@@ -5682,7 +5685,7 @@ index 0000000..e9b0ba4
 +    }
 +    return "Custom";
 +  }
-+  const std::string key = IsShake(binding) ? std::string(binding.key) + "/X" : binding.key;
++  const std::string key = std::string(binding.key) == "Shake" ? "Shake/X" : binding.key;
 +  section->Get(key, &value);
 +  return WithoutMove(value);
 +}
@@ -5733,12 +5736,11 @@ index 0000000..e9b0ba4
 +      section->Set(prefix + "/Right", std::string(choice.right));
 +    }
 +  }
-+  else if (IsShake(binding))
++  else if (std::string(binding.key) == "Shake")
 +  {
-+    const std::string prefix = binding.key;
-+    section->Set(prefix + "/X", expression);
-+    section->Set(prefix + "/Y", expression);
-+    section->Set(prefix + "/Z", expression);
++    section->Set("Shake/X", expression);
++    section->Set("Shake/Y", expression);
++    section->Set("Shake/Z", expression);
 +  }
 +  else
 +  {
@@ -5771,7 +5773,9 @@ index 0000000..e9b0ba4
 +  Common::IniFile ini;
 +  ini.Load(Path(Device::Wii));
 +  Common::IniFile::Section* section = ini.GetOrCreateSection(Section(Device::Wii));
-+  section->Set("Extension", std::string(extension == "none" ? "None" : "Nunchuk"));
++  const char* attachment =
++      extension == "none" ? "None" : extension == "classic" ? "Classic" : "Nunchuk";
++  section->Set("Extension", std::string(attachment));
 +  section->Set("Options/Sideways Wiimote", std::string(sideways ? "True" : "False"));
 +  SaveIni(ini, Path(Device::Wii));
 +  SyncPlayers(Device::Wii);
@@ -5849,82 +5853,18 @@ index 0000000..e9b0ba4
 +    return "`Right Y+`";
 +  return {};
 +}
-+
-+void EditGame(const std::string& game_id)
-+{
-+  s_edit_game = game_id;
-+}
-+
-+bool HasGameProfile(const std::string& game_id)
-+{
-+  return !game_id.empty() &&
-+         (Exists(GamePath(Device::GameCube, game_id)) || Exists(GamePath(Device::Wii, game_id)));
-+}
-+
-+void CreateGameProfile(const std::string& game_id)
-+{
-+  mkdir(ProfileDir().c_str(), 0777);
-+  for (const Device device : {Device::GameCube, Device::Wii})
-+  {
-+    Common::IniFile ini;
-+    ini.Load(LivePath(device));
-+    SaveIni(ini, GamePath(device, game_id));
-+  }
-+}
-+
-+void DeleteGameProfile(const std::string& game_id)
-+{
-+  for (const Device device : {Device::GameCube, Device::Wii})
-+    std::remove(GamePath(device, game_id).c_str());
-+}
-+
-+void RestoreGlobal()
-+{
-+  for (const Device device : {Device::GameCube, Device::Wii})
-+  {
-+    if (Exists(BackupPath(device)))
-+      std::rename(BackupPath(device).c_str(), LivePath(device).c_str());
-+  }
-+}
-+
-+bool UseGameProfile(const std::string& game_id)
-+{
-+  RestoreGlobal();
-+  if (!HasGameProfile(game_id))
-+    return false;
-+  for (const Device device : {Device::GameCube, Device::Wii})
-+  {
-+    Common::IniFile mine;
-+    if (!mine.Load(GamePath(device, game_id)))
-+      continue;
-+    const Common::IniFile::Section* own = mine.GetSection(Section(device));
-+    if (!own)
-+      continue;
-+    // The normal layout aside, then player 1 from the game's layout; players 2-4 follow it.
-+    Common::IniFile live;
-+    live.Load(LivePath(device));
-+    SaveIni(live, BackupPath(device));
-+    live.DeleteSection(Section(device));
-+    Common::IniFile::Section* target = live.GetOrCreateSection(Section(device));
-+    for (const auto& [key, value] : own->GetValues())
-+      target->Set(key, value);
-+    SaveIni(live, LivePath(device));
-+    SyncPlayers(device);
-+  }
-+  return true;
-+}
 +}  // namespace PS4Controls
 diff --git a/Source/Core/DolphinNoGUI/PS4Controls.h b/Source/Core/DolphinNoGUI/PS4Controls.h
 new file mode 100755
-index 0000000..5b671b3
+index 0000000..5a405de
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4Controls.h
-@@ -0,0 +1,77 @@
+@@ -0,0 +1,66 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
 +// PS4 controller mappings: the DualShock 4 as a GameCube controller (User/Config/GCPadNew.ini)
-+// and as a Wii Remote with a Nunchuk (User/Config/WiimoteNew.ini), in Dolphin's own format.
++// and as a Wii Remote with extensions (User/Config/WiimoteNew.ini), in Dolphin's own format.
 +// The XMB remaps them; the defaults are the port's tuned layout.
 +
 +#pragma once
@@ -5968,18 +5908,7 @@ index 0000000..5b671b3
 +// Stick groups: "Left Stick", "Right Stick" or "D-Pad".
 +std::vector<std::string> StickChoices();
 +void ResetToDefault(Device device);
-+
-+// Per-game layouts: User/Config/PS4Controls/<GAME ID>-GCPad.ini / -Wiimote.ini. The menu edits
-+// either the normal layout (game "") or a game's own (EditGame). A game process puts its own
-+// layout in place (UseGameProfile); the normal one waits in a backup and the menu restores it
-+// (RestoreGlobal), so a game's layout never reaches another game.
-+void EditGame(const std::string& game_id);
-+bool HasGameProfile(const std::string& game_id);
-+void CreateGameProfile(const std::string& game_id);  // starts as a copy of the normal layout
-+void DeleteGameProfile(const std::string& game_id);
-+bool UseGameProfile(const std::string& game_id);     // game process; true when it had one
-+void RestoreGlobal();
-+// The Wii Remote's extension ("nunchuk" or "none") and sideways orientation.
++// The Wii Remote's extension ("none", "nunchuk" or "classic") and sideways orientation.
 +void SetWiiAttachment(const std::string& extension, bool sideways);
 +
 +// Settings -> System -> Wii Remote / Motion Controls, before a game starts: per player, the
@@ -6609,10 +6538,10 @@ index 0000000..5157e21
 +}  // namespace PS4Glyphs
 diff --git a/Source/Core/DolphinNoGUI/PS4IngameMenu.cpp b/Source/Core/DolphinNoGUI/PS4IngameMenu.cpp
 new file mode 100755
-index 0000000..6673fb7
+index 0000000..dfea98f
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4IngameMenu.cpp
-@@ -0,0 +1,1087 @@
+@@ -0,0 +1,1107 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -6853,10 +6782,13 @@ index 0000000..6673fb7
 +        rows.push_back({"Load State", slot});
 +        break;
 +      case MAIN_WII_EXTENSION:
++      {
++        const std::string extension = PS4Settings::Get("wii_extension", s_game_id);
 +        rows.push_back({"Wii Extension",
-+                        PS4Settings::Get("wii_extension", s_game_id) == "none" ? "None" :
-+                                                                                 "Nunchuk"});
++                        extension == "none" ? "None" :
++                        extension == "classic" ? "Classic Controller" : "Nunchuk"});
 +        break;
++      }
 +      case MAIN_WII_SIDEWAYS:
 +        rows.push_back({"Sideways Wii Remote",
 +                        PS4Settings::Get("wii_sideways", s_game_id) == "on" ? "On" : "Off"});
@@ -7080,19 +7012,11 @@ index 0000000..6673fb7
 +    return;
 +  const std::string value =
 +      PS4Settings::Step(*setting, PS4Settings::Get(key, s_game_id), direction);
-+  // The game's recommended settings decide this one for this game: a global change wouldn't
-+  // show here (Diagnostics stayed Off after Mario Kart Wii's recommended settings), so the
-+  // game gets its own settings, starting from what it uses now.
-+  const bool hidden = !Custom() && PS4Settings::HasGameValue(key, s_game_id);
-+  if (hidden)
-+    PS4Settings::SetCustom(s_game_id, true);
 +  PS4Settings::Set(key, value, Custom() ? s_game_id : std::string());
 +  if (setting->live)
 +    PS4Settings::ApplyLive(key, value);
 +  else
 +    Toast(std::string(setting->label) + ": next time a game starts");
-+  if (hidden && setting->live)
-+    Toast(std::string(setting->label) + ": saved for this game");
 +  Log("setting " + key + "=" + value + (Custom() ? " (" + s_game_id + ")" : " (global)"));
 +}
 +
@@ -7113,24 +7037,38 @@ index 0000000..6673fb7
 +    s_settings_selected = row;
 +}
 +
-+// Wii games: the Wii Remote's Nunchuk / sideways orientation, changed in the running game (the
-+// game sees the Nunchuk plugged in or out, as on a Wii) and kept for this game.
-+void ToggleWiiRemote(int item)
++// Wii games: the Wii Remote extension / sideways orientation, changed in the running game (the
++// game sees the attachment change exactly as on a Wii) and kept for this game.
++void ToggleWiiRemote(int item, int direction)
 +{
 +  const bool extension_row = item == MAIN_WII_EXTENSION;
 +  const char* key = extension_row ? "wii_extension" : "wii_sideways";
 +  const std::string current = PS4Settings::Get(key, s_game_id);
-+  const std::string value = extension_row ? (current == "none" ? "nunchuk" : "none") :
-+                                            (current == "on" ? "off" : "on");
++  std::string value;
++  if (extension_row)
++  {
++    constexpr const char* extensions[] = {"none", "nunchuk", "classic"};
++    int index = current == "none" ? 0 : current == "classic" ? 2 : 1;
++    const int step = direction < 0 ? -1 : 1;
++    index = (index + step + 3) % 3;
++    value = extensions[index];
++  }
++  else
++  {
++    value = current == "on" ? "off" : "on";
++  }
 +  PS4Settings::Set(key, value, s_game_id);
-+  const bool nunchuk = PS4Settings::Get("wii_extension", s_game_id) != "none";
++  const std::string extension = PS4Settings::Get("wii_extension", s_game_id);
 +  const bool sideways = PS4Settings::Get("wii_sideways", s_game_id) == "on";
 +  {
 +    const auto lock = ControllerEmu::EmulatedController::GetStateLock();
 +    auto* attachments = static_cast<ControllerEmu::Attachments*>(
 +        Wiimote::GetWiimoteGroup(0, WiimoteEmu::WiimoteGroup::Attachments));
-+    attachments->SetSelectedAttachment(nunchuk ? WiimoteEmu::ExtensionNumber::NUNCHUK :
-+                                                 WiimoteEmu::ExtensionNumber::NONE);
++    const auto attachment =
++        extension == "none" ? WiimoteEmu::ExtensionNumber::NONE :
++        extension == "classic" ? WiimoteEmu::ExtensionNumber::CLASSIC :
++                                  WiimoteEmu::ExtensionNumber::NUNCHUK;
++    attachments->SetSelectedAttachment(attachment);
 +    auto* options = Wiimote::GetWiimoteGroup(0, WiimoteEmu::WiimoteGroup::Options);
 +    for (auto& setting : options->numeric_settings)
 +    {
@@ -7138,8 +7076,19 @@ index 0000000..6673fb7
 +        static_cast<ControllerEmu::NumericSetting<bool>*>(setting.get())->SetValue(sideways);
 +    }
 +  }
-+  Toast(extension_row ? (nunchuk ? "Nunchuk plugged in" : "Nunchuk unplugged") :
-+                        (sideways ? "Wii Remote held sideways" : "Wii Remote held upright"));
++  if (extension_row)
++  {
++    if (value == "classic")
++      Toast("Classic Controller connected");
++    else if (value == "nunchuk")
++      Toast("Nunchuk plugged in");
++    else
++      Toast(current == "classic" ? "Classic Controller disconnected" : "Nunchuk unplugged");
++  }
++  else
++  {
++    Toast(sideways ? "Wii Remote held sideways" : "Wii Remote held upright");
++  }
 +  Log(std::string("wii remote: ") + key + "=" + value + " (" + s_game_id + ")");
 +}
 +
@@ -7168,7 +7117,7 @@ index 0000000..6673fb7
 +  {
 +  case MAIN_WII_EXTENSION:
 +  case MAIN_WII_SIDEWAYS:
-+    ToggleWiiRemote(s_main_items[s_main_selected]);
++    ToggleWiiRemote(s_main_items[s_main_selected], 1);
 +    break;
 +  case MAIN_RESUME:
 +    Close(system);
@@ -7650,7 +7599,7 @@ index 0000000..6673fb7
 +        if (item == MAIN_SAVE || item == MAIN_LOAD)
 +          s_slot = (s_slot - 1 + direction + 8) % 8 + 1;
 +        else if (item == MAIN_WII_EXTENSION || item == MAIN_WII_SIDEWAYS)
-+          ToggleWiiRemote(item);
++          ToggleWiiRemote(item, direction);
 +      }
 +      else
 +      {
@@ -8631,10 +8580,10 @@ index 0000000..c539699
 +}  // namespace PS4Net
 diff --git a/Source/Core/DolphinNoGUI/PS4Settings.cpp b/Source/Core/DolphinNoGUI/PS4Settings.cpp
 new file mode 100755
-index 0000000..0597c5e
+index 0000000..1add71f
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4Settings.cpp
-@@ -0,0 +1,571 @@
+@@ -0,0 +1,563 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -8717,10 +8666,7 @@ index 0000000..0597c5e
 +     {{"off", "Off"}, {"on", "On"}}, "off", false,
 +     "Decodes game textures on the GPU instead of the video thread (helps draw-heavy scenes)."},
 +    {"shader_compile", "Shader Compilation", "Graphics",
-+     {{"async", "Asynchronous"},
-+      {"hybrid", "Hybrid Ubershaders"},
-+      {"sync", "Synchronous"},
-+      {"uber", "Exclusive Ubershaders"}},
++     {{"async", "Asynchronous"}, {"hybrid", "Hybrid Ubershaders"}, {"sync", "Synchronous"}},
 +     "async", false,
 +     "Asynchronous: no stutter, objects may appear a moment late. Hybrid Ubershaders: no stutter "
 +     "and nothing missing, costs GPU time. Synchronous: waits for each new shader."},
@@ -8763,9 +8709,11 @@ index 0000000..0597c5e
 +     {{"100", "100"}, {"90", "90"}, {"80", "80"}, {"70", "70"}, {"60", "60"}, {"50", "50"},
 +      {"40", "40"}, {"30", "30"}, {"20", "20"}, {"10", "10"}, {"0", "0"}},
 +     "100", true, "Volume of the games' sound."},
-+    {"wii_extension", "Wii Extension", "System", {{"nunchuk", "Nunchuk"}, {"none", "None"}},
++    {"wii_extension", "Wii Extension", "System",
++     {{"nunchuk", "Nunchuk"}, {"classic", "Classic Controller"}, {"none", "None"}},
 +     "nunchuk", false,
-+     "What is plugged into the Wii Remote. Wii Sports and similar games need None."},
++     "What is plugged into the Wii Remote: Nunchuk, Classic Controller or nothing. "
++     "Wii Sports and similar games need None."},
 +    {"wii_sideways", "Sideways Wii Remote", "System", {{"off", "Off"}, {"on", "On"}}, "off",
 +     false, "For games played with the Wii Remote held sideways (NSMB Wii, Mario Kart Wii)."},
 +    {"motion_controls", "Motion Controls", "System", {{"on", "On"}, {"off", "Off"}}, "on", false,
@@ -9000,12 +8948,6 @@ index 0000000..0597c5e
 +  return values;
 +}
 +
-+bool HasGameValue(const std::string& key, const std::string& game_id)
-+{
-+  std::lock_guard lock(s_mutex);
-+  return !game_id.empty() && s_game_base && !s_game_base(game_id, key).empty();
-+}
-+
 +bool IsCustom(const std::string& game_id)
 +{
 +  std::lock_guard lock(s_mutex);
@@ -9023,10 +8965,9 @@ index 0000000..0597c5e
 +    auto& section = s_sections[game_id];
 +    if (custom && section.size() <= 1)
 +    {
-+      // First time: start from what the game uses now (its recommended settings included; the
-+      // global values alone dropped them).
++      // First time: start from what the game uses now.
 +      for (const Setting& setting : SETTINGS)
-+        section[setting.key] = GetLocked(setting.key, game_id);
++        section[setting.key] = GetLocked(setting.key, {});
 +    }
 +    section["custom"] = custom ? "on" : "off";
 +  }
@@ -9208,10 +9149,10 @@ index 0000000..0597c5e
 +}  // namespace PS4Settings
 diff --git a/Source/Core/DolphinNoGUI/PS4Settings.h b/Source/Core/DolphinNoGUI/PS4Settings.h
 new file mode 100755
-index 0000000..a668b6a
+index 0000000..41d2bb2
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4Settings.h
-@@ -0,0 +1,81 @@
+@@ -0,0 +1,78 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -9271,9 +9212,6 @@ index 0000000..a668b6a
 +std::vector<std::pair<std::string, std::string>> GlobalValues();
 +std::vector<std::pair<std::string, std::string>> GameValues(const std::string& game_id);
 +bool IsCustom(const std::string& game_id);
-+// The game's own value of a setting decides over the global one (the game settings center or
-+// a ps4.ini section sets it for this game): a global change wouldn't show in this game.
-+bool HasGameValue(const std::string& key, const std::string& game_id);
 +// Custom on: the game starts with a copy of the effective global values.
 +void SetCustom(const std::string& game_id, bool custom);
 +
@@ -9705,10 +9643,10 @@ index 0000000..914dbb5
 +}  // namespace PS4Updater
 diff --git a/Source/Core/DolphinNoGUI/PS4XMB.cpp b/Source/Core/DolphinNoGUI/PS4XMB.cpp
 new file mode 100755
-index 0000000..93eca75
+index 0000000..d6800bf
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PS4XMB.cpp
-@@ -0,0 +1,4705 @@
+@@ -0,0 +1,4660 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -10357,7 +10295,7 @@ index 0000000..93eca75
 +  std::string InstalledPackageNote() const;
 +  void ApplySettingOption(int setting, int option);
 +  void OpenSettingsList(const std::string& category, const std::string& game_id);
-+  void OpenControlsList(PS4Controls::Device device, const std::string& game_id = {});
++  void OpenControlsList(PS4Controls::Device device);
 +  void BuildControlRows();
 +  void OpenCheatsList(const Game& game);
 +  void BuildCheatRows();
@@ -10462,7 +10400,6 @@ index 0000000..93eca75
 +
 +  // Controls panel: which controller, and a button capture in progress.
 +  int m_controls_device = -1;  // PS4Controls::Device, or -1
-+  std::string m_controls_game;  // Controls opened from a game (Triangle): its ID, else empty
 +  bool m_capture = false;
 +  bool m_capture_released = false;
 +  float m_capture_time = 0.0f;
@@ -10794,10 +10731,6 @@ index 0000000..93eca75
 +  if (path.empty())
 +  {
 +    rows.push_back({"Places", "", "", true});
-+    // The whole console: its root and /mnt first (USB drives, extended storage, discs...), then
-+    // the usual places when they exist.
-+    rows.push_back({"/", "Console root", "dir:/"});
-+    rows.push_back({"/mnt", "Drives", "dir:/mnt"});
 +    std::vector<std::string> places = {"/data", m_data_dir + "/games"};
 +    for (int i = 0; i < 8; i++)
 +      places.push_back("/mnt/usb" + std::to_string(i));
@@ -10845,12 +10778,10 @@ index 0000000..93eca75
 +    std::sort(folders.begin(), folders.end());
 +    rows.push_back({"Use This Folder", std::to_string(games) + (games == 1 ? " game" : " games"),
 +                    "usedir"});
-+    // ".." climbs up to the console root; from there, back to the places.
-+    std::string parent = std::filesystem::path(path).parent_path().string();
-+    if (parent.empty())
-+      parent = "/";
-+    const bool top = path == "/";
-+    rows.push_back({"..", top ? "Places" : parent, top ? "dir:" : "dir:" + parent});
++    const std::filesystem::path parent = std::filesystem::path(path).parent_path();
++    const bool top = path == "/data" || (path.rfind("/mnt/", 0) == 0 &&
++                                             std::count(path.begin(), path.end(), '/') == 2);
++    rows.push_back({"..", top ? "Places" : "", top ? "dir:" : "dir:" + parent.string()});
 +    if (!readable && ec)
 +    {
 +      rows.push_back({"(this folder can't be opened: " + ec.message() + ")", "", "", true});
@@ -11278,24 +11209,6 @@ index 0000000..93eca75
 +    }
 +    return;
 +  }
-+  if (row.key == "__ctlscope__")
-+  {
-+    // This Game: its own layout, starting from the normal one. All Games: back to the normal.
-+    if (PS4Controls::HasGameProfile(m_controls_game))
-+    {
-+      PS4Controls::DeleteGameProfile(m_controls_game);
-+      PS4Controls::EditGame("");
-+    }
-+    else
-+    {
-+      PS4Controls::CreateGameProfile(m_controls_game);
-+      PS4Controls::EditGame(m_controls_game);
-+    }
-+    Log("controls: " + m_controls_game +
-+        (PS4Controls::HasGameProfile(m_controls_game) ? " own layout" : " normal layout"));
-+    BuildControlRows();
-+    return;
-+  }
 +  if (row.key.rfind("ctl:", 0) == 0 || row.key == "__ctlreset__")
 +  {
 +    const auto device = static_cast<PS4Controls::Device>(m_controls_device);
@@ -11417,14 +11330,12 @@ index 0000000..93eca75
 +  BuildSettingRows();
 +}
 +
-+void Menu::OpenControlsList(PS4Controls::Device device, const std::string& game_id)
++void Menu::OpenControlsList(PS4Controls::Device device)
 +{
 +  m_panel = {};
 +  m_panel.open = true;
 +  m_panel.title = PS4Controls::DeviceName(device);
 +  m_controls_device = static_cast<int>(device);
-+  m_controls_game = game_id;
-+  PS4Controls::EditGame(PS4Controls::HasGameProfile(game_id) ? game_id : "");
 +  BuildControlRows();
 +  m_panel.selected = 0;
 +}
@@ -11434,12 +11345,6 @@ index 0000000..93eca75
 +  const auto device = static_cast<PS4Controls::Device>(m_controls_device);
 +  std::vector<SettingRow> rows;
 +  const auto& bindings = PS4Controls::Bindings(device);
-+  if (!m_controls_game.empty())
-+  {
-+    rows.push_back({"Apply To",
-+                    PS4Controls::HasGameProfile(m_controls_game) ? "This Game" : "All Games",
-+                    "__ctlscope__", false, true});
-+  }
 +  for (size_t i = 0; i < bindings.size(); i++)
 +  {
 +    const std::string value = PS4Controls::Get(device, bindings[i]);
@@ -11638,7 +11543,7 @@ index 0000000..93eca75
 +  const auto device = static_cast<PS4Controls::Device>(m_controls_device);
 +  const std::string& key = m_panel.rows[m_capture_row].key;
 +  const auto& binding = PS4Controls::Bindings(device)[std::atoi(key.c_str() + 4)];
-+  const bool analog = std::string(binding.key).rfind("Triggers/", 0) == 0;
++  const bool analog = std::string(binding.key).find("Triggers/") != std::string::npos;
 +  const std::string expression = PS4Controls::Capture(data, analog);
 +  if (expression.empty())
 +    return;
@@ -11796,8 +11701,6 @@ index 0000000..93eca75
 +      if (m_panel.setting == SET_UPDATE && m_update_state == UpdateState::Downloading)
 +        m_update_cancel = true;
 +      m_controls_device = -1;
-+      m_controls_game.clear();
-+      PS4Controls::EditGame("");  // a game's own layout is only edited while its page is open
 +      m_panel.open = false;
 +      Play("back");
 +      return;
@@ -11920,15 +11823,7 @@ index 0000000..93eca75
 +        Play("confirm");
 +        return;
 +      }
-+      else if (m_panel.title == "Game" && m_panel.options[m_panel.selected] == "Controls")
-+      {
-+        const Item& item = m_items[m_category][m_selected[m_category]];
-+        const Game& game = m_games[item.game];
-+        OpenControlsList(game.wii ? PS4Controls::Device::Wii : PS4Controls::Device::GameCube, game.id);
-+        Play("confirm");
-+        return;
-+      }
-+      else if (m_panel.title == "Game" && m_panel.options[m_panel.selected] == "Riivolution Patches")
++      else if (m_panel.title == "Game" && m_panel.selected == 5)
 +      {
 +        const Item& item = m_items[m_category][m_selected[m_category]];
 +        OpenRiivolutionList(m_games[item.game]);
@@ -12075,7 +11970,6 @@ index 0000000..93eca75
 +      if (m_games[items[selected].game].wii && !m_games[items[selected].game].homebrew &&
 +          !m_games[items[selected].game].wad)
 +        m_panel.options.push_back("Riivolution Patches");
-+      m_panel.options.push_back("Controls");
 +      Play("menu");
 +    }
 +  }
@@ -13783,7 +13677,8 @@ index 0000000..93eca75
 +    else if (key == "tex_hash_once")
 +      continue;
 +    else if (key == "wii_extension")
-+      parts.push_back(value == "none" ? "no Nunchuk" : "Nunchuk");
++      parts.push_back(value == "none" ? "no extension" :
++                      value == "classic" ? "Classic Controller" : "Nunchuk");
 +    else if (key == "wii_sideways")
 +      parts.push_back(value == "on" ? "sideways Wii Remote" : "upright Wii Remote");
 +    else
@@ -14238,8 +14133,6 @@ index 0000000..93eca75
 +  s_log = fopen((m_data_dir + "/xmb.log").c_str(), "w");
 +  File::SetUserPath(D_USER_IDX, m_data_dir + "/User/");
 +  PS4Controls::SetUserDirectory(m_data_dir + "/User");
-+  // The normal layout back in place if a game's own was in use.
-+  PS4Controls::RestoreGlobal();
 +  PS4Controls::WriteDefaultsIfMissing();
 +  int user = 0;
 +  sceUserServiceInitialize(nullptr);
@@ -15120,10 +15013,10 @@ index f4dc8a9..0c37736 100644
  
 diff --git a/Source/Core/DolphinNoGUI/PlatformPS4.cpp b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
 new file mode 100644
-index 0000000..64032bf
+index 0000000..68266a3
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/PlatformPS4.cpp
-@@ -0,0 +1,1772 @@
+@@ -0,0 +1,1786 @@
 +// Copyright 2026 Dolphin Emulator Project
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -16498,14 +16391,34 @@ index 0000000..64032bf
 +
 +// Dolphin's JIT writes the game's code as x86 code into memory mapped read/write/execute and runs
 +// it. GoldHEN allows that; a console whose jailbreak doesn't crashes on the first translated block
-+// (a PS4 Pro report, v03.10: SIGSEGV at the start of the JIT area). port/ps4_runtime.cpp tries
-+// each way of mapping such memory once at start-up (a fault comes back there instead of crashing)
-+// and maps Dolphin's executable memory the first way that worked; the results go to the boot trace.
-+extern "C" int ps4_exec_probe();
++// (a PS4 Pro report, v03.10: SIGSEGV at the start of the JIT area). Tried once at start-up with a
++// tiny function in the same kind of mapping; a fault comes back here instead of crashing.
++static sigjmp_buf s_exec_test_jump;
++static void ExecTestFault(int)
++{
++  siglongjmp(s_exec_test_jump, 1);
++}
 +
 +static bool ExecutableMemoryWorks()
 +{
-+  return ps4_exec_probe() >= 0;
++  constexpr size_t SIZE = 0x4000;
++  void* page = mmap(nullptr, SIZE, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_ANON | MAP_PRIVATE, -1, 0);
++  if (page == MAP_FAILED)
++    return false;
++  static const unsigned char code[] = {0xB8, 0x34, 0x12, 0x00, 0x00, 0xC3};  // mov eax, 0x1234; ret
++  std::memcpy(page, code, sizeof(code));
++  struct sigaction fault = {}, old_segv = {}, old_bus = {};
++  fault.sa_handler = ExecTestFault;
++  sigemptyset(&fault.sa_mask);
++  sigaction(SIGSEGV, &fault, &old_segv);
++  sigaction(SIGBUS, &fault, &old_bus);
++  volatile int result = 0;
++  if (sigsetjmp(s_exec_test_jump, 1) == 0)
++    result = reinterpret_cast<int (*)()>(page)();
++  sigaction(SIGSEGV, &old_segv, nullptr);
++  sigaction(SIGBUS, &old_bus, nullptr);
++  munmap(page, SIZE);
++  return result == 0x1234;
 +}
 +
 +static void StartDownloadedUpdate()
@@ -16793,12 +16706,10 @@ index 0000000..64032bf
 +    }
 +  }
 +  // A Wii game (a Wii disc, a .wad or Wii homebrew)? The Wii settings apply only to those.
-+  std::string controls_game;
 +  for (const LibraryEntry& entry : GameLibrary())
 +  {
 +    if (std::filesystem::path(entry.path) != std::filesystem::path(game))
 +      continue;
-+    controls_game = entry.game_id;
 +    s_wii_game = entry.wad || (entry.homebrew ? entry.wii :
 +                                                !entry.game_id.empty() &&
 +                                                    (entry.game_id[0] == 'R' || entry.game_id[0] == 'S'));
@@ -16806,10 +16717,6 @@ index 0000000..64032bf
 +  }
 +  BootTrace(s_wii_game ? "Wii game: Wii controller settings applied" :
 +                         "GameCube game: Wii settings left alone");
-+  // The game's own controller layout (Triangle on it -> Controls -> This Game), else the normal.
-+  BootTrace(PS4Controls::UseGameProfile(controls_game) ?
-+                ("controls: " + controls_game + "'s own layout").c_str() :
-+                "controls: the normal layout");
 +  // The Wii Remote's attachment and orientation for this game (WiimoteNew.ini, read by Dolphin
 +  // when it starts).
 +  if (s_wii_game)
@@ -21309,7 +21216,7 @@ index 82bf1f2..0fb51d2 100644
  private:
    VkPipeline m_pipeline;
 diff --git a/Source/Core/VideoBackends/Vulkan/VKSwapChain.cpp b/Source/Core/VideoBackends/Vulkan/VKSwapChain.cpp
-index 370e22d..ec8ed63 100644
+index 370e22d..18c06b5 100644
 --- a/Source/Core/VideoBackends/Vulkan/VKSwapChain.cpp
 +++ b/Source/Core/VideoBackends/Vulkan/VKSwapChain.cpp
 @@ -4,14 +4,19 @@
@@ -21622,21 +21529,7 @@ index 370e22d..ec8ed63 100644
    VkResult res = vkAcquireNextImageKHR(g_vulkan_context->GetDevice(), m_swap_chain, UINT64_MAX,
                                         g_command_buffer_mgr->GetCurrentCommandBufferSemaphore(),
                                         VK_NULL_HANDLE, &m_current_swap_chain_image_index);
-@@ -532,6 +776,13 @@ bool SwapChain::SetVSync(bool enabled)
- 
-   // Recreate the swap chain with the new present mode.
-   m_vsync_enabled = enabled;
-+#ifdef __ORBIS__
-+  // PS4: vsync is only the flip mode of the next flips; the video-out buffers stay as they are
-+  // (registering them again failed: "Failed to re-configure swap chain images" after turning
-+  // vsync on in the in-game menu, v03.44).
-+  s_vsync = enabled;
-+  return true;
-+#endif
-   return RecreateSwapChain();
- }
- 
-@@ -612,6 +863,10 @@ bool SwapChain::RecreateSurface(void* native_handle)
+@@ -612,6 +856,10 @@ bool SwapChain::RecreateSurface(void* native_handle)
  
  void SwapChain::DestroySurface()
  {
@@ -21675,21 +21568,10 @@ index 17334db..0d1a712 100644
  
    WindowSystemInfo m_wsi;
 diff --git a/Source/Core/VideoBackends/Vulkan/VulkanContext.cpp b/Source/Core/VideoBackends/Vulkan/VulkanContext.cpp
-index d388300..bfb37b4 100644
+index d388300..a69781a 100644
 --- a/Source/Core/VideoBackends/Vulkan/VulkanContext.cpp
 +++ b/Source/Core/VideoBackends/Vulkan/VulkanContext.cpp
-@@ -15,6 +15,10 @@
- #include "VideoCommon/DriverDetails.h"
- #include "VideoCommon/VideoCommon.h"
- 
-+#ifdef __ORBIS__
-+extern "C" int ps4_vk_dynamic_vertex_loader;  // DolphinNoGUI/MainNoGUI.cpp
-+#endif
-+
- namespace Vulkan
- {
- static constexpr const char* VALIDATION_LAYER_NAME = "VK_LAYER_KHRONOS_validation";
-@@ -344,7 +348,9 @@ bool VulkanContext::SelectInstanceExtensions(std::vector<const char*>* extension
+@@ -344,7 +344,9 @@ bool VulkanContext::SelectInstanceExtensions(std::vector<const char*>* extension
    };
  
    // Common extensions
@@ -21700,7 +21582,7 @@ index d388300..bfb37b4 100644
    {
      return false;
    }
-@@ -377,7 +383,7 @@ bool VulkanContext::SelectInstanceExtensions(std::vector<const char*>* extension
+@@ -377,7 +379,7 @@ bool VulkanContext::SelectInstanceExtensions(std::vector<const char*>* extension
  #endif
  
    AddExtension(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME, false);
@@ -21709,20 +21591,7 @@ index d388300..bfb37b4 100644
    {
      AddExtension(VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME, false);
    }
-@@ -457,6 +463,12 @@ void VulkanContext::PopulateBackendInfo(BackendInfo* backend_info)
-   backend_info->bSupportsSettingObjectNames = false;        // Dependent on features.
-   backend_info->bSupportsPartialMultisampleResolve = true;  // Assumed support.
-   backend_info->bSupportsDynamicVertexLoader = true;        // Assumed support.
-+#ifdef __ORBIS__
-+  // ps4.ini vk_dynamic_vertex_loader=off: ubershaders read vertex data through the vertex fetch
-+  // hardware like specialized shaders do.
-+  if (!ps4_vk_dynamic_vertex_loader)
-+    backend_info->bSupportsDynamicVertexLoader = false;
-+#endif
-   backend_info->bSupportsVSLinePointExpand = true;          // Assumed support.
-   backend_info->bSupportsHDROutput = true;                  // Assumed support.
-   backend_info->bSupportsUnrestrictedDepthRange = false;    // Dependent on features.
-@@ -497,6 +509,14 @@ void VulkanContext::PopulateBackendInfoFeatures(BackendInfo* backend_info, VkPhy
+@@ -497,6 +499,14 @@ void VulkanContext::PopulateBackendInfoFeatures(BackendInfo* backend_info, VkPhy
      backend_info->bSupportsGSInstancing = VK_FALSE;
    }
  
@@ -21737,7 +21606,7 @@ index d388300..bfb37b4 100644
    // Depth clamping implies shaderClipDistance and depthClamp
    backend_info->bSupportsDepthClamp = info.depthClamp && info.shaderClipDistance;
  
-@@ -600,8 +620,10 @@ std::unique_ptr<VulkanContext> VulkanContext::Create(VkInstance instance, VkPhys
+@@ -600,8 +610,10 @@ std::unique_ptr<VulkanContext> VulkanContext::Create(VkInstance instance, VkPhys
        !context->CreateAllocator(vk_api_version))
    {
      // Since we are destroying the instance, we're also responsible for destroying the surface.
@@ -21748,7 +21617,7 @@ index d388300..bfb37b4 100644
  
      return nullptr;
    }
-@@ -716,7 +738,17 @@ bool VulkanContext::CreateDevice(VkSurfaceKHR surface, bool enable_validation_la
+@@ -716,7 +728,17 @@ bool VulkanContext::CreateDevice(VkSurfaceKHR surface, bool enable_validation_la
        }
      }
  
@@ -21766,7 +21635,7 @@ index d388300..bfb37b4 100644
      {
        VkBool32 present_supported;
        VkResult res =
-@@ -785,7 +817,11 @@ bool VulkanContext::CreateDevice(VkSurfaceKHR surface, bool enable_validation_la
+@@ -785,7 +807,11 @@ bool VulkanContext::CreateDevice(VkSurfaceKHR surface, bool enable_validation_la
    }
    device_info.pQueueCreateInfos = queue_infos.data();
  
