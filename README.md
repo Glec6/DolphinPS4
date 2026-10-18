@@ -98,7 +98,7 @@ You bring your own game backups. Nothing copyrighted is bundled: no games, BIOS 
 **You need:** a jailbroken PS4 that runs homebrew packages (developed on a launch-model "fat"
 PS4), an FTP connection to it, and backups of games you own.
 
-1. Grab **`DolphinPS4-v03.33.pkg`** from the [releases page](https://github.com/iHaiDeeZ/DolphinPS4/releases/latest)
+1. Grab the latest **`DolphinPS4-vXX.XX.pkg`** from the [releases page](https://github.com/iHaiDeeZ/DolphinPS4/releases/latest)
    and install it with your package installer.
 2. Put your games in **`/data/DolphinPS4/games/`**. Accepted formats are `.rvz`, `.iso`,
    `.nkit.iso`, `.gcm`, `.gcz`, `.ciso`, `.wia`, `.wbfs` and `.tgc` (discs), `.wad` (WiiWare,
@@ -223,29 +223,47 @@ Everything the app creates sits in **`/data/DolphinPS4/`**:
 
 | Status | Game | System | FPS |
 |---|---|---|---|
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Baten Kaitos: Eternal Wings and the Lost Ocean | GameCube | 30 (its normal rate), full speed with its recommended settings |
 | ![Ingame](https://img.shields.io/badge/Ingame-f9b32f?style=flat-square) | Call of Duty 2: Big Red One | GameCube | 15–20 (its normal rate is 30) |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Chicken Little | GameCube | 30 (its normal rate); video cutscenes need its recommended settings |
 | ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Crash Bandicoot: The Wrath of Cortex | GameCube | 20–60 |
 | ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Crash Nitro Kart | GameCube | 60 |
 | ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Crash Tag Team Racing | GameCube | 60 |
+| ![Ingame](https://img.shields.io/badge/Ingame-f9b32f?style=flat-square) | Disney's Donald Duck: Goin' Quackers | GameCube | 60 in light areas; heavy areas 30–55 (60–95% speed) with its recommended settings |
+| ![Ingame](https://img.shields.io/badge/Ingame-f9b32f?style=flat-square) | F-Zero GX | GameCube | ~29 in races with its recommended settings (its normal rate is 60) |
 | ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | FIFA Street 2 | GameCube | ~34 |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | The Hulk | GameCube | 20–30 at full speed (Dolphin's own patch caps the frame rate: the game has audio and gameplay bugs when it runs uncapped) |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Killer7 | GameCube | 30 (its normal rate), full speed; froze on older versions without its recommended settings |
 | ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | The Legend of Zelda: Twilight Princess | GameCube | 30 (its normal rate) |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Metroid Prime | GameCube | ~48 with its recommended settings (its normal rate is 60) |
 | ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Mortal Kombat: Deadly Alliance | GameCube | 60 |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | NBA Street Vol. 2 | GameCube | 55–60 at full speed; thin lines over the picture without its recommended settings |
+| ![Ingame](https://img.shields.io/badge/Ingame-f9b32f?style=flat-square) | NBA Street V3 | GameCube | ~42 in matches with its recommended settings (~70% speed, a little slow motion); menus 60 |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Need for Speed: Most Wanted | GameCube | 25–35 in races with its recommended settings (2x, no lines over the videos); cutscenes 13–30 |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Resident Evil Zero | GameCube | 25 (the European version's normal rate) at full speed with its recommended settings |
 | ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Resident Evil 4 | GameCube | 30 (its normal rate) |
 | ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Shadow the Hedgehog | GameCube | 30–60 |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Soulcalibur II | GameCube | 35–60 in fights (average ~46), ~96% speed |
 | ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Sonic Adventure DX | GameCube | 60 |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Sonic Gems Collection | GameCube | 60, smooth; Sonic the Fighters ~30 and needs its recommended settings (froze without them) |
 | ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Spider-Man 2 | GameCube | 15–29 (its normal rate is 30) |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Star Fox Adventures | GameCube | 60 in gameplay with its recommended settings; cutscenes 42–52 (voices stutter a little) |
 | ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Super Mario Sunshine | GameCube | 30 (its normal rate) |
 | ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Super Smash Bros. Melee | GameCube | 36–60 |
 | ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Teenage Mutant Ninja Turtles (2003) | GameCube | 50–60 |
 | ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | TMNT (2007, Europe) | GameCube | 25 (the PAL version's normal rate); thin lines in some cutscenes |
 | ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Worms 3D | GameCube | ~55 |
-| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Bully: Scholarship Edition | Wii | 15–30 (its normal rate is 30) |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Bully: Scholarship Edition | Wii | 18–30 with its recommended settings (its normal rate is 30); busy streets and fights ~20–25, no slow motion |
+| ![Ingame](https://img.shields.io/badge/Ingame-f9b32f?style=flat-square) | Call of Duty: Modern Warfare 3 | Wii | 12–25 with its recommended settings (its normal rate is 30); freezes ~45 s into the first level without them |
 | ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Crash of the Titans | Wii | 25–30 with its recommended settings (its normal rate is 30) |
-| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Super Mario Galaxy | Wii | 40–57 |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Mario Kart Wii | Wii | 45–50 in races with its recommended settings (its normal rate is 60) |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Sonic and the Black Knight | Wii | 50–60 with its recommended settings; one heavy scene 25–40 |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Super Mario Galaxy | Wii | 40–60 (average ~56); don't turn on graphics mods: Bloom Removal halved its speed |
 | ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Wii Sports | Wii | ~40 |
 | ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Wii Sports Resort | Wii | ~37 |
 
-A range means the frame rate depends on what's on screen.
+A range means the frame rate depends on what's on screen. *Recommended settings* come from the
+[Game settings center](#game-settings-center) and are applied when you say *Yes* at the game's first start.
 
 **Reported by testers** on the [Discord](https://discord.gg/QwtU8ZaCth):
 
@@ -264,10 +282,11 @@ A range means the frame rate depends on what's on screen.
 | ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Pokémon Colosseum | GameCube | PS4, 13.52 | – | 30 FPS in gameplay and cutscenes (60 in menus), 100% speed |
 | ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Pokémon XD: Gale of Darkness | GameCube | PS4, 13.52 | – | 25–30 FPS, heavier scenes ~20, playable |
 | ![Ingame](https://img.shields.io/badge/Ingame-f9b32f?style=flat-square) | Prince of Persia: Warrior Within | GameCube | PS4, 13.02 | 480p (native) | 15–24 FPS |
+| ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Resident Evil 2 | GameCube | – | – | 30 FPS (reported by a player) |
 | ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Shrek 2 | GameCube | PS4 (original), 9.00 | 720p (2x) | 30 FPS, playable; some drops in cutscenes |
 | ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Shrek: Extra Large | GameCube | – | 480p | 30–60 FPS, some stuttering |
 | ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Sonic Adventure 2: Battle | GameCube | PS4, 13.52 | – | 30–60 FPS (mostly in the 30s), works normally, playable |
-| ![Ingame](https://img.shields.io/badge/Ingame-f9b32f?style=flat-square) | Sonic Gems Collection | GameCube | PS4 Pro, 13.52 | 1080p | Sonic R and Sonic CD run great; Sonic the Fighters crashes at the SEGA screen |
+| ![Ingame](https://img.shields.io/badge/Ingame-f9b32f?style=flat-square) | Sonic Gems Collection | GameCube | PS4 Pro, 13.52 | 1080p | Sonic R and Sonic CD run great; Sonic the Fighters crashed at the SEGA screen (fixed by its recommended settings) |
 | ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Sonic Heroes | GameCube | – | – | 60 FPS |
 | ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Sphinx and the Cursed Mummy | GameCube | PS4 Pro, 6.72 | 1080p (3x), 2x anti-aliasing | 50 FPS with *Speed Features: Compatible* (with Fast: a black screen instead of the THQ logo) |
 | ![Playable](https://img.shields.io/badge/Playable-1ebc61?style=flat-square) | Spider-Man 2 | GameCube | PS4 Slim, 12.52 | 1080p | ~25 FPS, dips to 80% speed, some stutters, no crashes |
@@ -326,6 +345,9 @@ resolution and how it ran.
 
 ## FAQ
 
+The full list is in **[FAQ.md](FAQ.md)**: Wii Menu downloads and DNS blockers, saves, PS Move, crashes
+and more. The most common questions:
+
 **Why does a game slow down in busy scenes?**
 The PS4's CPU is usually the bottleneck, not its GPU. Leave the emulated CPU clock on *Auto*. If
 the frame rate wanders between 45 and 55 and feels choppy, *Frame Rate Limit → Auto (60/30)*
@@ -369,7 +391,7 @@ game and version (**Settings → About**) you used, and attach `/data/DolphinPS4
 - Save states carry over to new versions unless a release says otherwise. A state an update can't load is
   marked "Other Version" in the menu and is never loaded halfway, but in-game saves are the safe place for progress.
   In-game saves are never affected.
-- Netplay, achievements and texture packs aren't supported on the PS4.
+- Netplay and texture packs aren't supported on the PS4. RetroAchievements is (*Settings → RetroAchievements*).
 - Only the original PS4 has been tested so far. PS4 Pro reports are welcome.
 
 ## Thanks
